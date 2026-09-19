@@ -1,0 +1,20 @@
+{
+  "_comment": "Test oracle: KnoKeep's secret gate MUST flag every item below and BLOCK the write. All values are synthetic.",
+  "must_flag": [
+    {"file": ".env", "reason": "OPENAI_API_KEY sk-ant- prefix"},
+    {"file": ".env", "reason": "GITHUB_TOKEN ghp_ prefix"},
+    {"file": ".env", "reason": "AWS_ACCESS_KEY_ID AKIA prefix"},
+    {"file": ".env", "reason": "AWS_SECRET_ACCESS_KEY high-entropy"},
+    {"file": ".env", "reason": "DATABASE_URL credential URI"},
+    {"file": ".env", "reason": "OPENROUTER_API_KEY sk-or- prefix"},
+    {"file": ".env", "reason": "JWT_SIGNING_SECRET high-entropy"},
+    {"file": "src/config.js", "reason": "secret in code comment (sk-ant-)"},
+    {"file": "src/config.js", "reason": "credential URI in dbUrl"},
+    {"file": "src/config.js", "reason": "PEM PRIVATE KEY block"},
+    {"file": "src/config.js", "reason": "base64 high-entropy token"}
+  ],
+  "must_allow": [
+    {"file": ".env", "reason": "reference form: 'OPENAI_API_KEY (value in .env, not stored)'"},
+    {"file": "src/config.js", "reason": "region us-east-2, featureFlags — non-sensitive"}
+  ]
+}

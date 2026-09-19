@@ -1,0 +1,21 @@
+# caches / build
+__pycache__/
+*.pyc
+*.pyo
+
+# KnoKeep runtime telemetry + scratch (never commit)
+.knokeep-eval/
+*.tmp
+_body.md
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# local integration scratch (Knosky wiring is a later milestone)
+.knosky/
+
+# memory stores must never be committed (safety)
+stores/
+*.store/

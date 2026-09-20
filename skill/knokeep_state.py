@@ -13,6 +13,9 @@ ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 def now():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+def _auto_sid():                                              # session-append without --session-id: generate a valid one
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M") + "-" + ("%04d" % (os.getpid() % 10000))
+
 def body_hash(body):
     return hashlib.sha256(body.strip().encode("utf-8")).hexdigest()[:12]
 
@@ -280,6 +283,59 @@ def evaluate(store):
     }
     return sc
 
+def health(store, window_hours=24):
+    """One-shot health verdict: scorecard + independent audit + per-project freshness.
+    Verdict reflects RECENT activity (default 24h): 'attention' (exit 1) if the gate
+    errored in the window or a leak is present now; else 'healthy'. Old, resolved errors
+    age out so the watchdog doesn't stay red forever. Missing gitleaks is a note, not a fail."""
+    sc = evaluate(store)
+    recent_errors = 0
+    ev = os.path.join(os.path.realpath(store), EVENTS_DIR, "events.jsonl")
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=window_hours)
+    if os.path.exists(ev):
+        for ln in open(ev, encoding="utf-8"):
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                r = json.loads(ln)
+                if r.get("decision") == "error":
+                    ts = datetime.datetime.strptime(r.get("ts", ""), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+                    if ts >= cutoff:
+                        recent_errors += 1
+            except Exception:
+                pass
+    leaks = None; scanner = "unavailable"
+    try:                                                    # Layer-2 audit, best-effort
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+        import knokeep_audit
+        a = knokeep_audit.audit(store)
+        leaks = a.get("leaks"); scanner = a.get("scanner")
+    except Exception:
+        pass
+    projects = []
+    try:
+        root = os.path.realpath(store)
+        for name in sorted(os.listdir(root)):
+            base = os.path.join(root, name)
+            statep = os.path.join(base, "system_state.md")
+            if name.startswith(".") or not os.path.exists(statep):
+                continue
+            fm, _ = parse(read(statep))
+            projects.append({"project": name, "revision": fm.get("revision"), "updated": fm.get("updated")})
+    except Exception:
+        pass
+    problems, notes = [], []
+    if recent_errors > 0: problems.append("errors_last_%dh=%d" % (window_hours, recent_errors))
+    if leaks: problems.append("leaks>0")
+    if sc.get("errors", 0) > 0 and recent_errors == 0:
+        notes.append("%d historical error(s) outside the %dh window (resolved)" % (sc.get("errors", 0), window_hours))
+    if leaks is None: notes.append("audit_unavailable (gitleaks not found)")
+    verdict = "healthy" if not problems else "attention"
+    return {"verdict": verdict, "window_hours": window_hours, "recent_errors": recent_errors,
+            "problems": problems, "notes": notes,
+            "scorecard": sc, "audit": {"scanner": scanner, "leaks": leaks}, "projects": projects}
+
 def _bodyfile(path):
     if not path or not os.path.exists(path):
         die(reason="missing --body-file", path=path)         # empty file is allowed; missing is an error
@@ -294,20 +350,22 @@ def _entry(a):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["init", "flush-state", "flush-log", "session-append", "bootstrap", "rollup", "eval"])
+    ap.add_argument("cmd", choices=["init", "flush-state", "flush-log", "session-append", "bootstrap", "rollup", "eval", "health"])
     ap.add_argument("--store", required=True); ap.add_argument("--project")
     ap.add_argument("--session-id"); ap.add_argument("--client", default="cowork")
     ap.add_argument("--body-file"); ap.add_argument("--entry"); ap.add_argument("--entry-file"); ap.add_argument("--expect-hash")
     a = ap.parse_args()
     if a.cmd == "eval":                                     # read-only scorecard, no project needed
         print(json.dumps(evaluate(a.store))); return
+    if a.cmd == "health":                                   # read-only verdict; exit 1 on attention
+        h = health(a.store); print(json.dumps(h, indent=1)); sys.exit(0 if h["verdict"] == "healthy" else 1)
     if not a.project:
         print(json.dumps({"blocked": True, "reason": "--project required"})); sys.exit(2)
     try:
         if a.cmd == "init": result = init(a.store, a.project)
         elif a.cmd == "flush-state": result = flush_state(a.store, a.project, _bodyfile(a.body_file), a.expect_hash)
         elif a.cmd == "flush-log": result = flush_log(a.store, a.project, _bodyfile(a.body_file), a.expect_hash)
-        elif a.cmd == "session-append": result = session_append(a.store, a.project, a.session_id, a.client, _entry(a))
+        elif a.cmd == "session-append": result = session_append(a.store, a.project, a.session_id or _auto_sid(), a.client, _entry(a))
         elif a.cmd == "bootstrap": result = bootstrap(a.store, a.project)
         elif a.cmd == "rollup": result = rollup(a.store, a.project)
     except SystemExit as e:

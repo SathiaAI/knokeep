@@ -45,6 +45,11 @@ check("clean resume counted", sc.get("clean_resumes", 0) >= 1)
 p = subprocess.run([sys.executable, STATE, "eval", "--store", store], capture_output=True, text=True)
 check("eval works without --project", p.returncode == 0 and "events" in json.loads(p.stdout))
 
+# health: one-shot verdict + scorecard (gitleaks optional; verdict must be present)
+p = subprocess.run([sys.executable, STATE, "health", "--store", store], capture_output=True, text=True)
+hj = json.loads(p.stdout)
+check("health returns verdict+scorecard", hj.get("verdict") in ("healthy", "attention") and "scorecard" in hj and "projects" in hj)
+
 shutil.rmtree(store, ignore_errors=True)
 passed = sum(1 for _, c in results if c)
 print(f"\n{passed}/{len(results)} passed")

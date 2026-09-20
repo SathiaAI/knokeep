@@ -22,6 +22,8 @@ def die(**kw):
 
 RESERVED = {"con", "prn", "aux", "nul"} | {f"com{i}" for i in range(1, 10)} | {f"lpt{i}" for i in range(1, 10)}
 def valid_id(v):
+    if not isinstance(v, str):                                # missing/None arg -> clean reject, not a TypeError
+        return False
     if not ID_RE.match(v) or v in (".", "..") or v.startswith(".") or v.endswith("."):
         return False
     return v.split(".")[0].lower() not in RESERVED and v.lower() not in RESERVED

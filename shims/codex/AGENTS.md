@@ -4,7 +4,7 @@ This project uses **KnoKeep** for secret-safe memory that persists across sessio
 
 **On start:** `python <knokeep>/skill/knokeep_state.py bootstrap --store <STORE> --project <PROJECT>` → state the `resume_line` before acting. If the real repo disagrees with stored state, real state wins and you flag it.
 
-**Flush** after each verified milestone and before finishing:
+**Flush** after each verified milestone, **before compaction / when context is getting long**, and before finishing (a resume only recovers what was flushed):
 - `flush-state --body-file <f> --expect-hash <last-hash>` — invariants (Architecture / Paths / Hard Constraints); a stale hash is rejected.
 - `flush-log --body-file <f>` — Completed & Verified / Active State / Next Step.
 - `session-append --session-id <id> --entry "<text>"` — this session's journal (parallel-safe).

@@ -350,14 +350,22 @@ def test_write_rejects_forged_non_gate_object(tmp_path):
 
 
 def test_case_insensitive_collision_refused_when_flagged(tmp_path):
-    """This Linux/ext4 host is case-SENSITIVE, so the real probe in
-    LocalBackend.__init__ will always find `_case_insensitive = False` and
-    the refusal branch is otherwise unreachable here. This test exercises
-    the refusal LOGIC itself by forcing the flag, and does not substitute
-    for running on an actual case-insensitive volume (NTFS/default APFS) —
-    see the module docstring's judgment call #5."""
+    """Exercise the case-collision refusal LOGIC by forcing the flag. This is
+    only meaningful on a genuinely case-SENSITIVE host (e.g. Linux/ext4): there,
+    the underlying filesystem keeps "Notes/foo" and "Notes/Foo" as distinct
+    paths, so the refused colliding-case key is verifiably never created
+    ("Notes/foo" reads back None). On a real case-insensitive volume (NTFS/APFS)
+    "Notes/foo" ALIASES to the existing "Notes/Foo" file, so that assertion
+    could not hold — skip there (the real behavior on such a volume is covered
+    by running the full suite on that OS)."""
+    probe = LocalBackend(tmp_path / "probe-root")
+    real_case_insensitive = probe._case_insensitive
+    probe.close()
+    if real_case_insensitive:
+        pytest.skip("real volume is case-insensitive; distinct-path assertion cannot hold here")
+
     backend = LocalBackend(tmp_path / "store-root")
-    backend._case_insensitive = True  # simulate a case-insensitive volume
+    backend._case_insensitive = True  # simulate a case-insensitive volume on this case-sensitive host
 
     r0 = gate.persist(backend, "Notes/Foo", b"v1", expected_hash=None, doc_type="system_state")
     assert isinstance(r0, OK)
@@ -365,12 +373,7 @@ def test_case_insensitive_collision_refused_when_flagged(tmp_path):
     r1 = gate.persist(backend, "Notes/foo", b"v2", expected_hash=None, doc_type="system_state")
     assert isinstance(r1, ERROR)
     assert r1.kind is ErrorKind.INVALID_ARGUMENT
-    # NOTE: we do NOT assert read("Notes/foo") is None here. On a *real*
-    # case-insensitive volume (NTFS) "Notes/foo" aliases to the existing
-    # "Notes/Foo" file, so the read returns v1; on a case-sensitive host with
-    # the flag merely forced, it would be a distinct absent path. The portable,
-    # meaningful invariant is: the collision was REFUSED (above) and the
-    # original is untouched (below).
+    assert backend.read("Notes/foo") is None  # colliding-case key never created (distinct path on this host)
     assert backend.read("Notes/Foo").body == b"v1"  # original untouched
     backend.close()
 

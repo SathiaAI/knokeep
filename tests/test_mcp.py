@@ -510,6 +510,40 @@ def test_bool_and_container_ids_are_rejected_before_dispatch(mcp_client, bad_id)
     assert read_payload == {"found": False}
 
 
+@pytest.mark.parametrize("bad_id_literal", ["NaN", "Infinity", "-Infinity"])
+def test_non_finite_float_ids_are_rejected_before_dispatch(mcp_client, bad_id_literal):
+    """Python's default `json.loads` accepts the non-standard JSON constants
+    NaN/Infinity/-Infinity as floats, and the default `json.dumps` echoes
+    them back as invalid JSON tokens the client cannot correlate. A
+    non-finite float 'id' must therefore be rejected with INVALID_REQUEST
+    before any method dispatch -- the accompanying tools/call
+    (knokeep_write) must never run/commit (CodeRabbit 4062128227,
+    non-finite follow-up)."""
+    client, _ = mcp_client
+    client.initialize()
+
+    # Emit the non-standard constant on the wire literally, exactly as a
+    # permissive client's json.dumps(allow_nan=True) would.
+    client.proc.stdin.write(
+        '{"jsonrpc": "2.0", "id": '
+        + bad_id_literal
+        + ', "method": "tools/call", "params": {"name": "knokeep_write",'
+        ' "arguments": {"key": "docs/nonfinite-id-should-not-land.txt",'
+        ' "body": "should never be written", "doc_type": "system_state"}}}\n'
+    )
+    client.proc.stdin.flush()
+    resp = client._recv()
+    assert resp.get("id") is None
+    assert "error" in resp
+    assert resp["error"]["code"] == -32600
+
+    # And the write genuinely never landed (handler never ran).
+    read_payload = client.call_tool_payload(
+        "knokeep_read", {"key": "docs/nonfinite-id-should-not-land.txt"}
+    )
+    assert read_payload == {"found": False}
+
+
 def test_initialized_notification_before_initialize_is_ignored(mcp_client):
     """`notifications/initialized` received BEFORE any `initialize` request
     has completed must be rejected/ignored -- it must never set the server's

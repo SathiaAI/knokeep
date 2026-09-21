@@ -10,6 +10,7 @@ description = "test fixtures (synthetic look-alikes) and generated dirs"
 paths = [
   '''tests/.*''',
   '''conformance/.*''',
+  '''fixtures/fake-project/.*''',
   '''\.pytest_cache/.*''',
   '''.*__pycache__/.*''',
   '''\.adversarial-review/.*''',

@@ -161,7 +161,9 @@ def test_reconcile_only_ever_calls_fetch_state_on_a_source():
 
     # Everything else called in reconcile.py: plain dict methods on
     # `sources`/`raw_state`/`values` (items/get/keys/values), str methods
-    # used while building a report-safe value (encode/format), and the
+    # used while building a report-safe value (encode/format), hashlib calls
+    # used ONLY to build a non-exported comparison key for quarantined
+    # values (sha256/hexdigest — never touch a source object), and the
     # local telemetry emitter — none of these touch a source object and
     # none is write-shaped. Only `fetch_state` is ever called on `source`.
     allowed = {
@@ -172,6 +174,8 @@ def test_reconcile_only_ever_calls_fetch_state_on_a_source():
         "values",
         "encode",
         "format",
+        "sha256",
+        "hexdigest",
         "emit_reconcile_event",
         "append",  # list.append on the locally-built `facts` list
     }

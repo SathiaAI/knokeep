@@ -136,9 +136,22 @@ else:
 # Generation header (contract §6; same convention as store/gate.py's
 # `make_generation_header`, re-implemented locally rather than imported so
 # this adapter does not reach into gate.py's private helpers).
+#
+# The digit group is capped at 20 digits ({0,19} after the leading digit) —
+# exactly enough to hold any uint64 value (2**64-1 is 20 digits) — rather
+# than left unbounded (review finding). `gate.persist()` only checks that
+# this header is WELL-FORMED for a non-STATE doc_type; it does not (and
+# cannot, being a stateless per-call function) bound the digit count, so an
+# unbounded regex here would let a body carrying an enormous digit run reach
+# `int(m.group(1))` below. CPython's default `int()`-from-string conversion
+# limit (sys.get_int_max_str_digits(), 4300 by default) would then raise
+# ValueError, escaping write() as an unhandled exception instead of the
+# WriteResult every caller expects. Bounding the regex makes that string
+# always small and cheap to convert, and any value that overflows uint64 is
+# still correctly rejected by the `value > _UINT64_MAX` check just below.
 # ---------------------------------------------------------------------------
 
-_GEN_HEADER_RE = re.compile(rb"^#knokeep-gen:(0|[1-9][0-9]*)\n")
+_GEN_HEADER_RE = re.compile(rb"^#knokeep-gen:(0|[1-9][0-9]{0,19})\n")
 _UINT64_MAX = (1 << 64) - 1
 
 

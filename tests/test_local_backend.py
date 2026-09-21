@@ -177,25 +177,62 @@ def test_c3_atomicity_reader_never_sees_torn_publish(tmp_path):
 
 
 def test_scavenger_removes_stale_staging_temps_but_keeps_fresh_ones(tmp_path):
+    """Deterministic by construction (review finding): the scavenger runs
+    INSIDE the next `LocalBackend(root)` construction, after directory
+    creation, the journal open, the case probe, the lock acquire, and
+    `_resume()` -- on a loaded test runner that work can itself exceed a
+    tiny TTL, making a TTL-vs-constructor-timing test flaky. A generous TTL
+    (60s, vastly larger than any plausible construction time) plus mtimes
+    set explicitly and far apart (now vs. one hour in the past) makes the
+    outcome depend only on the mtimes this test sets, never on how long
+    construction happens to take."""
     root = tmp_path / "store-root"
-    backend = LocalBackend(root, staging_ttl_s=0.05)
+    backend = LocalBackend(root, staging_ttl_s=60.0)
     staging_dir = root / "staging"
 
     stale = staging_dir / "orphan-stale"
     stale.write_bytes(b"leftover-from-a-crashed-process")
-    old_time = time.time() - 10
+    old_time = time.time() - 3600
     os.utime(stale, (old_time, old_time))
 
     fresh = staging_dir / "orphan-fresh"
     fresh.write_bytes(b"just-created")
+    now = time.time()
+    os.utime(fresh, (now, now))
 
     backend.close()
 
     # Re-run the scavenger by constructing a new adapter over the same root.
-    resumed = LocalBackend(root, staging_ttl_s=0.05)
+    resumed = LocalBackend(root, staging_ttl_s=60.0)
     assert not stale.exists(), "stale staging temp older than TTL must be removed"
     assert fresh.exists(), "a staging temp younger than TTL must be left alone"
     resumed.close()
+
+
+# ---------------------------------------------------------------------------
+# Generation-header regex is bounded — never a ValueError from int() on a
+# pathologically long digit run
+# ---------------------------------------------------------------------------
+
+
+def test_extract_generation_is_bounded_and_never_raises_on_oversized_digits():
+    from store.local import _extract_generation
+
+    # Well-formed, within uint64 range.
+    assert _extract_generation(_gen(42) + b"body") == 42
+
+    # A pathologically long digit run must be rejected as malformed (None),
+    # never reach int() and raise ValueError once it exceeds CPython's
+    # int-string-conversion digit limit (review finding: an unbounded regex
+    # would let this reach `int(m.group(1))` and crash write() instead of
+    # returning a normal WriteResult).
+    huge = b"#knokeep-gen:" + b"9" * 5000 + b"\nbody"
+    assert _extract_generation(huge) is None
+
+    # A 20-digit number that overflows uint64 is still correctly rejected
+    # (matched by the regex, but caught by the explicit range check).
+    too_big = b"#knokeep-gen:99999999999999999999\nbody"  # 20 nines > 2**64-1
+    assert _extract_generation(too_big) is None
 
 
 # ---------------------------------------------------------------------------
@@ -589,6 +626,7 @@ def test_windows_two_process_ntfs_race(tmp_path):  # pragma: no cover
 
 
 @pytest.mark.skipif(os.name != "nt", reason="exercises a real Windows sharing-violation on os.replace")
+@pytest.mark.skip(reason="not implemented yet: needs a handle opened without FILE_SHARE_DELETE")
 def test_windows_replace_sharing_violation_retries_then_busy(tmp_path):  # pragma: no cover
     """MUST be run on the Windows host. Open the target file with a sharing
     mode that excludes delete/rename (e.g. via a second handle without

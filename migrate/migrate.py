@@ -31,13 +31,20 @@ CONTRACT §5 REQUIREMENTS, and how each is met below:
 
   2. Scan every source value BEFORE uploading anything.
      -> Implemented as two full, separate passes over the source's key
-        manifest: PASS 1 reads and scans every single source value; if any
-        value fails the scan, migrate() aborts immediately and PASS 2 (the
-        copy loop) never runs at all — so "upload nothing further" is not
-        just "stop after the offending key", it is "nothing was ever
-        uploaded, period", regardless of where in key order the offending
-        key sits. Only after PASS 1 clears every key in full does PASS 2
-        write anything to `target`.
+        manifest: PASS 1 scans every single source KEY NAME *and* reads and
+        scans every single source VALUE; if either fails the scan, migrate()
+        aborts immediately and PASS 2 (the copy loop) never runs at all —
+        so "upload nothing further" is not just "stop after the offending
+        key", it is "nothing was ever uploaded, period", regardless of where
+        in key order the offending key sits. Only after PASS 1 clears every
+        key in full does PASS 2 write anything to `target`. Scanning the key
+        NAME here (not just relying on `gate.persist()`'s own key+body scan
+        in PASS 2) matters because a secret-shaped key later in the manifest
+        would otherwise let earlier keys be uploaded first (review finding).
+        When the offending scan hit is on a KEY NAME (the key itself is what
+        the scanner flagged, not a value stored under it), the abort report
+        never carries that key's raw text — only a non-reversible reference
+        (`_key_ref`) — since the key IS the secret in that case.
 
   3. Copy create-only (expected_hash=None); skip already-correct keys;
      abort (never overwrite) on a genuine divergence.
@@ -150,6 +157,7 @@ JUDGMENT CALLS (see also inline):
 """
 from __future__ import annotations
 
+import hashlib
 import time
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Sequence, Tuple
@@ -160,6 +168,7 @@ from store.types import (
     Blob,
     EXISTS,
     ERROR,
+    ErrorKind,
     OK,
     STALE,
     WriteResult,
@@ -189,6 +198,18 @@ _ROLLBACK_NOTE_ABORTED = (
     "resume from where this attempt stopped (contract §3 idempotent "
     "create-only replay)."
 )
+
+
+def _key_ref(key: str) -> str:
+    """A non-reversible reference to a KEY NAME, for `reason`/`aborted_key`
+    specifically when the key itself (not a value stored under it) is what
+    a secret scanner flagged. Unlike a body-content hit (where the key is
+    just an ordinary, non-secret path segment -- safely reportable verbatim,
+    as every other abort path in this module does), putting this key's raw
+    text in an abort report would disclose the very value that tripped the
+    gate (review finding). Never the reverse of a real key-name secret scan
+    hit's own labels, which already carry no matched text either."""
+    return "sha256:" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 
 class SourceFrozenError(Exception):
@@ -373,6 +394,44 @@ def migrate(
     source_blobs = {}
     keys_scanned = 0
     for key in source_keys:
+        # Scan the KEY NAME itself, not just its body, BEFORE any target
+        # write (review finding: gate.persist() also scans the key, but only
+        # in PASS 2 -- a secret-shaped key sitting later in the manifest
+        # would otherwise let earlier keys be uploaded first). A hit here
+        # means the key ITSELF is the secret, so -- unlike every other abort
+        # path below, which safely names an ordinary key -- neither `reason`
+        # nor `aborted_key` may carry the raw key text; see `_key_ref`.
+        try:
+            key_labels = tuple(scanner(key.encode("utf-8")))
+        except Exception as exc:  # noqa: BLE001 - fail closed, never upload.
+            return _abort(
+                reason=f"secret scanner raised while scanning a source KEY NAME (ref {_key_ref(key)}): {exc!r}",
+                source_key_count=len(source_keys),
+                keys_scanned=keys_scanned,
+                keys_copied=0,
+                keys_already_present=0,
+                keys_verified=0,
+                aborted_key=_key_ref(key),
+                unexpected_target_keys=unexpected_target_keys,
+                started_at=started_at,
+            )
+        if key_labels:
+            return _abort(
+                reason=(
+                    f"secret scan hit on a source KEY NAME (ref {_key_ref(key)}) -- "
+                    "aborting before any upload (nothing was written to target)"
+                ),
+                source_key_count=len(source_keys),
+                keys_scanned=keys_scanned,
+                keys_copied=0,
+                keys_already_present=0,
+                keys_verified=0,
+                aborted_key=_key_ref(key),
+                secret_scan_labels=key_labels,
+                unexpected_target_keys=unexpected_target_keys,
+                started_at=started_at,
+            )
+
         try:
             blob = frozen_source.read(key)
         except Exception as exc:  # noqa: BLE001
@@ -450,20 +509,63 @@ def migrate(
                 target, key, blob.body, expected_hash=None, doc_type=_MIGRATION_DOC_TYPE
             )
         except Exception as exc:  # noqa: BLE001 - e.g. a fault-injected
-            # ConnectionError from a backend simulating a pre-send network
-            # failure. Definitely-not-committed for THIS key; abort here,
-            # leaving every prior key's copy intact and verified.
-            return _abort(
-                reason=f"target write raised for key {key!r}: {exc!r}",
-                source_key_count=len(source_keys),
-                keys_scanned=keys_scanned,
-                keys_copied=keys_copied,
-                keys_already_present=keys_already_present,
-                keys_verified=keys_verified,
-                aborted_key=key,
-                unexpected_target_keys=unexpected_target_keys,
-                started_at=started_at,
+            # ConnectionError from a backend simulating a network failure.
+            # This is NOT necessarily "definitely-not-committed" -- the
+            # underlying adapter may fsync a durability commit before a
+            # later step (e.g. publish) fails, so an exception here can mean
+            # the write actually landed (review finding). Resolve the TRUE
+            # outcome via gate.reconcile() (contract §7's own mechanism for
+            # exactly this OUTCOME-UNKNOWN situation) before treating it as a
+            # hard failure.
+            reconciled = gate.reconcile(
+                target, key, intended_new_hash=blob.version_hash, expected_hash=None
             )
+            if isinstance(reconciled, OK):
+                result = reconciled
+            else:
+                return _abort(
+                    reason=(
+                        f"target write raised for key {key!r}: {exc!r} -- "
+                        f"gate.reconcile() could not confirm the write landed "
+                        f"(resolved as {type(reconciled).__name__}, not OK); "
+                        "aborting rather than assuming either outcome"
+                    ),
+                    source_key_count=len(source_keys),
+                    keys_scanned=keys_scanned,
+                    keys_copied=keys_copied,
+                    keys_already_present=keys_already_present,
+                    keys_verified=keys_verified,
+                    aborted_key=key,
+                    unexpected_target_keys=unexpected_target_keys,
+                    started_at=started_at,
+                )
+
+        if isinstance(result, ERROR) and result.kind is ErrorKind.TIMEOUT_AFTER_COMMIT:
+            # The adapter itself reports OUTCOME-UNKNOWN (an ack was lost
+            # after the write may have already committed, contract §7) --
+            # same treatment as the raised-exception case above: resolve via
+            # gate.reconcile() before giving up on this key.
+            reconciled = gate.reconcile(
+                target, key, intended_new_hash=blob.version_hash, expected_hash=None
+            )
+            if isinstance(reconciled, OK):
+                result = reconciled
+            else:
+                return _abort(
+                    reason=(
+                        f"target write for key {key!r} returned TIMEOUT_AFTER_COMMIT and "
+                        f"gate.reconcile() could not confirm it landed (resolved as "
+                        f"{type(reconciled).__name__}, not OK)"
+                    ),
+                    source_key_count=len(source_keys),
+                    keys_scanned=keys_scanned,
+                    keys_copied=keys_copied,
+                    keys_already_present=keys_already_present,
+                    keys_verified=keys_verified,
+                    aborted_key=key,
+                    unexpected_target_keys=unexpected_target_keys,
+                    started_at=started_at,
+                )
 
         if isinstance(result, OK):
             if key in target_keys_before:

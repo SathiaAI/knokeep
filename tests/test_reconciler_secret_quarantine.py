@@ -109,6 +109,58 @@ def test_planted_secret_never_reaches_the_telemetry_file(tmp_path):
     assert record["has_drift"] is True
 
 
+def test_two_different_quarantined_secrets_do_not_falsely_agree(tmp_path):
+    """Two DIFFERENT secrets that both quarantine to the identical
+    "[secret: <label> quarantined]" placeholder must NOT be reported as
+    agreeing -- that would hide real drift behind a shared label (review
+    finding). Both are the SAME kind of secret (same label) here
+    specifically to prove the fix compares something other than the
+    label/placeholder text."""
+    backend = FakeBackend()
+    r = gate.persist(backend, "next_step", b"ship", expected_hash=None, doc_type="system_state")
+    assert isinstance(r, OK)
+
+    from reconciler.sources import StoreSource
+
+    secret_a = "ghp_" + "A" * 36
+    secret_b = "ghp_" + "B" * 36
+    assert secret_a != secret_b
+
+    class _GitHubWithSecret:
+        def fetch_state(self) -> dict:
+            return {"head": secret_a}
+
+    class _TrackerWithDifferentSecret:
+        def fetch_state(self) -> dict:
+            return {"status": secret_b}
+
+    sources = {
+        "store": StoreSource(backend, keys=["next_step"]),
+        "github": _GitHubWithSecret(),
+        "tracker": _TrackerWithDifferentSecret(),
+    }
+
+    report = reconcile(sources, telemetry_dir=tmp_path)
+    fact = report.fact("next_step")
+    assert fact is not None
+
+    # Both quarantined to the SAME label-only placeholder text...
+    assert fact.values["github"] == fact.values["tracker"]
+    assert "github" in fact.quarantined and "tracker" in fact.quarantined
+
+    # ...but they must NOT be reported as agreeing: they are two different
+    # secrets, and a shared placeholder must never manufacture false
+    # agreement.
+    assert fact.agree is False
+    assert "github" in fact.diverging_sources
+    assert "tracker" in fact.diverging_sources
+
+    # Neither raw secret ever appears anywhere in the report.
+    rendered = _dump_report(report)
+    assert secret_a not in rendered
+    assert secret_b not in rendered
+
+
 def test_secret_scan_itself_never_returns_the_matched_value():
     """Sanity check on the underlying primitive the reconciler relies on
     (store.gate.secret_scan): it must return labels only."""

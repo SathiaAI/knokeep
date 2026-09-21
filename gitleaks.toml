@@ -1,0 +1,17 @@
+# KnoKeep gitleaks config. Product source (store/, reconciler/, mcp/, migrate/)
+# is scanned with the full default ruleset and MUST be clean. Test fixtures use
+# only synthetic secret look-alikes (verified: no real credentials), so tests/
+# and generated dirs are allowlisted to keep CI stable.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "test fixtures (synthetic look-alikes) and generated dirs"
+paths = [
+  '''tests/.*''',
+  '''conformance/.*''',
+  '''fixtures/fake-project/.*''',
+  '''\.pytest_cache/.*''',
+  '''.*__pycache__/.*''',
+  '''\.adversarial-review/.*''',
+]

@@ -468,6 +468,87 @@ def test_tools_call_before_initialized_notification_is_rejected(mcp_client):
     assert ok_payload["status"] == "OK"
 
 
+@pytest.mark.parametrize("bad_id", [True, False, {}, {"a": 1}, [], [1, 2]])
+def test_bool_and_container_ids_are_rejected_before_dispatch(mcp_client, bad_id):
+    """JSON-RPC 2.0 'id' must be a string or number. `bool` is a Python
+    subclass of `int` and must be explicitly rejected rather than silently
+    accepted as a number; `dict`/`list` ids must also be rejected. All of
+    these must fail with INVALID_REQUEST before any method dispatch -- the
+    accompanying tools/call (knokeep_write) must never run/commit
+    (CodeRabbit 4062128227)."""
+    client, _ = mcp_client
+    client.initialize()
+
+    client.proc.stdin.write(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": bad_id,
+                "method": "tools/call",
+                "params": {
+                    "name": "knokeep_write",
+                    "arguments": {
+                        "key": "docs/bad-id-should-not-land.txt",
+                        "body": "should never be written",
+                        "doc_type": "system_state",
+                    },
+                },
+            }
+        )
+        + "\n"
+    )
+    client.proc.stdin.flush()
+    resp = client._recv()
+    assert resp.get("id") is None
+    assert "error" in resp
+    assert resp["error"]["code"] == -32600
+
+    # And the write genuinely never landed (handler never ran).
+    read_payload = client.call_tool_payload(
+        "knokeep_read", {"key": "docs/bad-id-should-not-land.txt"}
+    )
+    assert read_payload == {"found": False}
+
+
+def test_initialized_notification_before_initialize_is_ignored(mcp_client):
+    """`notifications/initialized` received BEFORE any `initialize` request
+    has completed must be rejected/ignored -- it must never set the server's
+    `_initialized` flag on its own (CodeRabbit 4062128236). tools/call must
+    stay rejected afterward, and only a proper initialize -> initialized
+    sequence can complete the handshake."""
+    client, _ = mcp_client
+
+    # Send the completing notification with no prior 'initialize' at all.
+    client.notify("notifications/initialized")
+
+    call_resp = client.request(
+        "tools/call",
+        {
+            "name": "knokeep_write",
+            "arguments": {
+                "key": "docs/initialized-first.txt",
+                "body": "should not be servable",
+                "doc_type": "system_state",
+            },
+        },
+    )
+    assert "error" in call_resp
+    assert call_resp["error"]["code"] == -32600
+
+    # A real initialize() (request + notification, in the right order) still
+    # completes the handshake normally afterward.
+    client.initialize()
+    ok_payload = client.call_tool_payload(
+        "knokeep_write",
+        {
+            "key": "docs/initialized-first.txt",
+            "body": "now this lands",
+            "doc_type": "system_state",
+        },
+    )
+    assert ok_payload["status"] == "OK"
+
+
 def test_write_error_kinds_other_than_secret_blocked_are_also_isError(mcp_client):
     """Not just SECRET_BLOCKED: EVERY failed knokeep_write result
     (status == 'ERROR') must be isError: true, so a client can't mistake a

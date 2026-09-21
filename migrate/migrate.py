@@ -403,9 +403,9 @@ def migrate(
         # nor `aborted_key` may carry the raw key text; see `_key_ref`.
         try:
             key_labels = tuple(scanner(key.encode("utf-8")))
-        except Exception as exc:  # noqa: BLE001 - fail closed, never upload.
+        except Exception:  # noqa: BLE001 - fail closed, never upload.
             return _abort(
-                reason=f"secret scanner raised while scanning a source KEY NAME (ref {_key_ref(key)}): {exc!r}",
+                reason=f"secret scanner raised while scanning a source KEY NAME (ref {_key_ref(key)})",
                 source_key_count=len(source_keys),
                 keys_scanned=keys_scanned,
                 keys_copied=0,

@@ -1,0 +1,25 @@
+{
+  "name": "kno",
+  "description": "The Kno suite — portable, secret-safe AI tooling. Currently ships KnoKeep (cross-tool memory).",
+  "owner": {
+    "name": "ViaKnox",
+    "url": "https://github.com/SathiaAI"
+  },
+  "plugins": [
+    {
+      "name": "knokeep",
+      "source": "./",
+      "displayName": "KnoKeep",
+      "description": "Portable, secret-safe memory that lets any AI coding agent resume exactly where the last session — on any tool — left off. Part of the Kno suite.",
+      "version": "0.1.0",
+      "author": {
+        "name": "ViaKnox"
+      },
+      "homepage": "https://github.com/SathiaAI/knokeep",
+      "repository": "https://github.com/SathiaAI/knokeep",
+      "license": "AGPL-3.0",
+      "keywords": ["memory", "context", "compaction", "handoff", "cowork", "mcp", "portable", "cross-tool"],
+      "category": "productivity"
+    }
+  ]
+}

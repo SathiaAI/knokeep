@@ -68,6 +68,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import math
 import sys
 from typing import Any, Callable, Dict, IO, List, Mapping, Optional, Sequence
 
@@ -521,15 +522,21 @@ class KnoKeepServer:
             return self._error(None, _INVALID_REQUEST, "'id' must not be null")
 
         if has_id and (
-            type(request_id) is bool or not isinstance(request_id, (str, int, float))
+            type(request_id) is bool
+            or not isinstance(request_id, (str, int, float))
+            or (isinstance(request_id, float) and not math.isfinite(request_id))
         ):
             # JSON-RPC 2.0 'id' MUST be a string or number (never null here —
             # that case is handled above). `bool` is a Python subclass of
             # `int`, so it is checked FIRST and explicitly rejected — a
             # `dict`/`list` (or any other type) id is rejected by the
-            # isinstance check. Reject before any method dispatch — an
+            # isinstance check. Python's default `json.loads` accepts the
+            # non-standard constants `NaN`/`Infinity`/`-Infinity` as floats,
+            # and the default `json.dumps` would echo them back as invalid
+            # JSON tokens the client cannot correlate — so a non-finite float
+            # id is rejected here too. Reject before any method dispatch — an
             # invalid-type id must never reach tools/call/knokeep_write
-            # (CodeRabbit 4062128227).
+            # (CodeRabbit 4062128227, non-finite follow-up).
             return self._error(None, _INVALID_REQUEST, "'id' must be a string or number")
 
         if request.get("jsonrpc") != JSONRPC_VERSION:

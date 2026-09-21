@@ -180,7 +180,7 @@ from .types import (
 # does not reach into store/gate.py's internals beyond the public API.)
 # ---------------------------------------------------------------------------
 
-_GEN_HEADER_RE = re.compile(rb"^#knokeep-gen:(0|[1-9][0-9]*)\n")
+_GEN_HEADER_RE = re.compile(rb"^#knokeep-gen:(0|[1-9][0-9]{0,19})\n")
 _UINT64_MAX = (1 << 64) - 1
 
 

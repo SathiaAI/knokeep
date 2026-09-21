@@ -208,7 +208,7 @@ PROBE_PREFIX = ".knokeep/probe/"
 # gate.py's private surface for a convention it also independently documents).
 # ---------------------------------------------------------------------------
 
-_GEN_HEADER_RE = re.compile(rb"^#knokeep-gen:(0|[1-9][0-9]*)\n")
+_GEN_HEADER_RE = re.compile(rb"^#knokeep-gen:(0|[1-9][0-9]{0,19})\n")
 _UINT64_MAX = (1 << 64) - 1
 
 

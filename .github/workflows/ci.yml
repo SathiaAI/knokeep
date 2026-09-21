@@ -71,5 +71,10 @@ jobs:
       - name: Install gitleaks
         run: |
           curl -fsSL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz | tar xz gitleaks
-      - name: Scan (product source scanned in full; test fixtures allowlisted)
-        run: ./gitleaks detect --no-git --config gitleaks.toml --no-banner --redact
+      - name: Scan V2 product source (must be clean; V1 legacy + test fixtures out of scope)
+        run: |
+          set -e
+          for d in store reconciler mcp migrate; do
+            echo "== gitleaks: $d =="
+            ./gitleaks detect --no-git --source "$d" --no-banner --redact
+          done

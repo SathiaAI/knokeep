@@ -478,6 +478,15 @@ class KnoKeepServer:
         # served (review finding: no tool execution before the handshake is
         # actually complete).
         self._initialized = False
+        # Intermediate handshake state (CodeRabbit 4062128236): set True only
+        # by `_handle_initialize`, and consumed (cleared) the moment a
+        # `notifications/initialized` is accepted. If `notifications/
+        # initialized` arrives while this is still False — i.e. before any
+        # `initialize` request completed — it is rejected/ignored and
+        # `_initialized` is never set, closing the ordering gap where a
+        # client could send `initialized` first (or twice) and be treated as
+        # handshake-complete without ever having called `initialize`.
+        self._awaiting_initialized_ack = False
 
     # -- JSON-RPC plumbing --------------------------------------------------
 
@@ -511,6 +520,18 @@ class KnoKeepServer:
             # to nothing).
             return self._error(None, _INVALID_REQUEST, "'id' must not be null")
 
+        if has_id and (
+            type(request_id) is bool or not isinstance(request_id, (str, int, float))
+        ):
+            # JSON-RPC 2.0 'id' MUST be a string or number (never null here —
+            # that case is handled above). `bool` is a Python subclass of
+            # `int`, so it is checked FIRST and explicitly rejected — a
+            # `dict`/`list` (or any other type) id is rejected by the
+            # isinstance check. Reject before any method dispatch — an
+            # invalid-type id must never reach tools/call/knokeep_write
+            # (CodeRabbit 4062128227).
+            return self._error(None, _INVALID_REQUEST, "'id' must be a string or number")
+
         if request.get("jsonrpc") != JSONRPC_VERSION:
             if is_notification:
                 return None
@@ -536,7 +557,14 @@ class KnoKeepServer:
             elif method in ("notifications/initialized", "initialized"):
                 # THE lifecycle-completing signal — only now is the server
                 # allowed to serve tool calls (see __init__'s docstring note).
-                self._initialized = True
+                # Accepted ONLY when an `initialize` request has already run
+                # and left us awaiting this ack (CodeRabbit 4062128236); an
+                # `initialized` received first (or replayed after already
+                # being consumed) is rejected/ignored — `_initialized` is
+                # never set from it.
+                if self._awaiting_initialized_ack:
+                    self._initialized = True
+                    self._awaiting_initialized_ack = False
                 return None
             elif method == "ping":
                 result = {}
@@ -577,6 +605,11 @@ class KnoKeepServer:
     def _handle_initialize(self, params: Mapping[str, Any]) -> Dict[str, Any]:
         # Deliberately does NOT set self._initialized — that happens only
         # when 'notifications/initialized' is later received (see __init__).
+        # It DOES arm the intermediate ack-awaiting flag so that a
+        # subsequent 'notifications/initialized' is accepted (CodeRabbit
+        # 4062128236) — an 'initialized' received without this having run
+        # first is rejected/ignored (see the dispatch branch above).
+        self._awaiting_initialized_ack = True
         return {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {"tools": {}},

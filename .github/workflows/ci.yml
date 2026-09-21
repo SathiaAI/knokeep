@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: ["**"]
+
+permissions:
+  contents: read
+
+# Scoped to the V2 pluggable-storage code (store/, reconciler/, mcp/, migrate/,
+# conformance/, and the V2 tests). V1 (skill/, tools/) has its own Windows-path
+# / live-store assumptions and is not exercised here.
+env:
+  V2_TESTS: >-
+    conformance
+    tests/test_boundary.py
+    tests/test_gate_hardening.py
+    tests/test_local_backend.py
+    tests/test_git_backend.py
+    tests/test_objectstore.py
+    tests/test_postgres.py
+    tests/test_mcp.py
+    tests/test_migration.py
+    tests/test_reconciler_divergence.py
+    tests/test_reconciler_no_write_path.py
+    tests/test_reconciler_secret_quarantine.py
+
+jobs:
+  test-linux:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: knokeep
+          POSTGRES_DB: knokeep_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U knokeep -d knokeep_test"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install pytest pg8000 boto3 "moto[server]" flask flask-cors
+      - name: Run V2 conformance + tests (all four backends)
+        run: python -m pytest $V2_TESTS -q
+
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install pytest pg8000 boto3 "moto[server]" flask flask-cors
+      - name: Run local adapter (msvcrt/NTFS native) + conformance
+        shell: bash
+        run: python -m pytest tests/test_local_backend.py conformance -q
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install gitleaks
+        run: |
+          curl -fsSL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz | tar xz gitleaks
+      - name: Scan (product source scanned in full; test fixtures allowlisted)
+        run: ./gitleaks detect --no-git --config gitleaks.toml --no-banner --redact

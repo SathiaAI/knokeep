@@ -385,6 +385,108 @@ def test_unknown_method_is_method_not_found(mcp_client):
     assert resp["error"]["code"] == -32601
 
 
+def test_explicit_null_id_is_rejected_before_dispatch(mcp_client):
+    """An explicit `"id": null` is NOT a notification (only an ABSENT 'id'
+    is) -- it must be rejected with INVALID_REQUEST before the method (here
+    a tools/call write) is ever dispatched, so the write can never commit."""
+    client, _ = mcp_client
+    client.initialize()
+
+    client.proc.stdin.write(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": None,
+                "method": "tools/call",
+                "params": {
+                    "name": "knokeep_write",
+                    "arguments": {
+                        "key": "docs/null-id-should-not-land.txt",
+                        "body": "should never be written",
+                        "doc_type": "system_state",
+                    },
+                },
+            }
+        )
+        + "\n"
+    )
+    client.proc.stdin.flush()
+    resp = client._recv()
+    assert resp.get("id") is None
+    assert "error" in resp
+    assert resp["error"]["code"] == -32600
+
+    # And the write genuinely never landed.
+    read_payload = client.call_tool_payload(
+        "knokeep_read", {"key": "docs/null-id-should-not-land.txt"}
+    )
+    assert read_payload == {"found": False}
+
+
+def test_tools_call_before_initialized_notification_is_rejected(mcp_client):
+    """`initialize` alone does not complete the MCP lifecycle -- a tools/call
+    that arrives before the client's `notifications/initialized` must be
+    rejected, not served."""
+    client, _ = mcp_client
+    # Send the initialize REQUEST but deliberately skip the
+    # 'notifications/initialized' notification that client.initialize()
+    # would normally send.
+    resp = client.request(
+        "initialize",
+        {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "knokeep-mcp-tests", "version": "0"},
+        },
+    )
+    assert "result" in resp
+
+    call_resp = client.request(
+        "tools/call",
+        {
+            "name": "knokeep_write",
+            "arguments": {
+                "key": "docs/pre-lifecycle.txt",
+                "body": "should not be servable yet",
+                "doc_type": "system_state",
+            },
+        },
+    )
+    assert "error" in call_resp
+    assert call_resp["error"]["code"] == -32600
+
+    # Completing the handshake now makes the same call servable.
+    client.notify("notifications/initialized")
+    ok_payload = client.call_tool_payload(
+        "knokeep_write",
+        {
+            "key": "docs/pre-lifecycle.txt",
+            "body": "now this lands",
+            "doc_type": "system_state",
+        },
+    )
+    assert ok_payload["status"] == "OK"
+
+
+def test_write_error_kinds_other_than_secret_blocked_are_also_isError(mcp_client):
+    """Not just SECRET_BLOCKED: EVERY failed knokeep_write result
+    (status == 'ERROR') must be isError: true, so a client can't mistake a
+    failed/uncertain write for success by only checking the top-level flag.
+    INVALID_ARGUMENT (non-STATE doc_type missing its generation header) is
+    the one ERROR kind reachable end-to-end through this server without
+    fault-injecting a backend."""
+    client, _ = mcp_client
+    client.initialize()
+    result = client.call_tool(
+        "knokeep_write",
+        {"key": "leases/x", "body": "no generation header", "doc_type": "lease"},
+    )
+    assert result["isError"] is True
+    payload = json.loads(result["content"][0]["text"])
+    assert payload["status"] == "ERROR"
+    assert payload["kind"] == "INVALID_ARGUMENT"
+
+
 # ---------------------------------------------------------------------------
 # Optional smoke tests: objectstore (moto) and postgres. Not part of the
 # required local+fake matrix; skipped when the dependency/service is

@@ -25,6 +25,7 @@ CRITICAL SAFETY INVARIANTS (all enforced in this module):
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from typing import Dict, Mapping, Optional, Sequence, Tuple
 
@@ -112,8 +113,8 @@ class DriftReport:
         return None
 
 
-def _report_safe(value: object) -> Tuple[str, Tuple[str, ...]]:
-    """Scan a fetched value and return (safe_text, labels).
+def _report_safe(value: object) -> Tuple[str, Tuple[str, ...], str]:
+    """Scan a fetched value and return (safe_text, labels, compare_key).
 
     CRITICAL SAFETY INVARIANT #2: every string that can enter a DriftReport
     passes through `store.gate.secret_scan` first. Non-str values are
@@ -122,14 +123,26 @@ def _report_safe(value: object) -> Tuple[str, Tuple[str, ...]]:
     labels (store/gate.py) — so quarantining just means: don't put the
     original text in the report at all, put the label-only placeholder
     instead.
+
+    `compare_key` is a SEPARATE, non-exported value used only to decide
+    agreement (review finding: two DIFFERENT secrets both quarantine to the
+    exact same "[secret: <label> quarantined]" placeholder, which would
+    otherwise make `agree=True` hide real drift between them). For a
+    quarantined value, `compare_key` is a sha256 hash of the original raw
+    bytes — distinct per distinct secret, but non-reversible and never
+    itself placed in the report. For a non-quarantined value, `compare_key`
+    IS `safe_text` (already safe to compare/export as-is).
     """
     if value is None:
-        return "", ()
+        return "", (), ""
     text = value if isinstance(value, str) else str(value)
-    labels = tuple(secret_scan(text.encode("utf-8", errors="replace")))
+    raw = text.encode("utf-8", errors="replace")
+    labels = tuple(secret_scan(raw))
     if labels:
-        return _QUARANTINE_TEMPLATE.format(label=labels[0]), labels
-    return text, ()
+        safe_text = _QUARANTINE_TEMPLATE.format(label=labels[0])
+        compare_key = "quarantined:" + hashlib.sha256(raw).hexdigest()
+        return safe_text, labels, compare_key
+    return text, (), text
 
 
 def reconcile(
@@ -171,6 +184,7 @@ def reconcile(
     facts = []
     for spec in fact_specs:
         values: Dict[str, str] = {}
+        compare_values: Dict[str, str] = {}
         quarantined: Dict[str, Tuple[str, ...]] = {}
         missing: list = []
 
@@ -179,12 +193,16 @@ def reconcile(
             if field_name not in source_dict:
                 missing.append(source_name)
                 continue
-            safe_value, labels = _report_safe(source_dict[field_name])
+            safe_value, labels, compare_key = _report_safe(source_dict[field_name])
             values[source_name] = safe_value
+            compare_values[source_name] = compare_key
             if labels:
                 quarantined[source_name] = labels
 
-        distinct_values = set(values.values())
+        # Agreement is decided on the non-exported compare_values (distinct
+        # per distinct secret even when quarantined), never on the exported
+        # placeholder text in `values` (review finding: see _report_safe).
+        distinct_values = set(compare_values.values())
         agree = len(distinct_values) <= 1
         diverging = tuple(sorted(values.keys())) if not agree else ()
         source_of_truth_value = values.get(spec.source_of_truth)

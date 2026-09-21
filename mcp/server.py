@@ -29,12 +29,13 @@ Per the MCP tools/call convention, a tool's return value is wrapped as
 structured payload (WriteResult, DriftReport, Blob, ...) is JSON-encoded
 into that single text block rather than invented as a bespoke top-level
 shape, so every tool result is uniformly `content[0].text` a caller can
-`json.loads()`. `isError` is set to true only for: (1) a Python-level
-exception while executing the tool body (a real fault), and (2) a
-SECRET_BLOCKED write result specifically, so a client cannot mistake "your
-write was refused because it looked like a live secret" for an ordinary
-successful call by only checking `isError`. Every OTHER WriteResult variant
-(OK, STALE, EXISTS, and every other ErrorKind) is reported with
+`json.loads()`. `isError` is set to true for: (1) a Python-level exception
+while executing the tool body (a real fault), and (2) every
+`knokeep_write` result whose `status == "ERROR"` — SECRET_BLOCKED and every
+other ErrorKind (NETWORK, CORRUPTION, SCAN_FAILURE, TIMEOUT_AFTER_COMMIT,
+CONFLICT_UNKNOWN, INVALID_ARGUMENT, ...) alike — so a client cannot mistake
+a failed or outcome-uncertain write for an ordinary successful call by only
+checking `isError`. `OK`, `STALE`, and `EXISTS` are reported with
 `isError: false` and a `status`/`commit_class` field in the payload — these
 are ordinary, expected CAS outcomes per the store contract (§1), not tool
 failures.
@@ -468,6 +469,14 @@ class KnoKeepServer:
     def __init__(self, backend: StoreBackend, *, telemetry_dir: Optional[str] = None) -> None:
         self.backend = backend
         self.telemetry_dir = telemetry_dir
+        # Lifecycle state (MCP spec): `initialize` merely OFFERS a session;
+        # the client only completes the handshake by sending the
+        # `notifications/initialized` notification afterwards. `_initialized`
+        # therefore becomes True ONLY in response to that notification, never
+        # inside `_handle_initialize` itself — a client that calls
+        # `tools/call` (e.g. knokeep_write) in between must be rejected, not
+        # served (review finding: no tool execution before the handshake is
+        # actually complete).
         self._initialized = False
 
     # -- JSON-RPC plumbing --------------------------------------------------
@@ -489,8 +498,18 @@ class KnoKeepServer:
         if not isinstance(request, dict):
             return self._error(None, _INVALID_REQUEST, "Request must be a JSON object")
 
+        has_id = "id" in request
         request_id = request.get("id")
-        is_notification = "id" not in request
+        is_notification = not has_id
+
+        if has_id and request_id is None:
+            # An explicit `"id": null` is NOT a notification — JSON-RPC 2.0
+            # notifications are identified by the ABSENCE of the 'id'
+            # member, not by it being present-and-null. Reject before any
+            # method dispatch (review finding: a write must never be able
+            # to commit ahead of a response the client can correlate back
+            # to nothing).
+            return self._error(None, _INVALID_REQUEST, "'id' must not be null")
 
         if request.get("jsonrpc") != JSONRPC_VERSION:
             if is_notification:
@@ -515,13 +534,24 @@ class KnoKeepServer:
             if method == "initialize":
                 result = self._handle_initialize(params)
             elif method in ("notifications/initialized", "initialized"):
-                # Client's post-initialize notification; nothing to do.
+                # THE lifecycle-completing signal — only now is the server
+                # allowed to serve tool calls (see __init__'s docstring note).
+                self._initialized = True
                 return None
             elif method == "ping":
                 result = {}
             elif method == "tools/list":
                 result = self._handle_tools_list(params)
             elif method == "tools/call":
+                if not self._initialized:
+                    if is_notification:
+                        return None
+                    return self._error(
+                        request_id,
+                        _INVALID_REQUEST,
+                        "tools/call received before initialization completed "
+                        "('notifications/initialized' not yet received)",
+                    )
                 result = self._handle_tools_call(params)
             else:
                 if is_notification:
@@ -534,7 +564,9 @@ class KnoKeepServer:
         except Exception as exc:  # noqa: BLE001 - last-resort protocol boundary
             if is_notification:
                 return None
-            return self._error(request_id, _INTERNAL_ERROR, f"{type(exc).__name__}: {exc}")
+            # Same rule as the tool-body handler above: never str(exc) in an
+            # error response that reaches the wire.
+            return self._error(request_id, _INTERNAL_ERROR, f"{type(exc).__name__}: request failed")
 
         if is_notification:
             return None
@@ -543,7 +575,8 @@ class KnoKeepServer:
     # -- method handlers ------------------------------------------------
 
     def _handle_initialize(self, params: Mapping[str, Any]) -> Dict[str, Any]:
-        self._initialized = True
+        # Deliberately does NOT set self._initialized — that happens only
+        # when 'notifications/initialized' is later received (see __init__).
         return {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {"tools": {}},
@@ -576,19 +609,27 @@ class KnoKeepServer:
         except ToolInputError:
             raise  # bad arguments -> JSON-RPC INVALID_PARAMS, not a tool result
         except Exception as exc:  # noqa: BLE001 - tool-body fault, not a protocol fault
-            # Never echo raw argument values here (contract §5 spirit: error
-            # strings never carry secret-shaped payloads). Exception messages
-            # in this module are always constructed from safe, closed-
-            # vocabulary text (see module docstring); nothing upstream of
-            # this point puts raw body/key bytes into an exception message.
-            payload = {"status": "ERROR", "kind": "TOOL_EXCEPTION", "message": f"{type(exc).__name__}: {exc}"}
+            # NEVER include str(exc) here: `exc` can originate from an
+            # injected backend or reconciler source, and neither contract
+            # guarantees its message excludes keys/paths/connection details/
+            # body content (review finding). Report a closed, generic
+            # message — the exception TYPE name only, never its text.
+            payload = {
+                "status": "ERROR",
+                "kind": "TOOL_EXCEPTION",
+                "message": f"{type(exc).__name__}: tool execution failed",
+            }
             is_error = True
         else:
-            # A blocked write is a real, security-relevant outcome — flag it
-            # as isError so a client can't mistake it for an ordinary OK by
-            # only checking the top-level success flag (see module
-            # docstring "TOOL RESULT SHAPE").
-            if name == "knokeep_write" and payload.get("kind") == "SECRET_BLOCKED":
+            # Every failed/uncertain write result (status == "ERROR" — this
+            # covers SECRET_BLOCKED and every other ErrorKind: NETWORK,
+            # CORRUPTION, SCAN_FAILURE, TIMEOUT_AFTER_COMMIT, CONFLICT_UNKNOWN,
+            # INVALID_ARGUMENT, ...) must be flagged isError so a client can't
+            # mistake it for success by only checking the top-level flag
+            # (review finding — see module docstring "TOOL RESULT SHAPE").
+            # STALE/EXISTS are ordinary CAS outcomes, not "ERROR" status, so
+            # they correctly stay isError: false.
+            if name == "knokeep_write" and payload.get("status") == "ERROR":
                 is_error = True
 
         text = json.dumps(payload, sort_keys=True)

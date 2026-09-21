@@ -20,7 +20,7 @@ from store import gate
 from store.fake import FakeBackend
 from store.local import LocalBackend
 from store.objectstore import ObjectStoreBackend
-from store.types import Blob, OK, sha256_hex
+from store.types import Blob, ERROR, ErrorKind, OK, sha256_hex
 from tests.moto_support import (
     DUMMY_ACCESS_KEY_ID,
     DUMMY_REGION,
@@ -294,6 +294,110 @@ def test_custom_scanner_is_additive_defense_in_depth():
     assert report2.status == "aborted"
     assert report2.aborted_key == "secrets/planted"
     assert list(target2.list("")) == []
+
+
+# ---------------------------------------------------------------------------
+# Secret-shaped KEY NAME (not just a secret-shaped body) -> caught in Pass 1,
+# raw key never disclosed in the report.
+# ---------------------------------------------------------------------------
+
+
+def test_secret_shaped_key_name_aborts_before_any_upload_and_key_is_not_leaked():
+    """A secret-SHAPED KEY NAME must be caught in Pass 1 -- before ANY target
+    write -- exactly like a secret-shaped BODY is. Unlike the body case, the
+    raw key text must never appear in the abort reason or aborted_key: the
+    key itself IS the secret here, so echoing it back would defeat the whole
+    point of catching it."""
+    source = FakeBackend()
+    _put(source, "clean/before", b"ordinary")
+    secret_key = "sk-" + "A" * 40  # synthetic OpenAI-style secret used AS a key name
+    source._store[secret_key] = (b"ordinary value", sha256_hex(b"ordinary value"))
+    _put(source, "zzz/after", b"ordinary")
+
+    target = FakeBackend()
+    report = migrate(source, target)
+
+    assert report.status == "aborted"
+    assert report.secret_scan_labels
+    assert secret_key not in (report.reason or "")
+    assert report.aborted_key != secret_key
+    assert secret_key not in (report.aborted_key or "")
+
+    # Nothing at all was uploaded, including keys that sort before OR after
+    # the secret-shaped key name in the manifest.
+    assert report.keys_copied == 0
+    assert report.keys_already_present == 0
+    assert list(target.list("")) == []
+
+
+# ---------------------------------------------------------------------------
+# OUTCOME-UNKNOWN target writes (raised exception / TIMEOUT_AFTER_COMMIT) are
+# resolved via gate.reconcile() rather than assumed uncommitted.
+# ---------------------------------------------------------------------------
+
+
+class _TimeoutAfterCommitThenLandedBackend(FakeBackend):
+    """Reports ERROR(TIMEOUT_AFTER_COMMIT) for `flaky_key`'s first write
+    while the write ACTUALLY lands underneath -- simulating an ack lost
+    after a real commit. migrate() must resolve this via gate.reconcile()
+    and treat it as OK, not as a hard failure."""
+
+    def __init__(self, flaky_key: str):
+        super().__init__()
+        self._flaky_key = flaky_key
+        self._armed = True
+
+    def write(self, key, body, *, expected_hash):
+        result = super().write(key, body, expected_hash=expected_hash)
+        if self._armed and key.key == self._flaky_key:
+            self._armed = False
+            if isinstance(result, OK):
+                return ERROR(ErrorKind.TIMEOUT_AFTER_COMMIT)
+        return result
+
+
+def test_timeout_after_commit_that_actually_landed_is_reconciled_to_ok():
+    source = FakeBackend()
+    for k in ("a", "b", "c"):
+        _put(source, k, f"v-{k}".encode())
+
+    target = _TimeoutAfterCommitThenLandedBackend(flaky_key="b")
+    report = migrate(source, target)
+
+    assert report.status == "success"
+    assert report.keys_copied == 3
+    assert report.keys_verified == 3
+    assert target.read("b").body == b"v-b"
+
+
+class _TimeoutAfterCommitNeverLandedBackend(FakeBackend):
+    """Reports ERROR(TIMEOUT_AFTER_COMMIT) for `flaky_key` WITHOUT writing
+    anything underneath -- migrate() must resolve this via gate.reconcile(),
+    find nothing there, and abort rather than silently treating it as
+    success."""
+
+    def __init__(self, flaky_key: str):
+        super().__init__()
+        self._flaky_key = flaky_key
+
+    def write(self, key, body, *, expected_hash):
+        if key.key == self._flaky_key:
+            return ERROR(ErrorKind.TIMEOUT_AFTER_COMMIT)
+        return super().write(key, body, expected_hash=expected_hash)
+
+
+def test_timeout_after_commit_that_never_landed_aborts():
+    source = FakeBackend()
+    for k in ("a", "b", "c"):
+        _put(source, k, f"v-{k}".encode())
+
+    target = _TimeoutAfterCommitNeverLandedBackend(flaky_key="b")
+    report = migrate(source, target)
+
+    assert report.status == "aborted"
+    assert report.aborted_key == "b"
+    assert target.read("b") is None
+    assert target.read("a") is not None  # "a" sorts before "b", already copied
 
 
 # ---------------------------------------------------------------------------

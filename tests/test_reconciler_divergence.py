@@ -89,6 +89,50 @@ def test_agreement_across_sources_is_reported_as_no_drift(tmp_path):
     assert fact.source_of_truth_value == "ship"
 
 
+def test_telemetry_sanitizes_non_identifier_source_and_fact_key_names(tmp_path):
+    """Source names and fact_keys are CALLER-DEFINED IDENTIFIERS, never
+    secret-scanned fetched VALUES -- telemetry must not persist an oddly-
+    shaped or sensitive-looking identifier verbatim (review finding)."""
+    import json
+
+    from reconciler.reconcile import FactSpec
+
+    class _Weird:
+        def __init__(self, value: str) -> None:
+            self._value = value
+
+        def fetch_state(self) -> dict:
+            return {"v": self._value}
+
+    weird_source_name = "sk-" + "A" * 40  # secret-SHAPED SOURCE NAME, not a value
+    weird_fact_key = "also not an identifier " + "B" * 40  # spaces -> not identifier-shaped
+
+    sources = {
+        weird_source_name: _Weird("x"),
+        "tracker": _Weird("y"),
+    }
+    fact_specs = (
+        FactSpec(
+            fact_key=weird_fact_key,
+            fields={weird_source_name: "v", "tracker": "v"},
+            source_of_truth="tracker",
+        ),
+    )
+
+    reconcile(sources, fact_specs, telemetry_dir=tmp_path)
+
+    raw = (tmp_path / "reconciler.jsonl").read_text(encoding="utf-8")
+    assert weird_source_name not in raw
+    assert ("B" * 40) not in raw
+    assert "[non-identifier]" in raw
+
+    record = json.loads(raw.strip().splitlines()[0])
+    assert "[non-identifier]" in record["sources_consulted"]
+    assert record["diverging_fact_keys"] == ["[non-identifier]"]
+    # A normal, well-formed identifier alongside the weird ones is untouched.
+    assert "tracker" in record["sources_consulted"]
+
+
 def test_reconcile_emits_a_labels_and_counts_only_telemetry_event(tmp_path):
     """The JSONL telemetry event records counts/labels about the outcome —
     never the fact values themselves."""

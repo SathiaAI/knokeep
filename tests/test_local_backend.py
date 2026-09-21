@@ -328,11 +328,20 @@ def test_case_insensitive_collision_refused_when_flagged(tmp_path):
     r1 = gate.persist(backend, "Notes/foo", b"v2", expected_hash=None, doc_type="system_state")
     assert isinstance(r1, ERROR)
     assert r1.kind is ErrorKind.INVALID_ARGUMENT
-    assert backend.read("Notes/foo") is None  # never created under the colliding case
+    # NOTE: we do NOT assert read("Notes/foo") is None here. On a *real*
+    # case-insensitive volume (NTFS) "Notes/foo" aliases to the existing
+    # "Notes/Foo" file, so the read returns v1; on a case-sensitive host with
+    # the flag merely forced, it would be a distinct absent path. The portable,
+    # meaningful invariant is: the collision was REFUSED (above) and the
+    # original is untouched (below).
     assert backend.read("Notes/Foo").body == b"v1"  # original untouched
     backend.close()
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="NTFS is case-insensitive; this asserts case-SENSITIVE-volume behavior (POSIX/ext4).",
+)
 def test_case_sensitive_volume_allows_distinct_case_keys(tmp_path):
     """Sanity check the flag actually gates the behavior: with the (real,
     default-on-this-host) case-sensitive flag, two keys differing only by
@@ -351,6 +360,11 @@ def test_case_sensitive_volume_allows_distinct_case_keys(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX fcntl external-lock simulation; the Windows BUSY path is covered by "
+    "the two-process race and advisory-lock tests.",
+)
 def test_write_returns_busy_when_cas_lock_held_externally(tmp_path):
     root = tmp_path / "store-root"
     backend = LocalBackend(root, lock_timeout_s=0.1)

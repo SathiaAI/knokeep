@@ -29,12 +29,20 @@ import types
 import pytest
 
 from store import gate
-from store.git_backend import GitBackend
+from store.git_backend import GitBackend, _extract_generation
 from store.types import ERROR, EXISTS, OK, STALE, ErrorKind, sha256_hex
 
 
 def _gen(n: int) -> bytes:
     return gate.make_generation_header(n)
+
+
+def test_extract_generation_rejects_oversized_digit_runs():
+    oversized = b"#knokeep-gen:" + b"9" * 5000 + b"\nbody"
+
+    assert _extract_generation(_gen(42) + b"body") == 42
+    assert _extract_generation(b"#knokeep-gen:" + b"1" * 21 + b"\nbody") is None
+    assert _extract_generation(oversized) is None
 
 
 def _init_bare(path) -> None:

@@ -35,7 +35,7 @@ pg8000 = pytest.importorskip("pg8000")
 
 from store import gate
 from store.backend import BackendBusyError
-from store.postgres import PostgresBackend
+from store.postgres import PostgresBackend, _extract_generation
 from store.types import ERROR, EXISTS, OK, STALE, ErrorKind, sha256_hex
 
 _PG_CONNECT_KWARGS = {
@@ -66,6 +66,14 @@ pytestmark = pytest.mark.skipif(
 
 def _gen(n: int) -> bytes:
     return gate.make_generation_header(n)
+
+
+def test_extract_generation_rejects_oversized_digit_runs():
+    oversized = b"#knokeep-gen:" + b"9" * 5000 + b"\nbody"
+
+    assert _extract_generation(_gen(42) + b"body") == 42
+    assert _extract_generation(b"#knokeep-gen:" + b"1" * 21 + b"\nbody") is None
+    assert _extract_generation(oversized) is None
 
 
 @pytest.fixture

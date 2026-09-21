@@ -229,6 +229,9 @@ def test_extract_generation_is_bounded_and_never_raises_on_oversized_digits():
     huge = b"#knokeep-gen:" + b"9" * 5000 + b"\nbody"
     assert _extract_generation(huge) is None
 
+    # The first value beyond the 20-digit boundary is rejected too.
+    assert _extract_generation(b"#knokeep-gen:" + b"1" * 21 + b"\nbody") is None
+
     # A 20-digit number that overflows uint64 is still correctly rejected
     # (matched by the regex, but caught by the explicit range check).
     too_big = b"#knokeep-gen:99999999999999999999\nbody"  # 20 nines > 2**64-1

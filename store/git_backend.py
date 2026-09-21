@@ -202,7 +202,7 @@ class GitBackendError(Exception):
 # here rather than importing gate's private helper, same rationale as local.py).
 # ---------------------------------------------------------------------------
 
-_GEN_HEADER_RE = re.compile(rb"^#knokeep-gen:(0|[1-9][0-9]*)\n")
+_GEN_HEADER_RE = re.compile(rb"^#knokeep-gen:(0|[1-9][0-9]{0,19})\n")
 _UINT64_MAX = (1 << 64) - 1
 
 

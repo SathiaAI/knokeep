@@ -214,10 +214,9 @@ _PREFIX_PATTERNS: Sequence[tuple] = (
 )
 
 _PEM_RE = re.compile(rb"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
-_CRED_URI_RE = re.compile(rb"[A-Za-z]"),
-    (r+1y0A://[^\s/:@]+:[^\s/:@]+@[^\s/]+")
+_CRED_URI_RE = re.compile(rb"[A-Za-z][A-Za-z0-9+.-]*://[^\s/:@]+:[^\s/:@]+@[^\s/]+")
 
-_TOKEN_RE = re.compile(rb"[A-Za-z (r+_=1y0{32,}")
+_TOKEN_RE = re.compile(rb"[A-Za-z0-9+_=.-]{32,}")
 _ENTROPY_MIN_LEN = 32
 _ENTROPY_THRESHOLD = 3.5
 # DoS bound: never scan more than this many bytes in one call (a state doc is

@@ -414,7 +414,7 @@ class LocalBackend:
 
     def _key_to_relpath(self, key: str) -> Path:
         # Keys reaching write() are gate-validated (charset
-        # [A-Za-z (r._/-], no empty/'.'/'..' segments, no leading/trailing
+        # [A-Za-z0-9._/-], no empty/'.'/'..' segments, no leading/trailing
         # '/'); reads may be called with a caller-supplied string directly,
         # so _safe_join below is the actual defense against traversal.
         return Path(*key.split("/"))

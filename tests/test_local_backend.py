@@ -112,487 +112,473 @@ def test_c8_resume_ignores_torn_tail_journal_record(tmp_path):
     # claiming a huge body that was never actually written.
     import struct
 
-    torn_key = bd, and
-    e:
- knokeep_ckend._journ433, user="ST ", st a a well-formed i_Au    esume/g- ", st ume/g- ", st ume/g- "user="ST ", st a a well-formed i_Au    esume/Q- "10_000_000)"user="ST ", st a a well-formed b": "sya-fewersist("user="ST ", st a a well-f(self) -ser=w r so i("ST ", st a a well-f( or o()
+    torn_key = b"resume/torn-tail"
+    backend._journal_fh.write(struct.pack(">I", len(torn_key)) + torn_key)
+    backend._journal_fh.write(struct.pack(">Q", 10_000_000))
+    backend._journal_fh.write(b"only-a-few-bytes")
+    backend._journal_fh.flush()
+    os.fsync(backend._journal_fh.fileno())
+    backend.close()
+
     resumed = LocalBackend(root)
     blob = resumed.read(key)
+    assert blob is not None and blob.body == b"good-and-durable"
+    assert resumed.read("resume/torn-tail") is None
+    resumed.close()
+
+
+# ---------------------------------------------------------------------------
+# C3 — atomicity under crash: a reader never sees torn bytes at the key
+# ---------------------------------------------------------------------------
+
+
+def test_c3_atomicity_reader_never_sees_torn_publish(tmp_path):
+    """While a publish is only partway staged (bytes written to the staging
+    tempfile but not yet renamed into place), a concurrent reader must see
+    either nothing (create case) or the old, complete blob (update case) —
+    never a partial file at the key path."""
+    root = tmp_path / "store-root"
+    backend = LocalBackend(root)
+
+    key = "atomic/k"
+    r0 = gate.persist(backend, key, b"old-complete-value", expected_hash=None, doc_type="system_state")
+    assert isinstance(r0, OK)
+
+    # Simulate "crash after journal fsync, mid-publish": append the new
+    # record to the journal (durability commit done) and start writing the
+    # staging tempfile, but never call _publish's os.replace.
+    new_body = b"new-value-that-never-gets-published-in-this-test"
+    backend._journal_append(key, new_body)
+    import tempfile as _tempfile
+
+    fd, tmp_name = _tempfile.mkstemp(dir=str(root / "staging"))
+    os.write(fd, new_body[: len(new_body) // 2])  # only half written
+    os.close(fd)
+
+    # The published key must still be exactly the old, complete blob — a
+    # reader is never exposed to the half-written staging file.
+    blob = backend.read(key)
     assert blob is not None
-    assert blob.body () rest"
-    resumed # Simulate a tort None
-    aassert blob i_ckend._journ433, ----------def test_c8_resume_ign-------------------------------------------------------
-# C8 — crash-after-jour3olly-rite dfsynun "lethe
- :he byteto3 (contseuch cwelnd a katnal alon--------------------------------------------------------
+    assert blob.body == b"old-complete-value"
+
+    backend.close()
+
+    # And resume() (a fresh adapter, i.e. "after the crash is noticed")
+    # correctly finishes materializing the durable journal record.
+    resumed = LocalBackend(root)
+    blob2 = resumed.read(key)
+    assert blob2 is not None and blob2.body == new_body
+    resumed.close()
 
 
-def test_c8_resume_rebuilds_key_3_rite dfsy_byteto_clientseucmp_path):
-   ournal record truncWha drairectly tis    ba locwa befwriDURnd a kcket by either efwrime
-
-    empgainsatomib.bken byathetrix):
----ce),er aont["new_ byteto3ectly.e:
-        assnthe rea(n_key_Windo) ating aolbefd, pley_Wssert(OK"
+# ---------------------------------------------------------------------------
+# Startup scavenger — orphaned staging temps older than TTL are removed
+# ---------------------------------------------------------------------------
 
 
-Windo) lly
-    .
-    ia loc noagainsatnal alono-proth / "store-root"
-    backend = LocalBackend(root)
+def test_scavenger_removes_stale_staging_temps_but_keeps_fresh_ones(tmp_path):
+    root = tmp_path / "store-root"
+    backend = LocalBackend(root, staging_ttl_s=0.05)
+    staging_dir = root / "staging"
 
-    key = "resume/torn"
-    good_rite d/kt(backend, "state/x", b"plain cone")
-   olb-d, pley_-   # Ddoc_type="system_state")
+    stale = staging_dir / "orphan-stale"
+    stale.write_bytes(b"leftover-from-a-crashed-process")
+    old_time = time.time() - 10
+    os.utime(stale, (old_time, old_time))
+
+    fresh = staging_dir / "orphan-fresh"
+    fresh.write_bytes(b"just-created")
+
+    backend.close()
+
+    # Re-run the scavenger by constructing a new adapter over the same root.
+    resumed = LocalBackend(root, staging_ttl_s=0.05)
+    assert not stale.exists(), "stale staging temp older than TTL must be removed"
+    assert fresh.exists(), "a staging temp younger than TTL must be left alone"
+    resumed.close()
+
+
+# ---------------------------------------------------------------------------
+# Generation monotonicity (residual from T1) — enforced HERE, not in the gate
+# ---------------------------------------------------------------------------
+
+
+def test_generation_monotonicity_rejects_non_increasing_update(tmp_path):
+    backend = LocalBackend(tmp_path / "store-root")
+    key = "lease/holder"
+
+    r0 = gate.persist(backend, key, _gen(1) + b"leaseholder=alice", expected_hash=None, doc_type="lease")
     assert isinstance(r0, OK)
 
-    before = backend._clieling record"nto Loc joured mid-a so i, happrectly  asss neveal anew_clielippend (to
-    root = t(rnal + fsync)
-    dself.) re
-    kcket rea itself,# efwrime  empgain, atomic pubift rth):
-   tivesser---ce.
-    .
-wable-bytes.
-w-   # -y wr-ts()
+    # A same-or-lower generation under a MATCHING hash-CAS must be rejected
+    # even though the plain hash-CAS check alone would have allowed it.
+    r_same_gen = gate.persist(
+        backend, key, _gen(1) + b"leaseholder=bob",
+        expected_hash=r0.new_hash, doc_type="lease",
+    )
+    assert isinstance(r_same_gen, STALE)
 
-by_d
-    resum-irn4his-e()
+    r_lower_gen = gate.persist(
+        backend, key, _gen(0) + b"leaseholder=bob",
+        expected_hash=r0.new_hash, doc_type="lease",
+    )
+    assert isinstance(r_lower_gen, STALE)
 
+    # The store must be unchanged by either rejected attempt.
+    assert backend.read(key).body == _gen(1) + b"leaseholder=alice"
 
-def d(key, b"good-and-durable")
- .
-wable-assert client empgainsten_ empgainall_toodnd_nam   if b_ empgain.mkt isp(dir=       ackend wrime") -ser=w rormed fd
- .
-wable-[:# lowercat only// 2]esume   bahalfkcket by-ser=w rresumefd)ue itself mupresent bu  goectly."""
- inux al via g aolbefd, pley_Wssertlly-r_clielipp by storic pubc_tly. sto
-    half-cket by efwrime gain.ad(key)
-    ly/does/not/es not None
-    assert blob.body == b"v2-latest"
-    resumedolb-d, pley_-   # D
-    resumed = LocalBackendot havs the key(aer testroot an, i.e.d_r jourING the
-   blob.icsp
-
-    d#t = tmp_pant.cent sT one, not  rea itred, andted mid-append .ckend(root)
-    blob = resumed.read(key)
- 2   assert blob is not None
-    asser2t blob.body () rest"
-2    resumercat on-def test_c8_resume_ign-------------------------------------------------------
-# C8 — crash-after-jouS    n't cavimiourlly-orphan. stdwrime  emps _gene__futuTTLpostgert v----------------------------------------------------------
+    # A strictly-greater generation is accepted.
+    r_higher_gen = gate.persist(
+        backend, key, _gen(2) + b"leaseholder=bob",
+        expected_hash=r0.new_hash, doc_type="lease",
+    )
+    assert isinstance(r_higher_gen, OK)
+    assert backend.read(key).body == _gen(2) + b"leaseholder=bob"
+    backend.close()
 
 
-def test_write_rejects_raw_byte cavimiou_ert v-stale(mctdwrime_ emps_ato_ )
- s_r tes_dy sournal record trre-root"
-    backend = LocalBackend(root)
-
-    key = "resume/t, tdwrime_ tl_s=0.0rocess.tdwrime_dirsume" / "tod wrime"
-cess.tdwpaylotdwrime_dirs sourphan-tdwpa"cess.tdwpa-simulating-a-tleft ass-."""ya-the
- um-mport t
-
-    d_ge_ort oot"rt ."rt     "10-ser=w ru"rt  tdwpa, (_ge_ort ,d_ge_ort )call_too testlotdwrime_dirs sourphan-o tes"ll_too tes-simulating-a-ting -n_key_etattr(baesumed = LocalBackendotR     ther ecavimiour  updai_Au  as neverc root and assert
-    resume.ckend(root)
-    blob = resumed.r, tdwrime_ tl_s=0.0rocess.ta" / "resutdwpa-= LocalB
-
-defwpaytdwrime  emp _gene__futuTTLp   everyert v--rce_of_truth_v tes-= LocalB
-
-daytdwrime  emp youmiour_futuTTLp   everylefttmp_pa
-
-def test_c8_resume_ign-------------------------------------------------------
-# C8 — crash-after-jouG, "doc_typl writes stil(notonicit."""
-T1k's in/"
-    d HERE,load)
+# ---------------------------------------------------------------------------
+# Adapter accepts only ScannedBody/ScannedKey — raw bytes -> TypeError
+# ---------------------------------------------------------------------------
 
 
-rt
- d imp-------------------------------------------------------
+def test_write_rejects_raw_bytes_before_any_io(tmp_path):
+    backend = LocalBackend(tmp_path / "store-root")
+    with pytest.raises(TypeError):
+        backend.write("plain-str-key", b"plain-bytes-body", expected_hash=None)  # type: ignore[arg-type]
+    assert backend.read("plain-str-key") is None
+    assert list(backend.list("")) == []
+    backend.close()
 
 
-def test_write_rejects_raw_byte
-# --------l writes stirobe():und(b_inn_keted_bOK"
+class _CaptureBackend:
+    """A stand-in `backend` for gate.persist() that just captures the
+    gate-issued ScannedKey/ScannedBody instead of doing any I/O, so a test
+    can obtain a legitimately-issued pair and then tamper with it."""
+
+    def __init__(self) -> None:
+        self.captured = None
+
+    def write(self, key, body, *, expected_hash):
+        self.captured = (key, body)
+        return OK("0" * 64)
 
 
-ournal record tr(root)
+def test_scanned_body_is_immutable_after_construction(tmp_path):
+    """Hardening: ScannedKey/ScannedBody are now frozen after construction —
+    a would-be tamper (e.g. rewriting `_body` post-issuance to smuggle a
+    different payload past the marker) must raise TypeError immediately,
+    rather than silently succeeding and leaving a stale-but-matching marker
+    for the adapter to (previously) reject at write() time."""
+    capture = _CaptureBackend()
+    r = gate.persist(capture, "k", b"hello", expected_hash=None, doc_type="system_state")
+    assert isinstance(r, OK)
+    key_obj, body_obj = capture.captured
 
-    key = "resu"
-    backend = LocalBaod"
-    backeert p/h_gene"
-cess.end, "state/x", b"plain cone")
- 
-    1, stbeert ph_gene=notc Ddoc_type="system_state")
-    assert pae(r0, OK)
+    with pytest.raises(TypeError):
+        body_obj._body = b"tampered-after-the-fact"
+    with pytest.raises(TypeError):
+        key_obj._key = "tampered"
+    with pytest.raises(TypeError):
+        del body_obj._body
 
-    before = backend._clieliA    r-or-6
-
-  e", "doc_typun "lea MATCHpendyste-t, l   everyergate.persist(c p
-
-rtt() (rt
- r_nondyste-t, l
-
-
-detmp_pabject
-p  reaft 
-
- ver .ckend(_   r
-      b, key, b"real-providerlain cone")
- 
-    1, stbeert ph_gene=bob "smoke/posash, doc_type="system_state")
-    assert paft_payload["has_dri  before = b_   r
-            ckend(_6
-
-  
-      b, key, b"real-providerlain cone")
- 
-    0, stbeert ph_gene=bob "smoke/posash, doc_type="system_state")
-    assert paft_payload["has_dri  before = b_6
-
-  
-            ckendelf musstore   everyuncfutriDU  u    assergate.p h=r0.nesError"] is Tly/does/not/es no    resum
-    1, stbeert ph_gene=notc D._clieliA  trip_pa-g_key_ e", "doc_typual et_id client.c_high  
-      b, key, b"real-providerlain cone")
- 
-    2, stbeert ph_gene=bob "smoke/posash, doc_type="system_state")
-    assert paft_payload["has_dri  before = b_high  
-   rsist(b, k"] is Tly/does/not/es no    resum
-    2, stbeert ph_gene=bob tr(baesumed = LocalBacn-------------------------------------------------------
-# C8 — crash-after-jouAoot and et_ids    baSblisedB  r/SblisedKebackenrawlnd a k-> Tyass
-   p-------------------------------------------------------
+    # Untampered, the legitimately-issued pair still writes fine.
+    backend = LocalBackend(tmp_path / "store-root")
+    result = backend.write(key_obj, body_obj, expected_hash=None)
+    assert isinstance(result, OK)
+    assert backend.read("k").body == b"hello"
+    backend.close()
 
 
-def test_write_rejects_raw_bytep_cliente():un # Aent):
-  with pyteioournal record tr(root)
+def test_write_rejects_forged_non_gate_object(tmp_path):
+    """The adapter must accept ONLY genuine gate-issued ScannedKey/ScannedBody
+    instances — never a look-alike stand-in object with matching attribute
+    names but no valid gate marker (isinstance check, checked before any
+    I/O, per contract §1/§5)."""
+    forged_key = types.SimpleNamespace(key="k")
+    forged_body = types.SimpleNamespace(body=b"hello")
 
-    key = "resu"
-    backend = LocalBaod"
-  ectStoreBackendErroTyass
-   d("anything")
+    backend = LocalBackend(tmp_path / "store-root")
+    with pytest.raises(TypeError):
+        backend.write(forged_key, forged_body, expected_hash=None)
+    assert backend.read("k") is None
+    assert gate.verify(forged_key) is False
+    assert gate.verify(forged_body) is False
+    backend.close()
 
 
-deformed "r_non-tdrMY_SECtber_non-ent):ystem_stc_type="system_staesume   a:ything [arg-   a](b, k"] is Tly/does/not/e"r_non-tdrMY_SE----------def = 64  # , b"plain c. , b""") esum[]tr(baesumed = LocalBacn""A mi_Cot upoint=_REord truncatforem-ir `esumed `ulatie door) except y wriing 
-# - uposa itself,e do-is exa SblisedKeb/SblisedB  r befoytesofe")as ne
-    pble) imulatself,bli obtnondaylegiortd int-is exa pairn residp
+# ---------------------------------------------------------------------------
+# Case-insensitive-volume collision refusal
+# ---------------------------------------------------------------------------
 
-ram alsectStit(self, args: List[str], *, f._send({"jsonrpc": "2.0# - upod    self, args: Lormed iurablcommit onROOT)c_type="syste)"jsonrpc": "2.0# - upod    commit onljsonrpc":ation_hOK(ong_hash)cts_raw_byte caisedat onor(mcmmver", ite(tmppdai_Au  aonournal record truncHrk.snas : SblisedKeb/SblisedB  r ostgnowt.""zp
 
-r jourpdai_Au  aon lly
-    abject
--be
-ram alsals arrecket rea`at on`:
-   -is e3, §tveniug as r_clietype": "s_tool_paypa
-    ), "nter
-    ev"MCP sTyass
-    cmmedid intoient.cfrom __futud or wriut.
-ceedas ne
-dyleatrackeutdwpa"
-   s hasrack "nterll_tooating aroot andtve(previously)sergatesatnormed )t"rt .h / "sto# - upof b_Cot upoint=_REequest("   b, key, b"rea# - upo
+def test_case_insensitive_collision_refused_when_flagged(tmp_path):
+    """This Linux/ext4 host is case-SENSITIVE, so the real probe in
+    LocalBackend.__init__ will always find `_case_insensitive = False` and
+    the refusal branch is otherwise unreachable here. This test exercises
+    the refusal LOGIC itself by forcing the flag, and does not substitute
+    for running on an actual case-insensitive volume (NTFS/default APFS) —
+    see the module docstring's judgment call #5."""
+    backend = LocalBackend(tmp_path / "store-root")
+    backend._case_insensitive = True  # simulate a case-insensitive volume
 
-dkECtbenallyDdoc_type="system_state")
+    r0 = gate.persist(backend, "Notes/Foo", b"v1", expected_hash=None, doc_type="system_state")
     assert isinstance(r0, OK)
 
-    before = brsist(b, k_wriobjmit oniobj     - upo0# - upod
-d"
-  ectStoreBackendErroTyass
-   d("anything" oniobj.able-bytes"am alum-ublish"
-  r"]."d"
-  ectStoreBackendErroTyass
-   d("anything_wriobj. knokees"am alum"d"
-  ectStoreBackendErroTyass
-   d("anythingdelg" oniobj.able-._clieliUn"am alumBJECTSlegiortd int-is exa pairn� the s storefinn.ad(keyroot)
-
-    key = "resu"
-    backend = LocalBaod"
-  ool(
-    ")
+    r1 = gate.persist(backend, "Notes/foo", b"v2", expected_hash=None, doc_type="system_state")
+    assert isinstance(r1, ERROR)
+    assert r1.kind is ErrorKind.INVALID_ARGUMENT
+    assert backend.read("Notes/foo") is None  # never created under the colliding case
+    assert backend.read("Notes/Foo").body == b"v1"  # original untouched
+    backend.close()
 
 
-deformed _wriobjmit oniobjstc_type="system_stae(r0, OK)
+def test_case_sensitive_volume_allows_distinct_case_keys(tmp_path):
+    """Sanity check the flag actually gates the behavior: with the (real,
+    default-on-this-host) case-sensitive flag, two keys differing only by
+    case are simply two distinct keys."""
+    backend = LocalBackend(tmp_path / "store-root")
+    assert backend._case_insensitive is False
 
-    before = bol(
- rsist(b, k"] is Tly/does/not/edkE)    resumednallyDtr(baesumed = LocalBacn_raw_bytep_cliente():unoatgcp_c(b_gey_pry:
-   journal-only recordg aroot andn resuet_id ONLYe", u stde do-is exa SblisedKeb/SblisedB  rssert efore =sg
-`mcp.servaiving as an "orem-ir   for tectSts hasrackh=rri
-  tself,okeep_atomib "
-   de dok "nter (  before =l
-
-
-de,l
-
-
-deiDU t §6).
- self,  pblpourpdad = clie1/§5).h / "stooatgcp_knokee, STA.Si pleNkeeppacd _wr=dkE) "stooatgcp_ble-byt, STA.Si pleNkeeppacd ble-=ednallyDattr(baesumed 
-    key = "resu"
-    backend = LocalBaod"
-  ectStoreBackendErroTyass
-   d("anything")
+    r0 = gate.persist(backend, "Notes/Foo", b"v1", expected_hash=None, doc_type="system_state")
+    r1 = gate.persist(backend, "Notes/foo", b"v2", expected_hash=None, doc_type="system_state")
+    assert isinstance(r0, OK) and isinstance(r1, OK)
+    backend.close()
 
 
-deformed oatgcp_kno,ooatgcp_ble-stc_type="system_stae(r0, OK)
-
-  ly/does/not/edkE)---------def = 64  #b, ke wirey oatgcp_kno)et(drift_fact["divergb, ke wirey oatgcp_t onlyt(drift_fact[esumed = LocalBacn-------------------------------------------------------
-# C8 — crash-after-jouCt p-irsens   en-volroot =l , i
-    fusal--------------------------------------------------------
+# ---------------------------------------------------------------------------
+# BUSY on lock contention — never blocks indefinitely
+# ---------------------------------------------------------------------------
 
 
-def test_c8_resume_rebuilds_key_t p_irsens   en_ =l , i
- _  fuscp_lientflaggcp journal-only recordguarded
-w/ext4ith `@s-onl p-SENSITIVEble)   ),
-)
-deproeryty-ser=  key = "res.()
-    blwthe alwayrefinda`a_t p_irsens   en
-  rift_`fore it m  ),
-)fusal brre  tis  ly, NOT yun:5433")
-ded = cactivates ihandshake it m  ),
-)fusal LOGICear anyw  u
-    rea itrflagwn resjour"resutub� tt  tself,oatirunnas t
-  utunot a Pct p-irsens   en volroot(tics/uila(
-  APFS) lly
-    duleECTSTOORT   FRAMING"ore udgdentiift r#5.h / "stoesumed 
-    key = "resu"
-    backend = LocalBaod"
-  d(key, b"_t p_irsens   en
-  ion:f,# eanded the dt p-irsens   en volroo
-cess.end, "state/x", b"plain con"Notes/Foo"journaldoc_type="system_state")
+def test_write_returns_busy_when_cas_lock_held_externally(tmp_path):
+    root = tmp_path / "store-root"
+    backend = LocalBackend(root, lock_timeout_s=0.1)
+
+    import fcntl
+
+    lock_path = root / "locks" / "cas.lock"
+    fh = open(lock_path, "a+b")
+    fcntl.flock(fh.fileno(), fcntl.LOCK_EX)  # hold the exact same lock file
+    try:
+        start = time.monotonic()
+        result = gate.persist(backend, "busy/k", b"v", expected_hash=None, doc_type="system_state")
+        elapsed = time.monotonic() - start
+        assert isinstance(result, ERROR)
+        assert result.kind is ErrorKind.BUSY
+        assert elapsed < 2.0, "must not block indefinitely"
+    finally:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        fh.close()
+    backend.close()
+
+
+def test_advisory_lock_busy_does_not_hang(tmp_path):
+    backend = LocalBackend(tmp_path / "store-root", lock_timeout_s=0.1)
+    lock1 = backend.lock("k", ttl_s=5)
+    with pytest.raises(BackendBusyError):
+        backend.lock("k", ttl_s=5)
+    assert backend.unlock(lock1) is True
+    backend.close()
+
+
+# ---------------------------------------------------------------------------
+# os.replace retry-on-PermissionError (portable unit test of the mechanism;
+# the real Windows sharing-violation SCENARIO cannot be produced here — see
+# module docstring judgment call #4)
+# ---------------------------------------------------------------------------
+
+
+def test_replace_with_retry_recovers_from_transient_permission_error(tmp_path, monkeypatch):
+    backend = LocalBackend(tmp_path / "store-root", replace_retry_attempts=5, replace_retry_backoff_s=0.001)
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    src.write_bytes(b"x")
+
+    real_replace = os.replace
+    calls = {"n": 0}
+
+    def flaky_replace(a, b):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise PermissionError("simulated transient sharing violation")
+        return real_replace(a, b)
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+    backend._replace_with_retry(src, dst)
+    assert dst.read_bytes() == b"x"
+    assert calls["n"] == 3
+    backend.close()
+
+
+def test_replace_with_retry_gives_up_as_busy(tmp_path, monkeypatch):
+    from store.local import _ReplaceBusy
+
+    backend = LocalBackend(tmp_path / "store-root", replace_retry_attempts=3, replace_retry_backoff_s=0.001)
+    src = tmp_path / "src2"
+    dst = tmp_path / "dst2"
+    src.write_bytes(b"x")
+
+    def always_fails(a, b):
+        raise PermissionError("simulated persistent sharing violation")
+
+    monkeypatch.setattr(os, "replace", always_fails)
+    with pytest.raises(_ReplaceBusy):
+        backend._replace_with_retry(src, dst)
+    backend.close()
+
+
+# ---------------------------------------------------------------------------
+# Two-process race (POSIX) — real cross-process contention on the flock'd
+# .lock file, not simulated within one process's threads.
+# ---------------------------------------------------------------------------
+
+
+def _mp_create_only_worker(root_str: str, key: str, payload: bytes, queue) -> None:
+    # Separate OS process: a fresh LocalBackend instance over the SAME root.
+    backend = LocalBackend(root_str)
+    result = gate.persist(backend, key, payload, expected_hash=None, doc_type="system_state")
+    backend.close()
+    queue.put(type(result).__name__)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses POSIX fork start method")
+def test_two_process_create_only_race(tmp_path):
+    """Two independent OS processes race a create-only write to the same
+    brand-new key via two separate LocalBackend instances over the same
+    root directory. Exactly one must observe OK; the other EXISTS — proving
+    contention is resolved by the real cross-process .lock file, not merely
+    by in-process thread serialization (which conformance/suite.py's
+    threaded races already cover for FakeBackend and, incidentally, for
+    LocalBackend within a single process)."""
+    root = tmp_path / "store-root"
+    LocalBackend(root).close()  # pre-create the directory structure once
+
+    ctx = multiprocessing.get_context("fork")
+    queue = ctx.Queue()
+    procs = [
+        ctx.Process(target=_mp_create_only_worker, args=(str(root), "race/key", f"proc-{i}".encode(), queue))
+        for i in range(4)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=10)
+        assert p.exitcode == 0
+
+    outcomes = [queue.get(timeout=1) for _ in procs]
+    assert outcomes.count("OK") == 1, f"expected exactly one OK across processes, got {outcomes}"
+    assert outcomes.count("EXISTS") == len(procs) - 1
+
+    final = LocalBackend(root)
+    blob = final.read("race/key")
+    assert blob is not None
+    final.close()
+
+
+def _mp_cas_worker(root_str: str, key: str, base_hash: str, payload: bytes, queue) -> None:
+    backend = LocalBackend(root_str)
+    result = gate.persist(backend, key, payload, expected_hash=base_hash, doc_type="system_state")
+    backend.close()
+    queue.put(type(result).__name__)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses POSIX fork start method")
+def test_two_process_cas_update_race(tmp_path):
+    """Two OS processes race a CAS-update against the same expected_hash.
+    Exactly one must land (OK), the other must be rejected (STALE) — real
+    cross-process linearization via the flock'd .lock file (contract §3:
+    "a held cross-process lock around read-compare-replace is the
+    mechanism" for the local backend)."""
+    root = tmp_path / "store-root"
+    setup = LocalBackend(root)
+    r0 = gate.persist(setup, "race/cas", b"base", expected_hash=None, doc_type="system_state")
     assert isinstance(r0, OK)
+    base_hash = r0.new_hash
+    setup.close()
 
-    before = backend._clie     b, key, b"reaplain con"Notes/foo"journew_hash, doc_type=_state")
-    assert isinstance(r0, OK)
+    ctx = multiprocessing.get_context("fork")
+    queue = ctx.Queue()
+    procs = [
+        ctx.Process(
+            target=_mp_cas_worker,
+            args=(str(root), "race/cas", base_hash, f"writer-{i}".encode(), queue),
+        )
+        for i in range(4)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=10)
+        assert p.exitcode == 0
 
-    before = b1,orKindoad["text"] ==1.UMENtis 
-
-def _ge.f test_reconcile(r0, OK)
-
-  ly/does/not/edNotes/foo")--------f,# ic pubi_key_epun "leING t=l ,dgrees ->(r0, OK)
-
-  ly/does/not/edNotes/Foo")    resumednalsume rig.clopuntouh sttr(baesumed = LocalBacn_raw_byte_t p_sens   en_volroo_ft 
-
-s_d"reincte_t p_clienlate a crash that lanfsync
-
-det itrflag import stb, ktim; ancking(): ectStm; a at 1,, args: a(
- -orn4his-th `) dt p-sens   en flagwntwog_wrsetype":as t
- t.loy "sto# T yostgsi plyntwogd"reinctg_wrs.h / "stoesumed 
-    key = "resu"
-    backend = LocalBaod"
-  OK)
-
-  ly/does/"_t p_irsens   en
-t(drift_fcess.end, "state/x", b"plain con"Notes/Foo"journaldoc_type="system_state")
-    assert isinstance(r0,      b, key, b"reaplain con"Notes/foo"journew_hash, doc_type=_state")
-    assert isinstance(r0, OK)
-
-    before = backend@pytestbefore = b1,oist(b, kesumed = LocalBacn-------------------------------------------------------
-# C8 — crash-after-jouBUSYt
-     reck` file, a
-`mcp.serve   ref _ed"
-
-    #p-------------------------------------------------------
+    outcomes = [queue.get(timeout=1) for _ in procs]
+    assert outcomes.count("OK") == 1, f"expected exactly one OK across processes, got {outcomes}"
+    assert outcomes.count("STALE") == len(procs) - 1
 
 
-def test_write_rejects_raw_bytep_clientcp_clieusy_lients_st   r_naldent):
-   lo journal-only rere-root"
-    backend = LocalBackend(root)
-
-    key = "resume/t,    r_      c_s=0.1d._clie clientfc wr._clie   r_ "resume" / "to   reth.wrs_snd tr/ "stooesum.exec   r_ "re
-
-da+bE) "stooc wr.f   r(l-f( or o(),ooc wr.load_EXesumeh_getm; ax al     re   regainait m  pg8000
-
-   
-    kot"rt .l writes 
-    except El(
-    b, key, b"reaplain con"eusy/kECtbevw_hash, doc_type=_state")
-    assert isinstance(r0,     elapsod   "rt .l writes 
-  - 
-    (r0,     OK)
-
-    before = bol(
- rsrKindoad["td["text"] ==ol(
- .UMENtis 
-
-def _ge.BUSYad["td["text"] =elapsod <procaram all.
-      re _ed"
-
-    # client.close()
-       oc wr.f   r(l-f( or o(),ooc wr.load_UNoad["td["tl-f Exception:
-esumed = LocalBacn_raw_byteadvisoryt   r_eusy_ments": {futrournal record tr(root)
-
-    key = "resu"
-    backend = LocalBa,    r_      c_s=0.1d.clie   r1   ")
+# ---------------------------------------------------------------------------
+# Windows-specific — CANNOT run on this Linux host. See docstrings.
+# ---------------------------------------------------------------------------
 
 
-def   r(dkECt tl_s=5od"
-  ectStoreBackendErrostore.local impod("anything")
+@pytest.mark.skipif(os.name != "nt", reason="exercises the msvcrt.locking() code path")
+def test_windows_msvcrt_lock_path_busy_on_contention(tmp_path):  # pragma: no cover
+    """MUST be run on the Windows host. Verifies that LocalBackend's
+    _FileLock uses msvcrt.locking(LK_NBLCK) on Windows (never fcntl, which
+    is forbidden there per contract §4.1) and that a second acquire on the
+    same dedicated lock file observes BUSY rather than blocking."""
+    root = tmp_path / "store-root"
+    backend = LocalBackend(root, lock_timeout_s=0.1)
+    import msvcrt
+
+    lock_path = root / "locks" / "cas.lock"
+    fh = open(lock_path, "a+b")
+    fh.write(b"\0")
+    fh.flush()
+    fh.seek(0)
+    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+    try:
+        result = gate.persist(backend, "k", b"v", expected_hash=None, doc_type="system_state")
+        assert isinstance(result, ERROR) and result.kind is ErrorKind.BUSY
+    finally:
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        fh.close()
+    backend.close()
 
 
-def   r(dkECt tl_s=5od"
-  OK)
-
-  ly/does/un   r(   r1)instance(paylesumed = LocalBacn-------------------------------------------------------
-# C8 — crash-after-jouesser---ce:atirsyst-Peroot =losed s (s`    (rpunitates il+fake mecfutism;jou  ),
-)
-de(the msresu:as -ng(loc_typSCENARIOublish veryprodu  d     r
-`mc.e:
-#STOORT   FRAMING"e udgdentiift r#4)p-------------------------------------------------------
-
-
-def test_write_rejects_raw_byteer---ce_ectS_atirs_l crosss_r om_d =ns _cliperoot =lo  clien"
-    ba,pl w_wrp hascord tr(root)
-
-    key = "resu"
-    backend = LocalBa, er---ce_atirs_h=r0.nes=5, er---ce_atirs_(roooff_s=0.001d.cliesrcoot"
-    backendrcbytes(bsroot"
-    backend)
-
-
-def drc-simulating-a-tx"Backend(r   ""---ce:=uesser---ce "sto#  = r"tra},
- 0}f, args: Lflaky ""---ce(aCtbd("anything#  = [a},]nd({"jsonrpc":ifg#  = [a},]n< 3              "MCP sPeroot =losed s("eanded t (th=ns _clresu:as  ng(loc_ty
-
-    def call_tool(   ""---ce(aCtbdf, argl w_wrp has.seth=rr(os,kend---cea, flaky ""---ceod"
-  d(key, b"er---ce_ectS_atirs(drc,(bsrload["has_drifsf lineating-a
-
-def txrce_of_truth_#  = [a},]ndef3ion:
-esumed = LocalBacn_raw_byteer---ce_ectS_atirs_g suc_up_alieusyn"
-    ba,pl w_wrp hascord trt LocalBackend
-from stor_Rr---ceocalttr(baesumed 
-    key = "resu"
-    backend = LocalBa, er---ce_atirs_h=r0.nes=3, er---ce_atirs_(roooff_s=0.001d.cliesrcoot"
-    backendrc2bytes(bsroot"
-    backend)
-2
-
-def drc-simulating-a-tx"Backend_rawalwayr_fails(aCtbd("anything"MCP sPeroot =losed s("eanded t (y, b"re_clresu:as  ng(loc_ty
-
- , argl w_wrp has.seth=rr(os,kend---cea, alwayr_failsod"
-  ectStoreBackendErro_Rr---ceocald("anything")
+@pytest.mark.skipif(os.name != "nt", reason="requires two real OS processes contending on NTFS")
+def test_windows_two_process_ntfs_race(tmp_path):  # pragma: no cover
+    """MUST be run on the Windows host, against a real NTFS volume (per
+    contract §4.1/§9: "two concurrent processes on NTFS"). Spawn a second
+    process (multiprocessing with the default 'spawn' start method on
+    Windows) racing a create-only write against this process to the same
+    key over a LocalBackend rooted on an NTFS path, and assert exactly one
+    observes OK and the other EXISTS, with the published blob never
+    corrupted or torn."""
+    root = tmp_path / "store-root"
+    LocalBackend(root).close()
+    ctx = multiprocessing.get_context("spawn")
+    queue = ctx.Queue()
+    procs = [
+        ctx.Process(target=_mp_create_only_worker, args=(str(root), "ntfs/race", f"p{i}".encode(), queue))
+        for i in range(2)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=10)
+    outcomes = [queue.get(timeout=1) for _ in procs]
+    assert outcomes.count("OK") == 1
+    assert outcomes.count("EXISTS") == 1
 
 
-def"er---ce_ectS_atirs(drc,(bsrload["esumed = LocalBacn-------------------------------------------------------
-# C8 — crash-after-jouTCANNOT be er-ce:(POSIXk's intention on the
-`.lock` file, and thi f   r'----.   regain,load)eanded t (ectSir  nrypro
-`.l'tim;lines---------------------------------------------------------
-
-
-def test_mcp_over_objectst_
-  n_key_presenwonterume/tinsr[str, ANOP" Dict[stol_pa:lnd a , queulf._send({"jsonr# Set):
-te OSypro
-`.l:he o test  key = "rest efore =d assert
- SAMEesume.ckend(root)
-
-    key = "resume/t_n_tooef call(
-    b, key, b"reaplain conkno,ostol_pa_hash, doc_type=_state")
-    assert isinstance(r0, esumed = LocalBar0, queul.put(   aKIAABCDE._m   i__)(not _pg_reachable(), rw rather=than fostgreSQL cord POSIX,oatk 
-    krror" in p_client):wo_pro
-`.l n_key_presenr-ce journal-only records f _edunavait OSypro
-`.le er-ce:abi_key_same k    joeither e   clienbrred-erc knoklow-ls fset):
-te   key = "rest efore =sd assert
-    rly rere-rournal ory. E al via nrym allob= "knois;a g aorom _ADE')
- s inprovime
-
-   ck` file, aently anywhebyu  ),
-)
-deon on the
-`.lo.   regain,load)me FREclienbr be the
-`.lom;linefse, not oc_typ(whi
-
-Winnot: the
-journal/p'e it m  pp byder-ces alpp bye, par,oatiFakoint=_RE@pyt, becivaitlose,ooat-ser=  key = "res(ectSir alock as the
-`.l)th / "store-root"
-    backend = LocalBackend blob = resumed.re= LocalBnr# p Lon_key_W itrernal ory= bd, aupofffernt(
-   txclieos
-import time.  buck` fxt("oatk"Bar0, queul    tx.Queult.call_tpore"]
- "anything#tx.Pport t(     b=_
-  n_key_presenwonterontens=(       ar,ken-ce/Y_SECtf assc-{i}".eny_b64), queulfoad["td["tl   c
-    #nge(4oad["t]self,oatip
-    poremport__("pg)
-    call_tooatip
-    poremport__("pg)join---------10oad["td["text"] =p-= LtS
-two=thpg8000.---co in re[queul.  b---------1)ooati_
-    pore](b, k"] is T---co in.count("OK"contenCtf ash, docux al via nryOK aon onypro
-`.le hasht {---co in}"(b, k"] is T---co in.count("in["curconte low pore   "1all_toolclop   blob = resumed.read(key)
-    olcloblob i_c-ce/Y_SEot None
-    assert blob.body == b"olclobhable() -> bool
-  naliwonterume/tinsr[str, ANOP" Dict[    _type" Dict[stol_pa:lnd a , queulf._send({"jsonr(root)
-
-    key = "resume/t_n_tooef call(
-    b, key, b"reaplain conkno,ostol_pa_hash, doc_type=    _typete")
-    assert isinstance(r0, esumed = LocalBar0, queul.put(   aKIAABCDE._m   i__)(not _pg_reachable(), rw rather=than fostgreSQL cord POSIX,oatk 
-    krror" in p_client):wo_pro
-`.l nasbOK"
-
-
-nr-ce journal-only records fOSypro
-`.le er-ce:abCAS-OK"
-
-
-W== fi
-    ),   reash, doc_type.ckendE al via nrym allcomm (OK),a g aorom _   everyergate.p (      's intentt(
-   n on the
-`.loss cu:a oc_typlow-levef   r'-o.   regainayload = clie3      "a hme
-  n on the
-`.los  rearclieipp b-d, pa Loc"---ce:isa itself,mecfutism"ooating aend
-fresumed )th / "store-root"
-    backend = LocalBackendsetupp   blob = resumed.read(keend, "state/x", b"setup,ken-ce/nasECtbebt pafoc_type="system_state")
-    assert isinstance(r0, OK)
-
-    before = backend.r0, es  _typesumesystem_stackendsetup= LocalBackend txclieos
-import time.  buck` fxt("oatk"Bar0, queul    tx.Queult.call_tpore"]
- "anything#tx.Pport t(                  b=_
-  naliwonter"smoke/postgretens=(       ar,ken-ce/nasECtb   _typetef"    jr-{i}".eny_b64), queulfsert write_payload["l   c
-    #nge(4oad["t]self,oatip
-    poremport__("pg)
-    call_tooatip
-    poremport__("pg)join---------10oad["td["text"] =p-= LtS
-two=thpg8000.---co in re[queul.  b---------1)ooati_
-    pore](b, k"] is T---co in.count("OK"contenCtf ash, docux al via nryOK aon onypro
-`.le hasht {---co in}"(b, k"] is T---co in.count("e["curconte low pore   "1aln-------------------------------------------------------
-# C8 — crash-after-jou(the msvcontract s in this L   t is guarded
-with `. Se   FRAMING"s---------------------------------------------------------
-
-
-def test_mcp_over_obje.name != "nt")` below rather than fostgreSQL handshake ode path and true NTFS
-two-proin p_client)wthe ms_path a_   r_ "re_eusy_on_ck` file,  journal-onnr# p agmapaylo, parly recorMUS Linu   t is gee(the msrth `. Vwireike odaore.types impo'e it m_FainL  record path and true NLK_NBLCK)t is(the msr(p.servoc wr, whi
-
-_clie mulatbiddice ispofpourpdad = clie4.1)n residad =al appenacix; sand thiskendstherbydicrash    regainaob= "knsuBUSYtcfrom __futubd true th / "store-root"
-    backend = LocalBackend(root)
-
-    key = "resume/t,    r_      c_s=0.1d.clie
-import ath a._clie   r_ "resume" / "to   reth.wrs_snd tr/ "stooesum.exec   r_ "re
-
-da+bE) "stoo-formed b"\0E) "stoo-f(self) -ser=fs.seek(0oad["tpath and true Nl-f( or o(),opath anLK_NBLCK, 1ent.initialize()
-   El(
-    b, key, b"reaplain con"kECtbevw_hash, doc_type=_state")
-    assert isinstance(r0,     OK)
-
-    before = bol(
- rsrKindon res=ol(
- .UMENtis 
-
-def _ge.BUSYad["tt.close()
-       os.seek(0oad["td["tpath and true Nl-f( or o(),opath anLK_UNLCK, 1ent.in    os. Exception:
-esumed = LocalBacn.name != "nt")` below rather than fostgreSQL trix; ss-ls f
-)
-deOSypro
-`.le eck` fidas t
-  ticsin p_client)wthe ms_:wo_pro
-`.l ntfsnr-ce journal-onnr# p agmapaylo, parly recorMUS Linu   t is gee(the msrth `,W== fi
-  af
-)
-detics volroot(parly repdad = clie4.1/§9: "ls faont["new_ pro
-`.le e
-  ticsin. Spawn =al appecall_tpor`.lo(eos
-import time ectStm; auila(
-  'spawn' 
-    krror" e
- call_(the ms)er-cafter a key_same k    jo== fi
-    inypro
-`.loeither e   clienknokoservai  key = "res(e" /and isa  tics  "re
-
-) remateriux al via nr8000.-b= "knsuOK aeveal aorom _ADE')
-, ectStm; apresent but torp.serly repdrruptwhere.p_path / "store-root"
-    backend = LocalBackend blob = resumed.re= LocalBckend txclieos
-import time.  buck` fxt("spawn"Bar0, queul    tx.Queult.call_tpore"]
- "anything#tx.Pport t(     b=_
-  n_key_presenwonterontens=(       ar,kentfs/r-cea, f"p{i}".eny_b64), queulfoad["td["tl   c
-    #nge(2oad["t]self,oatip
-    poremport__("pg)
-    call_tooatip
-    poremport__("pg)join---------10oad["t---co in re[queul.  b---------1)ooati_
-    pore](b, k"] is T---co in.count("OK"conten(b, k"] is T---co in.count("in["curconte1bje.name != "nt")` below rather than fostgreSQL handshake a,
-)
-de(the msresu:as -ng(loc_typtyptsser---cein p_client)wthe ms_er---ce_esu:as _ng(loc_ty_atiriucmpienteusyn"
-    baonnr# p agmapaylo, parly recorMUS Linu   t is gee(the msrth `. Opice is
-     begainaectStaresu:as , argl desidad excludke deley_/byathesals arlow-=al appenfutdl generati, argFILE_SHARE_DELET  'wha drairectly tivesser---ce()insth=r0.ne before it m"] is T  key = "res(etiriucraibcliewhenumband f "rt sU t §6)all_toas , argrKind{BUSY}a
-`mcp.servflosll readet ) imnon-rite di
+@pytest.mark.skipif(os.name != "nt", reason="exercises a real Windows sharing-violation on os.replace")
+def test_windows_replace_sharing_violation_retries_then_busy(tmp_path):  # pragma: no cover
+    """MUST be run on the Windows host. Open the target file with a sharing
+    mode that excludes delete/rename (e.g. via a second handle without
+    FILE_SHARE_DELETE) while a publish's os.replace() is attempted, and
+    assert LocalBackend retries a bounded number of times before returning
+    ERROR{BUSY} — never falling back to a non-atomic copy/move."""
+    ...

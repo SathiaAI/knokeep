@@ -2,12 +2,15 @@
   "name": "knokeep",
   "version": "0.1.0",
   "description": "Portable, secret-safe memory that lets any AI coding agent resume exactly where the last session — on any tool — left off. Part of the Kno suite.",
-  "author": "ViaKnox",
+  "author": {
+    "name": "ViaKnox",
+    "url": "https://github.com/SathiaAI"
+  },
   "license": "AGPL-3.0",
   "homepage": "https://github.com/SathiaAI/knokeep",
   "repository": "https://github.com/SathiaAI/knokeep",
   "keywords": ["memory", "context", "compaction", "handoff", "cowork", "mcp", "portable", "cross-tool"],
-  "skills": ["skill/SKILL.md"],
+  "skills": ["./skill"],
   "mcpServers": {
     "knokeep": {
       "command": "node",

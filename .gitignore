@@ -19,3 +19,6 @@ desktop.ini
 # memory stores must never be committed (safety)
 stores/
 *.store/
+
+# local Claude Code plugin cache / settings (never commit)
+.claude/

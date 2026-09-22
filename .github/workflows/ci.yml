@@ -100,6 +100,37 @@ jobs:
           grep -q 'knokeep_read' launcher_out.txt
           echo "launcher handshake + tools/list OK"
 
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install pytest pg8000 boto3 "moto[server]" flask flask-cors
+      - name: Core adapter + conformance + skill/plugin tests
+        run: python -m pytest tests/test_local_backend.py conformance tests/test_gate_supplement.py tests/test_plugin_store_root.py -q
+      - name: V1/skill acceptance scripts (unified engine)
+        run: |
+          set -e
+          for t in $SKILL_TESTS; do echo "== $t =="; python "$t"; done
+      - name: Plugin manifests + cross-OS MCP launcher smoke (node -> python -m mcp.server)
+        run: |
+          set -e
+          python -c "import json;json.load(open('.claude-plugin/plugin.json'));json.load(open('.claude-plugin/marketplace.json'));print('manifests valid JSON')"
+          node --check shims/launch_mcp.mjs
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+            | KNOKEEP_STORE="$RUNNER_TEMP/kk-store" node shims/launch_mcp.mjs > launcher_out.txt
+          grep -q '"name": "knokeep-mcp"' launcher_out.txt
+          grep -q 'knokeep_read' launcher_out.txt
+          echo "launcher handshake + tools/list OK"
+
   gitleaks:
     runs-on: ubuntu-latest
     steps:

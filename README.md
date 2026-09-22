@@ -21,7 +21,6 @@
 
 <p align="center">
   <sub><b>Planned</b>&nbsp;
-  <img src="https://img.shields.io/badge/Windsurf-D9C9B2" alt="Windsurf (planned)">
   <img src="https://img.shields.io/badge/Devin-D9C9B2" alt="Devin (planned)">
   <img src="https://img.shields.io/badge/Hermes-D9C9B2" alt="Hermes (planned)">
   <img src="https://img.shields.io/badge/VS_Code-D9C9B2" alt="VS Code (planned)"></sub>

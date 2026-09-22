@@ -12,11 +12,11 @@
 
 <p align="center">
   <b>Works with</b>&nbsp;
-  <img src="https://img.shields.io/badge/Claude_Code-2E3A2F" alt="Claude Code">
-  <img src="https://img.shields.io/badge/Cowork-2E3A2F" alt="Cowork">
-  <img src="https://img.shields.io/badge/Cursor-2E3A2F" alt="Cursor">
+  <img src="https://img.shields.io/badge/Claude_Code-2E3A2F?logo=claude&logoColor=F8F6EE" alt="Claude Code">
+  <img src="https://img.shields.io/badge/Cowork-2E3A2F?logo=anthropic&logoColor=F8F6EE" alt="Cowork">
+  <img src="https://img.shields.io/badge/Cursor-2E3A2F?logo=cursor&logoColor=F8F6EE" alt="Cursor">
   <img src="https://img.shields.io/badge/Codex-2E3A2F" alt="Codex">
-  <img src="https://img.shields.io/badge/any_shell-2E3A2F" alt="Any tool with a shell">
+  <img src="https://img.shields.io/badge/any_shell-2E3A2F?logo=gnubash&logoColor=F8F6EE" alt="Any tool with a shell">
 </p>
 
 <p align="center">
@@ -26,7 +26,7 @@
   <img src="https://img.shields.io/badge/VS_Code-D9C9B2" alt="VS Code (planned)"></sub>
 </p>
 
-<p align="center"><i>Part of the Kno suite — Knosky routes to the right file; KnoKeep remembers the work.</i></p>
+<p align="center"><i>Part of the Kno suite — <a href="https://github.com/SathiaAI/knosky">Knosky</a> routes to the right file; KnoKeep remembers the work.</i></p>
 
 <br>
 

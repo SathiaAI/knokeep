@@ -174,7 +174,7 @@ def _valid_key_shape(key: str) -> bool:
 # Doc-type allowlist / ABA guard (contract §6)
 # --------------------------------------------------------------------------
 
-STATE_DOC_TYPES = {"system_state", "session_log", "HANDOFF", "journal"}
+STATE_DOC_TYPES = {"system_state", "session_log", "HANDOFF", "journal", "conflict"}
 # Bounded digit run (<=20 digits) so int() cannot be fed megabytes (review #5).
 _GEN_HEADER_RE = re.compile(rb"^#knokeep-gen:(0|[1-9][0-9]{0,19})\n")
 _UINT64_MAX = (1 << 64) - 1

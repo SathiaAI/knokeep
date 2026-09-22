@@ -14,6 +14,7 @@ validation (identifier shape, no-newline metadata) stays skill-side. The bootstr
 out-of-band store audit enumerates via backend.list()/read() and re-scans each blob through
 store.gate (content-based: reject non-utf-8/secret-bearing blobs). knokeep_secretgate retired."""
 import sys, os, re, json, datetime, argparse
+import hashlib, random, time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
@@ -85,7 +86,7 @@ def _key(project, kind, sid=None):
         return f"{project}/sessions/{sid}"
     raise ValueError(kind)
 
-_DOC_TYPE = {"state": "system_state", "log": "session_log", "journal": "journal"}
+_DOC_TYPE = {"state": "system_state", "log": "session_log", "journal": "journal", "conflict": "conflict"}
 
 def _validate_fm(fm):
     """Structural metadata validation kept skill-side (the gate validates the KEY and
@@ -159,45 +160,112 @@ def init(store, project):
         _require_ok(_persist(backend, lkey, "log", _bytes(fm, "## Completed & Verified\n\n## Active State\n\n## Next Step\n"), None))
     return {"ok": True, "base": _data_dir(store, project)}
 
-def flush_state(store, project, new_body, expect_hash=None):
-    _validate_project(project)
-    backend = _backend(store)
-    skey = _key(project, "state")
-    blob = backend.read(skey)
-    if blob is not None:
-        if not expect_hash:
-            die(reason="expect_hash required for update", current_hash=blob.version_hash)
-        fm, _ = parse(blob.body.decode("utf-8"))
-        if not fm:
-            die(reason="malformed state frontmatter")
-        fm["revision"] = int(fm.get("revision", 0)) + 1
-        fm["updated"] = now()
-        res = _persist(backend, skey, "state", _bytes(fm, new_body), expect_hash)   # user's hash IS the CAS guard
-    else:
-        fm = {"schema_version": SCHEMA_VERSION, "project_id": project, "client": "cowork", "revision": 1, "updated": now()}
-        res = _persist(backend, skey, "state", _bytes(fm, new_body), None)
-    new_hash = _require_ok(res)
-    return {"ok": True, "revision": fm["revision"], "version_hash": new_hash}
+def _flush_doc(kind, store, project, new_content, expect_hash=None, section=None, session=None):
+    """Shared bounded_cas_reread_reapply implementation for flush_state/flush_log.
 
-def flush_log(store, project, new_body, expect_hash=None):
+    section=None: whole-document replace, unchanged legacy semantics, EXCEPT
+        that a CAS conflict now parks the losing body + records it instead of
+        silently dying with reason="stale" (single attempt only — never
+        blindly resubmits the whole document on STALE/EXISTS).
+    section=<heading>: replace only that '## <heading>' block. Up to
+        _MAX_CAS_ATTEMPTS attempts: on STALE/EXISTS, re-read the fresh body;
+        if the target section is unchanged from what this writer first saw
+        (or is absent both times), reapply and retry; if it changed, or the
+        heading is duplicated/unparseable, park + fail closed immediately.
+    """
     _validate_project(project)
     backend = _backend(store)
-    lkey = _key(project, "log")
-    blob = backend.read(lkey)
-    if blob is not None:
-        if not expect_hash:
-            die(reason="expect_hash required for log update", current_hash=blob.version_hash)
-        fm, _ = parse(blob.body.decode("utf-8"))
-        if not fm:
-            die(reason="malformed log frontmatter")
-        fm["revision"] = int(fm.get("revision", 0)) + 1
-        fm["updated"] = now()
-        res = _persist(backend, lkey, "log", _bytes(fm, new_body), expect_hash)
-    else:
-        fm = {"schema_version": SCHEMA_VERSION, "project_id": project, "revision": 1, "updated": now()}
-        res = _persist(backend, lkey, "log", _bytes(fm, new_body), None)
-    new_hash = _require_ok(res)
-    return {"ok": True, "revision": fm["revision"], "version_hash": new_hash}
+    key = _key(project, kind)
+    sess = session if (session and valid_id(str(session))) else "unknown"
+
+    base_section = None
+    base_hash = None
+    new_body = new_content
+    res = None
+
+    attempt = 0
+    while attempt < _MAX_CAS_ATTEMPTS:
+        attempt += 1
+        blob = backend.read(key)
+        if blob is not None:
+            fm, cur_body = parse(blob.body.decode("utf-8"))
+            if not fm:
+                die(reason=f"malformed {kind} frontmatter")
+            cur_hash = blob.version_hash
+        else:
+            fm, cur_body, cur_hash = None, "", None
+
+        if blob is not None and not expect_hash and attempt == 1:
+            die(reason="expect_hash required for update", current_hash=cur_hash)
+
+        if section is not None:
+            try:
+                got = _get_section(cur_body, section)
+            except ValueError:
+                _park_conflict(backend, store, project, sess, new_content, section,
+                                base_hash, cur_hash, reason="conflict_parked")
+            cur_section = got[2] if got else None
+
+            if attempt == 1:
+                base_section = cur_section
+                base_hash = cur_hash
+            elif cur_section != base_section:
+                _park_conflict(backend, store, project, sess, new_content, section,
+                                base_hash, cur_hash, reason="conflict_parked")
+
+            try:
+                new_body = _replace_section(cur_body, section, new_content)
+            except ValueError:
+                _park_conflict(backend, store, project, sess, new_content, section,
+                                base_hash, cur_hash, reason="conflict_parked")
+
+            persist_expect = expect_hash if attempt == 1 else cur_hash
+        else:
+            base_hash = cur_hash
+            new_body = new_content
+            persist_expect = expect_hash
+
+        if blob is not None:
+            out_fm = dict(fm)
+            out_fm["revision"] = int(fm.get("revision", 0)) + 1
+            out_fm["updated"] = now()
+        else:
+            out_fm = {"schema_version": SCHEMA_VERSION, "project_id": project,
+                      "client": "cowork", "revision": 1, "updated": now()}
+
+        res = _persist(backend, key, kind, _bytes(out_fm, new_body), persist_expect)
+
+        if isinstance(res, OK):
+            return {"ok": True, "revision": out_fm["revision"], "version_hash": res.new_hash}
+
+        if isinstance(res, ERROR):
+            if res.kind == ErrorKind.SECRET_BLOCKED:
+                die(reasons=list(res.labels))
+            die(reason="write_error", kind=res.kind.value)
+
+        # STALE or EXISTS from here on.
+        if section is None:
+            # Whole-doc mode: exactly one CAS attempt, never blindly resubmit.
+            _park_conflict(backend, store, project, sess, new_content, None,
+                            base_hash, getattr(res, "current_hash", None),
+                            reason="conflict_parked")
+
+        if attempt >= _MAX_CAS_ATTEMPTS:
+            break
+        time.sleep(random.uniform(0.01, 0.05) * attempt)
+
+    _park_conflict(backend, store, project, sess, new_content, section,
+                    base_hash, getattr(res, "current_hash", None),
+                    reason="conflict_retry_exhausted")
+
+
+def flush_state(store, project, new_body, expect_hash=None, section=None, session=None):
+    return _flush_doc("state", store, project, new_body, expect_hash=expect_hash,
+                       section=section, session=session)
+
+def flush_log(store, project, new_body, expect_hash=None, section=None, session=None):
+    return _flush_doc("log", store, project, new_body, expect_hash=expect_hash,
+                       section=section, session=session)
 
 def session_append(store, project, session_id, client, entry):
     _validate_project(project)
@@ -236,6 +304,89 @@ def session_append(store, project, session_id, client, entry):
 def _section(b, h):
     m = re.search(rf"##\s*{re.escape(h)}\s*\n(.*?)(?=\n##|\Z)", b, re.S)
     return (m.group(1).strip() if m else "")[:400]
+
+# --- H1 increment 1: bounded_cas_reread_reapply conflict protocol -----------
+# A "## <Heading>" line must be a real level-2 heading: "##" immediately
+# followed by whitespace (so "### Sub" never matches — after the 2nd '#' a
+# 3rd '#' is not whitespace), anchored to the start of a line so "##" text
+# appearing mid-paragraph is never mistaken for a heading.
+_ANY_H2_RE = re.compile(r"(?m)^##[ \t]+\S")
+
+
+def _get_section(body, heading):
+    """Locate the '## <heading>' block in body.
+
+    Returns (start, end, content) where content is everything between the
+    heading line and the next level-2 heading (or end of doc), or None if
+    the heading is absent. Raises ValueError if the heading appears more
+    than once (ambiguous — caller must not guess which one to touch).
+    """
+    hre = re.compile(rf"(?m)^##[ \t]+{re.escape(heading)}[ \t]*$")
+    matches = list(hre.finditer(body))
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise ValueError(f"duplicate heading: {heading!r}")
+    m = matches[0]
+    start = m.start()
+    content_start = m.end() + 1 if m.end() < len(body) and body[m.end()] == "\n" else m.end()
+    nxt = _ANY_H2_RE.search(body, content_start)
+    end = nxt.start() if nxt else len(body)
+    return start, end, body[content_start:end]
+
+
+def _replace_section(body, heading, new_content):
+    """Return body with the '## <heading>' section's content replaced by
+    new_content (appended as a new section at the end if the heading is
+    absent). Raises ValueError if the heading is duplicated in body."""
+    new_content = (new_content or "").strip("\n")
+    block = f"## {heading}\n{new_content}\n"
+    got = _get_section(body, heading)  # raises ValueError on duplicate
+    if got is None:
+        if not body.strip():
+            return block
+        sep = "\n" if body.endswith("\n") else "\n\n"
+        return body + sep + block
+    start, end, _old = got
+    return body[:start] + block + body[end:]
+
+
+_MAX_CAS_ATTEMPTS = 5
+
+
+def _park_conflict(backend, store, project, session, losing_content, section,
+                    base_hash, current_hash, reason):
+    """Never drop a losing writer's work: park it verbatim under
+    {project}/conflicts/..., record a hash/key-only note in the session
+    journal, then fail closed. Does not return."""
+    raw = (losing_content or "").encode("utf-8")
+    shorthash = hashlib.sha256(raw).hexdigest()[:12]
+
+    conflict_key = None
+    for i in range(3):
+        # Key segments kept short (<32 chars) and lowercase so the gate's
+        # high-entropy KEY scanner never mistakes a conflict key (which embeds
+        # a hash) for a secret and blocks the park — that would be silent loss.
+        ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+        candidate = f"{project}/conflicts/{ts}/{session}-{shorthash}" + (f"-{i}" if i else "")
+        cres = _persist(backend, candidate, "conflict", raw, None)
+        if isinstance(cres, OK):
+            conflict_key = candidate
+            break
+    if conflict_key is None:
+        # Could not even park a copy — fail closed without pretending success.
+        die(reason="conflict_park_failed", base_hash=base_hash, current_hash=current_hash)
+
+    note = f"conflict_parked key={conflict_key} base_hash={base_hash or 'none'} current_hash={current_hash or 'none'}"
+    if section:
+        note += f" section={section}"
+    try:
+        session_append(store, project, session, "system", note)
+    except SystemExit:
+        pass  # journal note is best-effort; never mask the primary conflict signal
+
+    die(reason=reason, conflict_key=conflict_key, current_hash=current_hash, base_hash=base_hash)
+# --- end H1 increment 1 helpers ---------------------------------------------
 
 _BENIGN_STORE_FILES = {".ds_store", "thumbs.db", "desktop.ini"}
 
@@ -322,7 +473,7 @@ def evaluate(store):
         "secret_blocks": sum(1 for r in block if _has(r, "key") or _has(r, "secret")
                              or _has(r, "token") or _has(r, "private key") or _has(r, "URI")),
         "concurrency_blocks": sum(1 for r in block if _has(r, "stale") or _has(r, "lock_timeout")
-                                  or _has(r, "BUSY")),
+                                  or _has(r, "BUSY") or _has(r, "conflict")),
         "bootstrap_refusals": sum(1 for r in boot if r.get("decision") == "block"),
         "clean_resumes": sum(1 for r in boot if r.get("decision") == "allow"),
         "errors": len(error),
@@ -401,7 +552,7 @@ def main():
     ap.add_argument("cmd", choices=["init", "flush-state", "flush-log", "session-append", "bootstrap", "rollup", "eval", "health"])
     ap.add_argument("--store"); ap.add_argument("--project")   # --store optional: defaults to the shared cross-tool root
     ap.add_argument("--session-id"); ap.add_argument("--client", default="cowork")
-    ap.add_argument("--body-file"); ap.add_argument("--entry"); ap.add_argument("--entry-file"); ap.add_argument("--expect-hash")
+    ap.add_argument("--body-file"); ap.add_argument("--entry"); ap.add_argument("--entry-file"); ap.add_argument("--expect-hash"); ap.add_argument("--section")
     a = ap.parse_args()
     if not a.store:
         a.store = default_store_root()                     # shared cross-tool default (T-4)
@@ -413,8 +564,8 @@ def main():
         print(json.dumps({"blocked": True, "reason": "--project required"})); sys.exit(2)
     try:
         if a.cmd == "init": result = init(a.store, a.project)
-        elif a.cmd == "flush-state": result = flush_state(a.store, a.project, _bodyfile(a.body_file), a.expect_hash)
-        elif a.cmd == "flush-log": result = flush_log(a.store, a.project, _bodyfile(a.body_file), a.expect_hash)
+        elif a.cmd == "flush-state": result = flush_state(a.store, a.project, _bodyfile(a.body_file), a.expect_hash, section=a.section, session=a.session_id)
+        elif a.cmd == "flush-log": result = flush_log(a.store, a.project, _bodyfile(a.body_file), a.expect_hash, section=a.section, session=a.session_id)
         elif a.cmd == "session-append": result = session_append(a.store, a.project, a.session_id or _auto_sid(), a.client, _entry(a))
         elif a.cmd == "bootstrap": result = bootstrap(a.store, a.project)
         elif a.cmd == "rollup": result = rollup(a.store, a.project)

@@ -1,0 +1,234 @@
+"""Tests for the H1 Increment 1 skill-side conflict protocol
+(bounded_cas_reread_reapply) in skill/knokeep_state.py.
+
+Races are simulated deterministically by monkeypatching the module-level
+_persist() to inject a competing write between a flush call's read and its
+own persist attempt. The injected competitor only fires on writes to the
+STATE doc (kind == "state"), never on the conflict-park or journal writes the
+protocol itself performs — so the simulation models a real racing writer
+without perturbing the code-under-test's own persistence.
+"""
+import json
+import pathlib
+import sys
+import threading
+
+import pytest
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+for p in (str(REPO_ROOT), str(REPO_ROOT / "skill")):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+import knokeep_state as ks  # noqa: E402
+
+
+def _direct_section_write(persist_fn, store, project, section, content, expect_hash):
+    """Bypass flush_state entirely: perform one raw, successful CAS write to
+    a section using the given (real, unpatched) persist function — simulates a
+    competing writer landing first."""
+    backend = ks._backend(store)
+    key = ks._key(project, "state")
+    blob = backend.read(key)
+    fm, body = ks.parse(blob.body.decode("utf-8"))
+    fm = dict(fm)
+    fm["revision"] = int(fm.get("revision", 0)) + 1
+    fm["updated"] = ks.now()
+    new_body = ks._replace_section(body, section, content)
+    res = persist_fn(backend, key, "state", ks._bytes(fm, new_body), expect_hash)
+    assert isinstance(res, ks.OK), f"direct competing write failed: {res}"
+    return res.new_hash
+
+
+def _die_payload(exc_info):
+    return json.loads(str(exc_info.value))
+
+
+def test_disjoint_sections_both_succeed_via_reapply(tmp_path, monkeypatch):
+    store = str(tmp_path)
+    project = "proj-disjoint"
+    r0 = ks.flush_state(store, project, "## Active State\n\n## Notes\n\n")
+
+    real_persist = ks._persist
+    done = {"v": False}
+
+    def hijacked(backend, key, kind, raw_bytes, expected_hash):
+        if not done["v"] and kind == "state":
+            done["v"] = True
+            # A concurrent writer commits to a DIFFERENT section first.
+            _direct_section_write(real_persist, store, project, "Notes",
+                                   "notes-from-writer2", r0["version_hash"])
+        return real_persist(backend, key, kind, raw_bytes, expected_hash)
+
+    monkeypatch.setattr(ks, "_persist", hijacked)
+
+    result = ks.flush_state(store, project, "state=running",
+                             expect_hash=r0["version_hash"], section="Active State")
+    assert result["ok"] is True
+
+    backend = ks._backend(store)
+    blob = backend.read(ks._key(project, "state"))
+    fm, body = ks.parse(blob.body.decode("utf-8"))
+    assert ks._get_section(body, "Active State")[2].strip() == "state=running"
+    assert ks._get_section(body, "Notes")[2].strip() == "notes-from-writer2"
+
+
+def test_same_section_conflict_is_parked_not_lost(tmp_path, monkeypatch):
+    store = str(tmp_path)
+    project = "proj-same-section"
+    r0 = ks.flush_state(store, project, "## Active State\n\n## Notes\n\n")
+
+    real_persist = ks._persist
+    done = {"v": False}
+
+    def hijacked(backend, key, kind, raw_bytes, expected_hash):
+        if not done["v"] and kind == "state":
+            done["v"] = True
+            # A concurrent writer commits to the SAME section first.
+            _direct_section_write(real_persist, store, project, "Active State",
+                                   "winner-content", r0["version_hash"])
+        return real_persist(backend, key, kind, raw_bytes, expected_hash)
+
+    monkeypatch.setattr(ks, "_persist", hijacked)
+
+    with pytest.raises(SystemExit) as exc:
+        ks.flush_state(store, project, "loser-content",
+                        expect_hash=r0["version_hash"], section="Active State")
+    payload = _die_payload(exc)
+    assert payload["blocked"] is True
+    assert payload["reason"] == "conflict_parked"
+    conflict_key = payload["conflict_key"]
+
+    backend = ks._backend(store)
+
+    # Winner's write is intact.
+    blob = backend.read(ks._key(project, "state"))
+    fm, body = ks.parse(blob.body.decode("utf-8"))
+    assert ks._get_section(body, "Active State")[2].strip() == "winner-content"
+
+    # Loser's body was parked verbatim.
+    cblob = backend.read(conflict_key)
+    assert cblob is not None
+    assert cblob.body.decode("utf-8") == "loser-content"
+
+    # Journal has a conflict record with the key, no body bytes.
+    jblob = backend.read(ks._key(project, "journal", "unknown"))
+    assert jblob is not None
+    jtext = jblob.body.decode("utf-8")
+    assert "conflict_parked" in jtext
+    assert conflict_key in jtext
+    assert "loser-content" not in jtext
+
+
+def test_whole_doc_stale_is_parked_not_resubmitted(tmp_path, monkeypatch):
+    store = str(tmp_path)
+    project = "proj-whole-doc"
+    r0 = ks.flush_state(store, project, "v0")
+
+    real_persist = ks._persist
+    done = {"v": False}
+
+    def hijacked(backend, key, kind, raw_bytes, expected_hash):
+        if not done["v"] and kind == "state":
+            done["v"] = True
+            # Competing whole-doc writer commits first, using the same base hash.
+            backend2 = ks._backend(store)
+            key2 = ks._key(project, "state")
+            blob = backend2.read(key2)
+            fm, _ = ks.parse(blob.body.decode("utf-8"))
+            fm = dict(fm)
+            fm["revision"] = int(fm.get("revision", 0)) + 1
+            fm["updated"] = ks.now()
+            res = real_persist(backend2, key2, "state", ks._bytes(fm, "winner-doc"), r0["version_hash"])
+            assert isinstance(res, ks.OK)
+        return real_persist(backend, key, kind, raw_bytes, expected_hash)
+
+    monkeypatch.setattr(ks, "_persist", hijacked)
+
+    with pytest.raises(SystemExit) as exc:
+        ks.flush_state(store, project, "loser-doc", expect_hash=r0["version_hash"])
+    payload = _die_payload(exc)
+    assert payload["reason"] == "conflict_parked"
+
+    backend = ks._backend(store)
+    blob = backend.read(ks._key(project, "state"))
+    fm, body = ks.parse(blob.body.decode("utf-8"))
+    assert body.strip() == "winner-doc"
+
+    cblob = backend.read(payload["conflict_key"])
+    assert cblob.body.decode("utf-8") == "loser-doc"
+
+
+def test_retry_exhaustion_is_parked(tmp_path, monkeypatch):
+    store = str(tmp_path)
+    project = "proj-exhaustion"
+    r0 = ks.flush_state(store, project, "## Active State\n\n## Notes\n\n")
+
+    real_persist = ks._persist
+    state_calls = {"n": 0}
+
+    def hijacked(backend, key, kind, raw_bytes, expected_hash):
+        if kind == "state":
+            state_calls["n"] += 1
+            # Every state attempt: a competitor edits a DIFFERENT section right
+            # before we persist, so our target section never conflicts in
+            # content, but our CAS token is stale every time -> exhaustion.
+            cur_hash = ks._backend(store).read(ks._key(project, "state")).version_hash
+            _direct_section_write(real_persist, store, project, "Notes",
+                                   f"notes-{state_calls['n']}", cur_hash)
+        return real_persist(backend, key, kind, raw_bytes, expected_hash)
+
+    monkeypatch.setattr(ks, "_persist", hijacked)
+
+    with pytest.raises(SystemExit) as exc:
+        ks.flush_state(store, project, "loser-active",
+                        expect_hash=r0["version_hash"], section="Active State")
+    payload = _die_payload(exc)
+    assert payload["reason"] == "conflict_retry_exhausted"
+    assert state_calls["n"] == ks._MAX_CAS_ATTEMPTS
+
+    backend = ks._backend(store)
+    blob = backend.read(ks._key(project, "state"))
+    fm, body = ks.parse(blob.body.decode("utf-8"))
+    assert ks._get_section(body, "Active State")[2].strip() == ""  # loser never applied
+
+    cblob = backend.read(payload["conflict_key"])
+    assert cblob.body.decode("utf-8") == "loser-active"
+
+
+def test_threaded_disjoint_sections_no_loss(tmp_path):
+    store = str(tmp_path)
+    project = "proj-threaded"
+    r0 = ks.flush_state(store, project, "## Active State\n\n## Notes\n\n")
+
+    barrier = threading.Barrier(2)
+    results = {}
+
+    def worker(name, section, content):
+        barrier.wait()
+        try:
+            results[name] = ks.flush_state(store, project, content,
+                                            expect_hash=r0["version_hash"], section=section)
+        except SystemExit as e:
+            results[name] = json.loads(str(e))
+
+    t1 = threading.Thread(target=worker, args=("w1", "Active State", "thread-active"))
+    t2 = threading.Thread(target=worker, args=("w2", "Notes", "thread-notes"))
+    t1.start(); t2.start()
+    t1.join(timeout=10); t2.join(timeout=10)
+
+    assert "w1" in results and "w2" in results
+    backend = ks._backend(store)
+    blob = backend.read(ks._key(project, "state"))
+    fm, body = ks.parse(blob.body.decode("utf-8"))
+
+    for name, section, content in (("w1", "Active State", "thread-active"),
+                                    ("w2", "Notes", "thread-notes")):
+        r = results[name]
+        if r.get("ok"):
+            assert ks._get_section(body, section)[2].strip() == content
+        else:
+            assert r["reason"] in ("conflict_parked", "conflict_retry_exhausted")
+            cblob = backend.read(r["conflict_key"])
+            assert cblob is not None
+            assert cblob.body.decode("utf-8") == content

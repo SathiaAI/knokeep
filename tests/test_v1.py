@@ -36,9 +36,9 @@ check("update without expect-hash blocked", rc != 0 and "expect_hash required" i
 rc, out, err = run("flush-state", "--body-file", bf("## Architecture\nPython 3.11 CLI v2"), "--expect-hash", h0)
 h1 = json.loads(out)["version_hash"] if rc == 0 else None
 check("hash-matched update ok", rc == 0 and json.loads(out)["ok"] and json.loads(out)["revision"] == 2)
-# stale rejected
+# stale whole-doc update: H1 parks the losing body (no lost update, nothing dropped)
 rc, out, err = run("flush-state", "--body-file", bf("## Architecture\nx"), "--expect-hash", STALE_HASH)
-check("stale update blocked", rc != 0 and "stale" in err)
+check("stale update blocked (parked)", rc != 0 and "conflict_parked" in err)
 # secret in body blocked (full-content scan)
 rc, out, err = run("flush-state", "--body-file", bf("## Architecture\nkey sk-ant-EXAMPLE0000000000000000000000000000"), "--expect-hash", h1)
 check("secret in state blocked", rc != 0 and "blocked" in err)

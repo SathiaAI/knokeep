@@ -196,6 +196,39 @@ def test_retry_exhaustion_is_parked(tmp_path, monkeypatch):
     assert cblob.body.decode("utf-8") == "loser-active"
 
 
+def test_f1_winner_committed_before_first_read_parks(tmp_path):
+    """F1 regression (adversarial finding): a winner that commits BEFORE the
+    loser's flush even reads must NOT be silently overwritten. The loser holds a
+    now-stale expect_hash; it must park, never clobber, never return success."""
+    store = str(tmp_path)
+    project = "proj-f1"
+    r0 = ks.flush_state(store, project, "## Active State\n\n## Notes\n\n")
+    # Winner commits to Active State using r0's hash -> store advances past r0.
+    _direct_section_write(ks._persist, store, project, "Active State", "winner", r0["version_hash"])
+    # Loser flushes the SAME section with the now-stale r0 hash: must park.
+    with pytest.raises(SystemExit) as exc:
+        ks.flush_state(store, project, "loser", expect_hash=r0["version_hash"], section="Active State")
+    payload = _die_payload(exc)
+    assert payload["reason"] == "conflict_parked"
+    backend = ks._backend(store)
+    blob = backend.read(ks._key(project, "state"))
+    _, body = ks.parse(blob.body.decode("utf-8"))
+    assert ks._get_section(body, "Active State")[2].strip() == "winner"   # winner intact
+    assert backend.read(payload["conflict_key"]).body.decode("utf-8") == "loser"  # loser parked
+
+
+def test_crlf_section_replace_no_duplicate():
+    """F3 regression: CRLF '## Heading' lines must be found (not appended as a
+    duplicate), and a sibling section preserved."""
+    body = "## Active State\r\nold\r\n\r\n## Notes\r\nkeep\r\n"
+    got = ks._get_section(body, "Active State")
+    assert got is not None                       # heading found despite CRLF
+    new = ks._replace_section(body, "Active State", "fresh")
+    assert new.count("## Active State") == 1     # not duplicated
+    assert "fresh" in new and "keep" in new      # replaced + sibling preserved
+    assert "old" not in new
+
+
 def test_threaded_disjoint_sections_no_loss(tmp_path):
     store = str(tmp_path)
     project = "proj-threaded"

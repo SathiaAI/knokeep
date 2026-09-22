@@ -180,6 +180,7 @@ def _flush_doc(kind, store, project, new_content, expect_hash=None, section=None
 
     base_section = None
     base_hash = None
+    base_established = False
     new_body = new_content
     res = None
 
@@ -196,7 +197,8 @@ def _flush_doc(kind, store, project, new_content, expect_hash=None, section=None
             fm, cur_body, cur_hash = None, "", None
 
         if blob is not None and not expect_hash and attempt == 1:
-            die(reason="expect_hash required for update", current_hash=cur_hash)
+            die(reason=("expect_hash required for log update" if kind == "log"
+                        else "expect_hash required for update"), current_hash=cur_hash)
 
         if section is not None:
             try:
@@ -206,9 +208,19 @@ def _flush_doc(kind, store, project, new_content, expect_hash=None, section=None
                                 base_hash, cur_hash, reason="conflict_parked")
             cur_section = got[2] if got else None
 
-            if attempt == 1:
-                base_section = cur_section
-                base_hash = cur_hash
+            if not base_established:
+                # F1 fix: the reapply baseline is valid ONLY against the caller's
+                # known version. expect_hash is None only on a first-ever create
+                # (no prior winner to clobber). If the store has already advanced
+                # past expect_hash, we NEVER observed the caller's true section, so
+                # reapplying could silently overwrite whoever advanced it -> PARK.
+                if expect_hash is None or cur_hash == expect_hash:
+                    base_section = cur_section
+                    base_hash = cur_hash
+                    base_established = True
+                else:
+                    _park_conflict(backend, store, project, sess, new_content, section,
+                                    expect_hash, cur_hash, reason="conflict_parked")
             elif cur_section != base_section:
                 _park_conflict(backend, store, project, sess, new_content, section,
                                 base_hash, cur_hash, reason="conflict_parked")
@@ -219,19 +231,23 @@ def _flush_doc(kind, store, project, new_content, expect_hash=None, section=None
                 _park_conflict(backend, store, project, sess, new_content, section,
                                 base_hash, cur_hash, reason="conflict_parked")
 
-            persist_expect = expect_hash if attempt == 1 else cur_hash
+            persist_expect = cur_hash   # always CAS against the version we built upon
         else:
             base_hash = cur_hash
             new_body = new_content
-            persist_expect = expect_hash
+            persist_expect = expect_hash if blob is not None else None
 
         if blob is not None:
             out_fm = dict(fm)
             out_fm["revision"] = int(fm.get("revision", 0)) + 1
             out_fm["updated"] = now()
         else:
-            out_fm = {"schema_version": SCHEMA_VERSION, "project_id": project,
-                      "client": "cowork", "revision": 1, "updated": now()}
+            # Legacy metadata preserved per-kind (F7): state carries client, log does not.
+            out_fm = {"schema_version": SCHEMA_VERSION, "project_id": project}
+            if kind == "state":
+                out_fm["client"] = "cowork"
+            out_fm["revision"] = 1
+            out_fm["updated"] = now()
 
         res = _persist(backend, key, kind, _bytes(out_fm, new_body), persist_expect)
 
@@ -310,18 +326,20 @@ def _section(b, h):
 # followed by whitespace (so "### Sub" never matches — after the 2nd '#' a
 # 3rd '#' is not whitespace), anchored to the start of a line so "##" text
 # appearing mid-paragraph is never mistaken for a heading.
-_ANY_H2_RE = re.compile(r"(?m)^##[ \t]+\S")
+_ANY_H2_RE = re.compile(r"(?m)^##(?=[ \t]|\r?$)")
 
 
 def _get_section(body, heading):
-    """Locate the '## <heading>' block in body.
+    """Locate the '## <heading>' block in body (CRLF-tolerant).
 
     Returns (start, end, content) where content is everything between the
     heading line and the next level-2 heading (or end of doc), or None if
     the heading is absent. Raises ValueError if the heading appears more
     than once (ambiguous — caller must not guess which one to touch).
+    The heading match tolerates a trailing CR (CRLF docs) so it never fails
+    to find an existing heading and blindly appends a duplicate.
     """
-    hre = re.compile(rf"(?m)^##[ \t]+{re.escape(heading)}[ \t]*$")
+    hre = re.compile(rf"(?m)^##[ \t]+{re.escape(heading)}[ \t]*\r?$")
     matches = list(hre.finditer(body))
     if not matches:
         return None
@@ -373,19 +391,29 @@ def _park_conflict(backend, store, project, session, losing_content, section,
         if isinstance(cres, OK):
             conflict_key = candidate
             break
+        # A secret inside the losing body must NOT be stored: fail loud and
+        # distinctly (never a silent overwrite, never a generic park_failed).
+        if isinstance(cres, ERROR) and cres.kind == ErrorKind.SECRET_BLOCKED:
+            die(reason="conflict_body_secret_blocked", reasons=list(cres.labels),
+                base_hash=base_hash, current_hash=current_hash)
     if conflict_key is None:
         # Could not even park a copy — fail closed without pretending success.
         die(reason="conflict_park_failed", base_hash=base_hash, current_hash=current_hash)
 
+    # Journal note carries keys/hashes only — never body bytes. The section name
+    # is caller text: flatten any CR/LF so it cannot break the note line (it still
+    # passes through the secret gate on the journal write).
     note = f"conflict_parked key={conflict_key} base_hash={base_hash or 'none'} current_hash={current_hash or 'none'}"
     if section:
-        note += f" section={section}"
+        note += " section=" + str(section).replace("\r", " ").replace("\n", " ")
+    journal_recorded = True
     try:
         session_append(store, project, session, "system", note)
     except SystemExit:
-        pass  # journal note is best-effort; never mask the primary conflict signal
+        journal_recorded = False  # surfaced in the die payload — never silently swallowed
 
-    die(reason=reason, conflict_key=conflict_key, current_hash=current_hash, base_hash=base_hash)
+    die(reason=reason, conflict_key=conflict_key, current_hash=current_hash,
+        base_hash=base_hash, journal_recorded=journal_recorded)
 # --- end H1 increment 1 helpers ---------------------------------------------
 
 _BENIGN_STORE_FILES = {".ds_store", "thumbs.db", "desktop.ini"}

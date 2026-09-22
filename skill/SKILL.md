@@ -5,9 +5,9 @@ description: "Portable, secret-safe project memory across sessions and AI tools.
 
 # KnoKeep
 
-Keep exact project state (architecture, paths, decisions, active task, next step) in a durable store that survives compaction, new threads, and tool switches. Secret-safe by design. Schema: `docs/SCHEMA.md`. Store = the project's Cowork Project docs (primary) mirrored to a private git repo; locally, a folder. Set `STORE` to that path and `PROJECT` to the project slug.
+Keep exact project state (architecture, paths, decisions, active task, next step) in a durable store that survives compaction, new threads, and tool switches. Secret-safe by design. Schema: `docs/SCHEMA.md`. Set `PROJECT` to the project slug. `--store` is **optional**: it defaults to a per-user, tool-independent store (override with `$KNOKEEP_STORE`), so every tool — Cursor, Codex, Claude Code, Cowork — resumes from the SAME memory. The MCP server (bundled with the plugin) shares that exact store.
 
-Helper (stdlib Python, on the machine): `skill/knokeep_state.py`. Every write passes the secret gate (`skill/knokeep_secretgate.py`) and is **refused** if a secret value is present — store references, never values.
+Helper (stdlib Python, on the machine): `skill/knokeep_state.py`, unified onto the V2 store engine — writes go through the single store gate (`store/gate.py`) and land in a `LocalBackend` store shared with the MCP server. Every write is **refused** if a secret value is present — store references, never values. The `version_hash` you pass to `--expect-hash` is the store's content hash (64-hex).
 
 ## At session start (ALWAYS — bootstrap)
 ```

@@ -23,7 +23,7 @@ def bf(text):
 
 run("init")
 _, out, _ = run("bootstrap"); h0 = json.loads(out)["version_hash"]
-run("flush-state", "--body-file", bf("## Architecture\nstale"), "--expect-hash", "deadbeef0000")  # block: stale
+run("flush-state", "--body-file", bf("## Architecture\nstale"), "--expect-hash", "de" * 32)  # block: stale (valid 64-hex, non-matching)
 run("flush-state", "--body-file", bf("## Architecture\nkey " + SECRET), "--expect-hash", h0)  # block: secret
 
 events = os.path.join(store, ".knokeep-eval", "events.jsonl")

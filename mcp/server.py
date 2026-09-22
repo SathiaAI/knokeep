@@ -78,6 +78,7 @@ from store import gate
 from store.backend import StoreBackend
 from store.fake import FakeBackend
 from store.local import LocalBackend
+from store.config import default_store_root
 from store.types import ERROR, EXISTS, OK, STALE, ErrorKind, WriteResult, commit_class
 
 JSONRPC_VERSION = "2.0"
@@ -719,9 +720,8 @@ def _build_backend(args: argparse.Namespace) -> StoreBackend:
     if args.backend == "fake":
         return FakeBackend()
     if args.backend == "local":
-        if not args.root:
-            raise SystemExit("--root is required for --backend local")
-        return LocalBackend(args.root)
+        root = args.root or default_store_root()          # shared cross-tool default (T-4)
+        return LocalBackend(root)
     if args.backend == "objectstore":
         # JUDGMENT CALL: wired in for the task's optional "smoke-test
         # against objectstore (moto)" convenience only — not part of the

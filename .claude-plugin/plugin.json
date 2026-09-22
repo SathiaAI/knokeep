@@ -7,5 +7,11 @@
   "homepage": "https://github.com/SathiaAI/knokeep",
   "repository": "https://github.com/SathiaAI/knokeep",
   "keywords": ["memory", "context", "compaction", "handoff", "cowork", "mcp", "portable", "cross-tool"],
-  "skills": ["skill/SKILL.md"]
+  "skills": ["skill/SKILL.md"],
+  "mcpServers": {
+    "knokeep": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/shims/launch_mcp.mjs"]
+    }
+  }
 }

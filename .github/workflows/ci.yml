@@ -8,14 +8,16 @@ on:
 permissions:
   contents: read
 
-# Scoped to the V2 pluggable-storage code (store/, reconciler/, mcp/, migrate/,
-# conformance/, and the V2 tests). V1 (skill/, tools/) has its own Windows-path
-# / live-store assumptions and is not exercised here.
+# V2 pluggable-storage code PLUS the V2.1 unify: the skill now rides the store
+# engine (store/gate + LocalBackend) and the plugin wires an MCP server, so the
+# skill / shared-store / plugin-root tests are part of the gate now.
 env:
   V2_TESTS: >-
     conformance
     tests/test_boundary.py
     tests/test_gate_hardening.py
+    tests/test_gate_supplement.py
+    tests/test_plugin_store_root.py
     tests/test_local_backend.py
     tests/test_git_backend.py
     tests/test_objectstore.py
@@ -25,6 +27,13 @@ env:
     tests/test_reconciler_divergence.py
     tests/test_reconciler_no_write_path.py
     tests/test_reconciler_secret_quarantine.py
+  # V1/skill acceptance tests are script-style (run directly, not pytest-collected).
+  SKILL_TESTS: >-
+    tests/test_v1.py
+    tests/test_concurrency.py
+    tests/test_eval.py
+    tests/test_audit.py
+    tests/test_skill_mcp_shared_store.py
 
 jobs:
   test-linux:
@@ -50,8 +59,12 @@ jobs:
           python-version: "3.11"
       - name: Install deps
         run: pip install pytest pg8000 boto3 "moto[server]" flask flask-cors
-      - name: Run V2 conformance + tests (all four backends)
+      - name: V2 conformance + tests (all four backends) + unified skill/plugin tests
         run: python -m pytest $V2_TESTS -q
+      - name: V1/skill acceptance scripts (unified engine)
+        run: |
+          set -e
+          for t in $SKILL_TESTS; do echo "== $t =="; python "$t"; done
 
   test-windows:
     runs-on: windows-latest
@@ -64,9 +77,28 @@ jobs:
           python-version: "3.11"
       - name: Install deps
         run: pip install pytest pg8000 boto3 "moto[server]" flask flask-cors
-      - name: Run local adapter (msvcrt/NTFS native) + conformance
+      - name: Local adapter (msvcrt/NTFS native) + conformance + skill/plugin tests
         shell: bash
-        run: python -m pytest tests/test_local_backend.py conformance -q
+        run: python -m pytest tests/test_local_backend.py conformance tests/test_gate_supplement.py tests/test_plugin_store_root.py -q
+      - name: V1/skill acceptance scripts (unified engine)
+        shell: bash
+        run: |
+          set -e
+          for t in $SKILL_TESTS; do echo "== $t =="; python "$t"; done
+      - name: Plugin manifests + cross-OS MCP launcher smoke (node -> python -m mcp.server)
+        shell: bash
+        run: |
+          set -e
+          python -c "import json;json.load(open('.claude-plugin/plugin.json'));json.load(open('.claude-plugin/marketplace.json'));print('manifests valid JSON')"
+          node --check shims/launch_mcp.mjs
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+            | KNOKEEP_STORE="$RUNNER_TEMP/kk-store" node shims/launch_mcp.mjs > launcher_out.txt
+          grep -q '"name": "knokeep-mcp"' launcher_out.txt
+          grep -q 'knokeep_read' launcher_out.txt
+          echo "launcher handshake + tools/list OK"
 
   gitleaks:
     runs-on: ubuntu-latest

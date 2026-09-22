@@ -21,6 +21,7 @@ import hmac
 import math
 import re
 import secrets
+import unicodedata
 from typing import Callable, List, Optional, Sequence
 
 from .types import ERROR, OK, ErrorKind, STALE, EXISTS, WriteResult, sha256_hex
@@ -214,7 +215,7 @@ _PREFIX_PATTERNS: Sequence[tuple] = (
 )
 
 _PEM_RE = re.compile(rb"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
-_CRED_URI_RE = re.compile(rb"[A-Za-z][A-Za-z0-9+.-]*://[^\s/:@]+:[^\s/:@]+@[^\s/]+")
+_CRED_URI_RE = re.compile(rb"[A-Za-z][A-Za-z0-9+.-]{0,31}://[^\s/:@]+:[^\s/:@]+@[^\s/]+")
 
 _TOKEN_RE = re.compile(rb"[A-Za-z0-9+_=.-]{32,}")
 _ENTROPY_MIN_LEN = 32
@@ -244,6 +245,152 @@ def _looks_like_plain_hex(tok: str) -> bool:
     return re.fullmatch(r"[0-9a-fA-F]+", tok) is not None
 
 
+# --------------------------------------------------------------------------
+# Superset coverage (V2.1 unify). The skill's write door moved from the V1
+# gate (knokeep_secretgate) onto THIS gate; the byte pass above was NARROWER
+# than the V1 gate, so these patterns — ported verbatim from the V1 gate that
+# tests/test_secretgate.py already pins — are added as a TEXT pass so the one
+# store gate is a proven superset of both scanners. It can only ADD labels; it
+# never runs the entropy heuristic (the byte pass owns the hex-safe check) and
+# never returns a matched value. Reviewed under the T-6 adversarial gate.
+# --------------------------------------------------------------------------
+
+_ZW_TRANS = dict.fromkeys(map(ord, "​‌‍⁠﻿"), None)
+
+def _normalize_text_str(text: str) -> str:
+    # NFKC fold, then drop ALL Unicode format (Cf) chars — not just the five in
+    # _ZW_TRANS — so an invisible char (bidi override, soft hyphen, variation
+    # selector, ...) cannot split a token in the normalized scan view (T-6 r3).
+    folded = unicodedata.normalize("NFKC", text)
+    return "".join(c for c in folded if unicodedata.category(c) != "Cf")
+
+def _normalize_bytes(raw: bytes):
+    """NFKC + zero-width-strip view of `raw`, re-encoded to utf-8, or None if raw
+    is not valid utf-8 or the normalized view is unchanged. Scanning this view in
+    addition to raw gives EVERY family the same ZW/fullwidth anti-evasion
+    (T-6 round-2 finding: normalization must not be applied to added families only)."""
+    try:
+        norm = _normalize_text_str(raw.decode("utf-8"))
+    except UnicodeDecodeError:
+        return None
+    nb = norm.encode("utf-8")
+    return nb if nb != raw else None
+
+_ALLOWED_C0 = frozenset({0x09, 0x0A, 0x0D})
+
+def _is_acceptable_text(raw: bytes) -> bool:
+    """Write-door content contract (T-6 round 2): a KnoKeep doc is valid utf-8
+    text with no NUL / C0 control (except tab/newline/CR). Refusing anything else
+    in persist() closes the 'encode a secret in UTF-16/invalid-utf-8 to skip the
+    text-family scan' bypass at the source rather than scanning every encoding."""
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    # str.isprintable() is False for C0/C1 controls, DEL, line/paragraph
+    # separators, and ALL Unicode format (Cf) chars — zero-width, bidi overrides
+    # (U+202E/U+2066), soft hyphen (U+00AD), etc. A category rule (not a five-char
+    # denylist) refuses every invisible smuggling char at the source (T-6 r3);
+    # tab / newline / CR are the only non-printables allowed.
+    return all(c.isprintable() or ord(c) in _ALLOWED_C0 for c in text)
+
+# Added families as BYTE patterns (length-bounded, no ReDoS) so they run on the
+# raw bytes AND the normalized view, exactly like the original _PREFIX_PATTERNS.
+_ADDED_PREFIX_PATTERNS: Sequence[tuple] = (
+    (re.compile(rb"sk-(?:proj|svcacct)-[A-Za-z0-9_-]{6,200}"), "openai project/service key"),
+    (re.compile(rb"gh[osur]_[A-Za-z0-9]{20,255}"), "github token"),
+    (re.compile(rb"hf_[A-Za-z0-9]{20,255}"), "huggingface token"),
+    (re.compile(rb"ya29\.[A-Za-z0-9_-]{10,512}"), "google oauth token"),
+    (re.compile(rb"AIza[A-Za-z0-9_-]{20,200}"), "google api key"),
+    (re.compile(rb"ASIA[A-Z0-9]{12,200}"), "AWS temp key"),
+    (re.compile(rb"whsec_[A-Za-z0-9]{16,200}"), "stripe webhook secret"),
+    (re.compile(rb"npm_[A-Za-z0-9]{30,200}"), "npm token"),
+    (re.compile(rb"(?:sk|rk)_test_[A-Za-z0-9]{10,200}"), "stripe-style test key"),
+    (re.compile(rb"eyJ[A-Za-z0-9_-]{10,1024}\.[A-Za-z0-9_-]{10,1024}\.[A-Za-z0-9_-]{4,1024}"), "JWT"),
+    (re.compile(rb"xoxe-[A-Za-z0-9-]{8,200}"), "slack app token"),
+)
+
+_ALL_PREFIX_PATTERNS: Sequence[tuple] = tuple(_PREFIX_PATTERNS) + _ADDED_PREFIX_PATTERNS
+
+# key (optionally quoted) :/= value (optionally quoted) — env, JSON/YAML, ODBC Pwd=
+# Assignment scan: word-boundary-anchored key (no 'compass' -> 'pass'), and the
+# VALUE is gated by _value_is_credential_like so 'token: see README' does not
+# refuse a legitimate write. Value groups are length-bounded (no ReDoS).
+_ASSIGN_KEY = (
+    r"password|passwd|passphrase|pwd|secret|api[_\- ]?key|access[_\- ]?key|"
+    r"secret[_\- ]?key|auth[_\- ]?token|token|credential|client[_\- ]?secret|private[_\- ]?key"
+)
+_ASSIGN_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])[\"']?(" + _ASSIGN_KEY + r")[\"']?\s*[:=]\s*"
+    r"(?:\"([^\"\n]{1,4096})\"|'([^'\n]{1,4096})'|([^\s\"';,}]{1,4096}))"
+)
+_PLACEHOLDER_RE = re.compile(
+    r"(?i)^(?:<[^>]*>|\{\{?[^}]*\}?\}|x{3,}|\*{3,}|none|null|nil|true|false|yes|no|"
+    r"enabled|disabled|tbd|todo|changeme|example|redacted|value|placeholder|"
+    r"your[_\-]?\w+|not[_\- ]?stored|in[_\- ]?\.?env|n/?a|omitted|\.\.\.)$"
+)
+_ENV_REF_RE = re.compile(r"^(?:\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|%[A-Za-z_][A-Za-z0-9_]*%)$")
+_GETENV_RE = re.compile(r"(?i)^(?:os\.getenv\(|getenv\(|process\.env\b|import\.meta\.env\b)")
+# a getenv/environ call carrying a quoted string literal fallback -> the fallback
+# is a hard-coded secret; do NOT exempt it (round-2 finding: getenv-with-literal).
+_GETENV_LITERAL_RE = re.compile(r"(?i)(?:getenv|environ\.get)\s*\([^)\n]*,\s*[\"'][^\"'\n]{4,}[\"']")
+_BEARER_RE = re.compile(
+    r"(?i)authoriz(?:ation|e)[\"']?\s*[:=]\s*[\"']?\s*(?:bearer|basic)\s+[A-Za-z0-9+/=._-]{8,4096}"
+)
+
+
+def _value_is_credential_like(val: str, quoted: bool) -> bool:
+    """Round-2 policy: a keyword assignment is a secret only when the VALUE looks
+    like a credential — a known prefix, or a compact high-entropy token — so
+    'token: see README' / 'compass: north' / 'API key: not provided' stay writable
+    while 'password = hunter2plaintextvalue' and 'api_key=sk-ant-...' do not."""
+    if not val or _PLACEHOLDER_RE.match(val) or _ENV_REF_RE.match(val):
+        return False
+    b = val.encode("utf-8", "ignore")
+    for pat, _lbl in _ALL_PREFIX_PATTERNS:      # a known secret prefix is decisive
+        if pat.search(b):
+            return True
+    ent = _shannon_entropy(val)
+    mixed = any(c.isupper() for c in val) and any(c.islower() for c in val)
+    has_digit = any(c.isdigit() for c in val)
+    if len(val) >= 12 and ent >= 3.5 and (mixed or has_digit) and not _looks_like_plain_hex(val):
+        return True
+    if quoted and len(val) >= 8 and ent >= 3.3 and (mixed or has_digit):
+        return True
+    return False
+
+
+def _scan_assignments(text: str) -> List[str]:
+    labels: List[str] = []
+    for m in _ASSIGN_RE.finditer(text):
+        qv = m.group(2) if m.group(2) is not None else m.group(3)
+        quoted = qv is not None
+        val = qv if quoted else m.group(4)
+        if val is None:
+            continue
+        if not quoted and _GETENV_RE.search(val):
+            _end = text.find(")", m.end())               # scope to THIS getenv call's parens,
+            _seg = text[m.start():(_end + 1 if _end != -1 else m.end() + 256)]  # not a fixed window
+            if _GETENV_LITERAL_RE.search(_seg):
+                labels.append("secret assignment (getenv-fallback)")
+                break
+            continue
+        if _value_is_credential_like(val, quoted):
+            labels.append("secret assignment (" + m.group(1).lower().replace(" ", "") + ")")
+            break
+    return labels
+
+
+def _scan_normalized_text(text: str) -> List[str]:
+    """ASSIGN + Authorization scanning over a normalized text view. Added prefix
+    families are scanned at the byte level (raw + normalized) inside secret_scan."""
+    labels: List[str] = []
+    if _BEARER_RE.search(text):
+        labels.append("authorization header token")
+    labels.extend(_scan_assignments(text))
+    return labels
+
+
 def secret_scan(raw: bytes) -> List[str]:
     """Return LABELS ONLY for what looks like a secret in `raw`. Never the value.
     Best-effort heuristic (one of four layers), hardened against the two review
@@ -252,16 +399,28 @@ def secret_scan(raw: bytes) -> List[str]:
     if not isinstance(raw, (bytes, bytearray)):
         raise TypeError("secret_scan requires bytes")
     raw = bytes(raw)
+    if len(raw) > _MAX_SCAN_BYTES:                     # fail-closed in-function (T-6 round 2)
+        raise ValueError("secret_scan: input exceeds _MAX_SCAN_BYTES")
     labels: List[str] = []
 
-    for pattern, label in _PREFIX_PATTERNS:
-        if pattern.search(raw):
-            labels.append(label)
-
-    if _PEM_RE.search(raw):
-        labels.append("PEM private key")
-    if _CRED_URI_RE.search(raw):
-        labels.append("credential URI")
+    # Byte pass over the raw bytes AND the NFKC + zero-width-normalized view, for
+    # ALL families (original + added) so a zero-width / fullwidth trick cannot skip
+    # any of them (T-6 round 2).
+    _views = [raw]
+    _norm_view = _normalize_bytes(raw)
+    if _norm_view is not None:
+        _views.append(_norm_view)
+    if b"\x00" in raw:                                 # byte-preserving recovery of a UTF-16/32-
+        _views.append(raw.replace(b"\x00", b""))       # encoded ASCII token (defense-in-depth; persist
+                                                       # also refuses NUL/non-utf-8 via the accept contract)
+    for _view in _views:
+        for pattern, label in _ALL_PREFIX_PATTERNS:
+            if pattern.search(_view):
+                labels.append(label)
+        if _PEM_RE.search(_view):
+            labels.append("PEM private key")
+        if _CRED_URI_RE.search(_view):
+            labels.append("credential URI")
 
     for m in _TOKEN_RE.finditer(raw):
         tok = m.group()
@@ -287,7 +446,19 @@ def secret_scan(raw: bytes) -> List[str]:
             labels.append("high-entropy token")
             break
 
-    return labels
+    # Assignment / Authorization scanning over the normalized text view.
+    try:
+        _norm_text = _normalize_text_str(raw.decode("utf-8"))
+    except UnicodeDecodeError:
+        _norm_text = None
+    if _norm_text is not None:
+        labels.extend(_scan_normalized_text(_norm_text))
+
+    seen: List[str] = []                              # dedupe, preserve order
+    for _l in labels:
+        if _l not in seen:
+            seen.append(_l)
+    return seen
 
 
 # --------------------------------------------------------------------------
@@ -333,6 +504,13 @@ def persist(
     if doc_type not in STATE_DOC_TYPES:
         if _extract_generation(raw_bytes) is None:
             return ERROR(ErrorKind.INVALID_ARGUMENT)
+
+    # 4b. Write-door content contract (T-6 round 2): the body must be valid utf-8
+    # text with no NUL / C0 control (except tab/newline/CR). This refuses
+    # UTF-16 / invalid-utf-8 / NUL-laced content that could smuggle a secret past
+    # the text-family scan, closing that encoding bypass at the source.
+    if not _is_acceptable_text(raw_bytes):
+        return ERROR(ErrorKind.INVALID_ARGUMENT)
 
     # 5. secret scan of BOTH key and body — fail closed (review finding #1)
     try:

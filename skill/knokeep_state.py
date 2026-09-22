@@ -1,11 +1,27 @@
 #!/usr/bin/env python3
-"""KnoKeep state helper v2 (stdlib) - single enforced write boundary + hash-guarded
-concurrency + fail-closed secret gate. Schema v1 (see docs/SCHEMA.md).
-Every write goes through safe_write(): metadata validated, FULL serialized content scanned,
-atomic (mkstemp+fsync+os.replace). No other write path exists."""
-import sys, os, re, json, time, hashlib, datetime, argparse, tempfile
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import knokeep_secretgate as sg
+"""KnoKeep state helper v2.1 (stdlib + V2 store engine) — the skill unified onto ONE engine.
+
+Every write goes through THE single write door: store.gate.persist(backend, key, raw_bytes,
+expected_hash=, doc_type=). The gate scans key+body and fails closed on a secret; the
+LocalBackend adapter owns concurrency + durability (journal-then-atomic-publish, OS-level
+cas.lock, full-sha256 content-hash CAS). The skill keeps its higher-level behavior:
+bootstrap/resume_line, sectioned flushes, revisions, per-session journals, telemetry,
+health/eval. Skill + MCP share ONE store (the LocalBackend root). Schema v1.
+
+V2.1 changes vs V1: safe_write/_atomic/Lock/body_hash-CAS and the write-path secret scan
+are gone; the CAS token is the store's 64-hex sha256 (was a 12-hex body hash). Structural
+validation (identifier shape, no-newline metadata) stays skill-side. The bootstrap/health
+out-of-band store audit enumerates via backend.list()/read() and re-scans each blob through
+store.gate (content-based: reject non-utf-8/secret-bearing blobs). knokeep_secretgate retired."""
+import sys, os, re, json, datetime, argparse
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
+sys.path.insert(0, _ROOT)   # store package (parent) — the shared V2 engine
+from store import gate
+from store.local import LocalBackend
+from store.types import OK, STALE, EXISTS, ERROR, ErrorKind
+from store.config import default_store_root
 
 SCHEMA_VERSION = 1
 ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -15,9 +31,6 @@ def now():
 
 def _auto_sid():                                              # session-append without --session-id: generate a valid one
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M") + "-" + ("%04d" % (os.getpid() % 10000))
-
-def body_hash(body):
-    return hashlib.sha256(body.strip().encode("utf-8")).hexdigest()[:12]
 
 def die(**kw):
     kw["blocked"] = True
@@ -47,36 +60,64 @@ def dump(fm, body):
     head = "\n".join(f"{k}: {v}" for k, v in fm.items())
     return f"---\n{head}\n---\n{body.strip()}\n"
 
-def paths(store, project):
-    if not valid_id(project):
-        die(reason="invalid project id", value=project)
-    store_abs = os.path.realpath(store)                       # resolve symlinks for containment
-    base = os.path.realpath(os.path.join(store_abs, project))
-    if os.path.commonpath([store_abs, base]) != store_abs:
-        die(reason="path traversal", value=project)
-    return {"root": store_abs, "base": base,
-            "state": os.path.join(base, "system_state.md"),
-            "log": os.path.join(base, "session_log.md"),
-            "sessions": os.path.join(base, "sessions")}
-
-def read(p):
+def _readfile(p):
     return open(p, encoding="utf-8").read() if os.path.exists(p) else ""
 
-def _atomic(p, text):
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text); fh.flush(); os.fsync(fh.fileno())
-        os.replace(tmp, p)
-        try:                                                  # durability: fsync parent dir where supported
-            dfd = os.open(os.path.dirname(p), os.O_RDONLY); os.fsync(dfd); os.close(dfd)
-        except (OSError, AttributeError):
-            pass
-    finally:
-        if os.path.exists(tmp):
-            try: os.remove(tmp)
-            except OSError: pass
+# --- store wiring (V2 engine) ------------------------------------------------
+
+def _validate_project(project):
+    if not valid_id(project):
+        die(reason="invalid project id", value=project)
+
+def _backend(store):
+    return LocalBackend(os.path.realpath(store))
+
+def _data_dir(store, project=None):
+    d = os.path.join(os.path.realpath(store), "data")
+    return os.path.join(d, project) if project else d
+
+def _key(project, kind, sid=None):
+    if kind == "state":
+        return f"{project}/system_state"
+    if kind == "log":
+        return f"{project}/session_log"
+    if kind == "journal":
+        return f"{project}/sessions/{sid}"
+    raise ValueError(kind)
+
+_DOC_TYPE = {"state": "system_state", "log": "session_log", "journal": "journal"}
+
+def _validate_fm(fm):
+    """Structural metadata validation kept skill-side (the gate validates the KEY and
+    scans bytes, not the skill's frontmatter semantics)."""
+    for k, v in fm.items():
+        s = str(v)
+        if "\n" in s or "\r" in s:
+            die(reason="metadata contains newline", field=k)
+        if k in ("project_id", "session_id", "client") and not valid_id(s):
+            die(reason="invalid identifier", field=k, value=s)
+    return fm
+
+def _bytes(fm, body):
+    _validate_fm(fm)
+    return dump(fm, body).encode("utf-8")
+
+def _persist(backend, key, kind, raw_bytes, expected_hash):
+    return gate.persist(backend, key, raw_bytes, expected_hash=expected_hash, doc_type=_DOC_TYPE[kind])
+
+def _require_ok(res):
+    """Map a WriteResult onto the skill's die()/JSON contract; return the new 64-hex on OK."""
+    if isinstance(res, OK):
+        return res.new_hash
+    if isinstance(res, STALE):
+        die(reason="stale", current_hash=res.current_hash)
+    if isinstance(res, EXISTS):
+        die(reason="exists", current_hash=res.current_hash)
+    if isinstance(res, ERROR):
+        if res.kind == ErrorKind.SECRET_BLOCKED:
+            die(reasons=list(res.labels))
+        die(reason="write_error", kind=res.kind.value)
+    die(reason="write_error", kind="unknown")
 
 EVENTS_DIR = ".knokeep-eval"
 _SAFE_KEYS = ("reason", "reasons", "findings", "field", "current_hash")
@@ -91,7 +132,7 @@ def _labels(code):
 
 def _event(store, project, op, decision, detail=None):
     """Append one telemetry line. Fail-OPEN: never blocks, alters, or crashes a real operation.
-    Lives OUTSIDE the scanned store (never seen by bootstrap); records labels/hashes/counts only."""
+    Lives OUTSIDE the store's data/ dir (never seen by the bootstrap audit); labels/hashes/counts only."""
     try:
         d = os.path.join(os.path.realpath(store), EVENTS_DIR)
         os.makedirs(d, exist_ok=True)
@@ -103,151 +144,156 @@ def _event(store, project, op, decision, detail=None):
     except Exception:
         pass
 
-def safe_write(path, fm, body):
-    """THE single write door: validate metadata, scan FULL serialized content, atomic write."""
-    for k, v in fm.items():
-        s = str(v)
-        if "\n" in s or "\r" in s:
-            die(reason="metadata contains newline", field=k)
-        if k in ("project_id", "session_id", "client") and not valid_id(s):
-            die(reason="invalid identifier", field=k, value=s)
-    text = dump(fm, body)
-    hits = sg.scan_text(text)                     # scans frontmatter + body together
-    if hits:
-        die(reasons=hits)
-    _atomic(path, text)
-
-class Lock:
-    """Advisory lock: O_EXCL lockfile, stale-broken after TTL (crash-safe, cross-platform)."""
-    TTL = 30
-    def __init__(self, target): self.l = target + ".lock"
-    def __enter__(self):
-        for _ in range(400):
-            try:
-                fd = os.open(self.l, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(fd, str(os.getpid()).encode()); os.close(fd); return self
-            except FileExistsError:
-                b = self.l + ".breaking"
-                try:                                           # a crashed breaker must not deadlock the lock
-                    if time.time() - os.path.getmtime(b) > self.TTL:
-                        os.remove(b)
-                except OSError:
-                    pass
-                try:
-                    stale = time.time() - os.path.getmtime(self.l) > self.TTL
-                except OSError:
-                    stale = False
-                if stale:
-                    try:
-                        os.close(os.open(b, os.O_CREAT | os.O_EXCL | os.O_WRONLY))  # one breaker wins
-                        try:                                   # re-verify SAME stale lock before removing (TOCTOU)
-                            if os.path.exists(self.l) and time.time() - os.path.getmtime(self.l) > self.TTL:
-                                os.remove(self.l)
-                        except OSError:
-                            pass
-                        try: os.remove(b)
-                        except OSError: pass
-                        continue
-                    except FileExistsError:
-                        pass
-                time.sleep(0.05)
-        die(reason="lock_timeout")
-    def __exit__(self, *a):
-        try: os.remove(self.l)
-        except OSError: pass
+# --- commands ----------------------------------------------------------------
 
 def init(store, project):
-    P = paths(store, project); os.makedirs(P["sessions"], exist_ok=True)
-    with Lock(P["state"]):
-        if not os.path.exists(P["state"]):
-            body = "## Architecture\n(tbd)\n\n## Path & Variable Directory\n(tbd)\n\n## Hard Constraints\n(tbd)"
-            safe_write(P["state"], {"schema_version": SCHEMA_VERSION, "project_id": project, "client": "cowork",
-                       "revision": 1, "version_hash": body_hash(body), "updated": now()}, body)
-    with Lock(P["log"]):
-        if not os.path.exists(P["log"]):
-            safe_write(P["log"], {"schema_version": SCHEMA_VERSION, "project_id": project, "revision": 1,
-                       "updated": now()}, "## Completed & Verified\n\n## Active State\n\n## Next Step\n")
-    return {"ok": True, "base": P["base"]}
+    _validate_project(project)
+    backend = _backend(store)
+    skey, lkey = _key(project, "state"), _key(project, "log")
+    if backend.read(skey) is None:
+        body = "## Architecture\n(tbd)\n\n## Path & Variable Directory\n(tbd)\n\n## Hard Constraints\n(tbd)"
+        fm = {"schema_version": SCHEMA_VERSION, "project_id": project, "client": "cowork", "revision": 1, "updated": now()}
+        _require_ok(_persist(backend, skey, "state", _bytes(fm, body), None))
+    if backend.read(lkey) is None:
+        fm = {"schema_version": SCHEMA_VERSION, "project_id": project, "revision": 1, "updated": now()}
+        _require_ok(_persist(backend, lkey, "log", _bytes(fm, "## Completed & Verified\n\n## Active State\n\n## Next Step\n"), None))
+    return {"ok": True, "base": _data_dir(store, project)}
 
 def flush_state(store, project, new_body, expect_hash=None):
-    P = paths(store, project)
-    with Lock(P["state"]):                                  # atomic critical section
-        exists = os.path.exists(P["state"])
-        fm, cur_body = parse(read(P["state"]))
-        if exists and not fm:
+    _validate_project(project)
+    backend = _backend(store)
+    skey = _key(project, "state")
+    blob = backend.read(skey)
+    if blob is not None:
+        if not expect_hash:
+            die(reason="expect_hash required for update", current_hash=blob.version_hash)
+        fm, _ = parse(blob.body.decode("utf-8"))
+        if not fm:
             die(reason="malformed state frontmatter")
-        cur = body_hash(cur_body) if exists else ""         # recompute, don't trust stored hash
-        if exists and not expect_hash:
-            die(reason="expect_hash required for update", current_hash=cur)
-        if exists and expect_hash != cur:
-            die(reason="stale", current_hash=cur)
-        fm = fm or {"schema_version": SCHEMA_VERSION, "project_id": project, "client": "cowork"}
         fm["revision"] = int(fm.get("revision", 0)) + 1
-        fm["version_hash"] = body_hash(new_body); fm["updated"] = now()
-        safe_write(P["state"], fm, new_body)
-        rt, rb = parse(read(P["state"]))                    # read-back: confirm own hash + body
-    return {"ok": rt.get("version_hash") == body_hash(new_body) == body_hash(rb),
-            "revision": fm["revision"], "version_hash": fm["version_hash"]}
+        fm["updated"] = now()
+        res = _persist(backend, skey, "state", _bytes(fm, new_body), expect_hash)   # user's hash IS the CAS guard
+    else:
+        fm = {"schema_version": SCHEMA_VERSION, "project_id": project, "client": "cowork", "revision": 1, "updated": now()}
+        res = _persist(backend, skey, "state", _bytes(fm, new_body), None)
+    new_hash = _require_ok(res)
+    return {"ok": True, "revision": fm["revision"], "version_hash": new_hash}
 
 def flush_log(store, project, new_body, expect_hash=None):
-    P = paths(store, project)
-    with Lock(P["log"]):
-        exists = os.path.exists(P["log"])
-        fm, cur_body = parse(read(P["log"]))
-        if exists and not fm:
+    _validate_project(project)
+    backend = _backend(store)
+    lkey = _key(project, "log")
+    blob = backend.read(lkey)
+    if blob is not None:
+        if not expect_hash:
+            die(reason="expect_hash required for log update", current_hash=blob.version_hash)
+        fm, _ = parse(blob.body.decode("utf-8"))
+        if not fm:
             die(reason="malformed log frontmatter")
-        cur = body_hash(cur_body) if exists else ""
-        if exists and not expect_hash:
-            die(reason="expect_hash required for log update", current_hash=cur)
-        if exists and expect_hash != cur:
-            die(reason="stale", current_hash=cur)
-        fm = fm or {"schema_version": SCHEMA_VERSION, "project_id": project}
         fm["revision"] = int(fm.get("revision", 0)) + 1
-        fm["version_hash"] = body_hash(new_body); fm["updated"] = now()
-        safe_write(P["log"], fm, new_body)
-    return {"ok": True, "revision": fm["revision"], "version_hash": fm["version_hash"]}
+        fm["updated"] = now()
+        res = _persist(backend, lkey, "log", _bytes(fm, new_body), expect_hash)
+    else:
+        fm = {"schema_version": SCHEMA_VERSION, "project_id": project, "revision": 1, "updated": now()}
+        res = _persist(backend, lkey, "log", _bytes(fm, new_body), None)
+    new_hash = _require_ok(res)
+    return {"ok": True, "revision": fm["revision"], "version_hash": new_hash}
 
 def session_append(store, project, session_id, client, entry):
-    P = paths(store, project)
-    if not valid_id(session_id): die(reason="invalid session id", value=session_id)
-    if not valid_id(client): die(reason="invalid client", value=client)
-    logp = os.path.join(P["sessions"], session_id, "log.md")
-    os.makedirs(os.path.dirname(logp), exist_ok=True)
-    if os.path.commonpath([P["base"], os.path.realpath(os.path.dirname(logp))]) != P["base"]:
-        die(reason="session path escapes store")
-    with Lock(logp):
-        fm, body = parse(read(logp))
-        fm = fm or {"schema_version": SCHEMA_VERSION, "project_id": project,
-                    "session_id": session_id, "client": client, "updated": now()}
-        fm["updated"] = now()
-        body = (body or "## Journal\n") + f"[{now()}] {entry}\n"
-        safe_write(logp, fm, body)                          # full journal re-scanned each append
-    return {"ok": True, "log": logp}
+    _validate_project(project)
+    if not valid_id(session_id):
+        die(reason="invalid session id", value=session_id)
+    if not valid_id(client):
+        die(reason="invalid client", value=client)
+    backend = _backend(store)
+    jkey = _key(project, "journal", session_id)
+    for _ in range(50):                                       # bounded CAS retry: same-session concurrent appends
+        blob = backend.read(jkey)
+        if blob is None:
+            fm = {"schema_version": SCHEMA_VERSION, "project_id": project,
+                  "session_id": session_id, "client": client, "updated": now()}
+            body = "## Journal\n"
+            expect = None
+        else:
+            fm, body = parse(blob.body.decode("utf-8"))
+            fm = fm or {"schema_version": SCHEMA_VERSION, "project_id": project,
+                        "session_id": session_id, "client": client}
+            fm["updated"] = now()
+            body = body or "## Journal\n"
+            expect = blob.version_hash
+        body = body + f"[{now()}] {entry}\n"
+        res = _persist(backend, jkey, "journal", _bytes(fm, body), expect)
+        if isinstance(res, OK):
+            return {"ok": True, "log": jkey}
+        if isinstance(res, ERROR) and res.kind == ErrorKind.SECRET_BLOCKED:
+            die(reasons=list(res.labels))
+        if isinstance(res, (STALE, EXISTS)):
+            continue                                          # concurrent append/create race — re-read and retry
+        if isinstance(res, ERROR):
+            die(reason="write_error", kind=res.kind.value)
+    die(reason="append_retry_exhausted")
 
 def _section(b, h):
     m = re.search(rf"##\s*{re.escape(h)}\s*\n(.*?)(?=\n##|\Z)", b, re.S)
     return (m.group(1).strip() if m else "")[:400]
 
+_BENIGN_STORE_FILES = {".ds_store", "thumbs.db", "desktop.ini"}
+
+def _audit_store(backend, project):
+    """Out-of-band store audit (single gate, T-2/T-3). Every in-helper write is
+    already gate-scanned, so this catches a BYPASS: a secret or non-text blob
+    written straight to the store. Enumerates via backend.list() (not a raw dir
+    walk) and re-scans each blob's bytes through store.gate — content-based, so a
+    stray binary blob is refused regardless of its file name/extension. Benign
+    OS/tooling files (.DS_Store, Thumbs.db, desktop.ini) are skipped."""
+    findings = []
+    for key in backend.list(project + "/"):
+        name = key.rsplit("/", 1)[-1].lower()
+        if name in _BENIGN_STORE_FILES:
+            continue
+        try:
+            blob = backend.read(key)
+        except Exception:
+            findings.append({"key": key, "reason": "unreadable blob in store"}); continue
+        if blob is None:
+            continue
+        if not gate._is_acceptable_text(blob.body):
+            findings.append({"key": key, "reason": "non-text/binary content in store"}); continue
+        hits = gate.secret_scan(blob.body)
+        if hits:
+            findings.append({"key": key, "reasons": hits})
+    return findings
+
+
 def bootstrap(store, project):
-    P = paths(store, project)
-    findings = sg.scan(P["base"]) if os.path.isdir(P["base"]) else []
-    if findings:                                            # detect helper-bypass / pre-existing secrets
+    _validate_project(project)
+    backend = _backend(store)
+    findings = _audit_store(backend, project)
+    if findings:
         die(reason="store contains secrets - refusing to resume", findings=findings[:10])
-    fm, _ = parse(read(P["state"])); _, lbody = parse(read(P["log"]))
+    sblob = backend.read(_key(project, "state"))
+    lblob = backend.read(_key(project, "log"))
+    fm, _ = parse(sblob.body.decode("utf-8")) if sblob else ({}, "")
+    _, lbody = parse(lblob.body.decode("utf-8")) if lblob else ({}, "")
     active = _section(lbody, "Active State"); nxt = _section(lbody, "Next Step")
-    return {"version_hash": fm.get("version_hash"), "revision": fm.get("revision"),
-        "log_hash": body_hash(lbody) if os.path.exists(P["log"]) else None,
-        "active": active, "next": nxt,
-        "resume_line": f"resuming: {active or '(none)'} / next: {nxt or '(none)'} / v{fm.get('version_hash','?')}"}
+    vh = sblob.version_hash if sblob else None
+    lh = lblob.version_hash if lblob else None
+    rev = int(fm["revision"]) if fm.get("revision") else None
+    return {"version_hash": vh, "revision": rev, "log_hash": lh,
+            "active": active, "next": nxt,
+            "resume_line": f"resuming: {active or '(none)'} / next: {nxt or '(none)'} / v{(vh or '?')[:12]}"}
 
 def rollup(store, project):
-    P = paths(store, project); n = 0
-    if os.path.isdir(P["sessions"]):
-        for sid in sorted(os.listdir(P["sessions"])):
-            lp = os.path.join(P["sessions"], sid, "log.md")
-            if os.path.exists(lp):
-                _, b = parse(read(lp)); n += sum(1 for ln in b.splitlines() if ln.startswith("["))
-    return {"ok": True, "session_entries": n}                # consolidation writer (future) must use safe_write
+    _validate_project(project)
+    backend = _backend(store)
+    n = 0
+    for key in backend.list(project + "/sessions/"):
+        blob = backend.read(key)
+        if blob is None:
+            continue
+        _, b = parse(blob.body.decode("utf-8"))
+        n += sum(1 for ln in b.splitlines() if ln.startswith("["))
+    return {"ok": True, "session_entries": n}                # consolidation writer (future) must use _persist
 
 def evaluate(store):
     """Layer-3 scorecard: aggregate the telemetry log into the dogfood soak metrics.
@@ -275,7 +321,8 @@ def evaluate(store):
         "blocks_total": len(block),
         "secret_blocks": sum(1 for r in block if _has(r, "key") or _has(r, "secret")
                              or _has(r, "token") or _has(r, "private key") or _has(r, "URI")),
-        "concurrency_blocks": sum(1 for r in block if _has(r, "stale") or _has(r, "lock_timeout")),
+        "concurrency_blocks": sum(1 for r in block if _has(r, "stale") or _has(r, "lock_timeout")
+                                  or _has(r, "BUSY")),
         "bootstrap_refusals": sum(1 for r in boot if r.get("decision") == "block"),
         "clean_resumes": sum(1 for r in boot if r.get("decision") == "allow"),
         "errors": len(error),
@@ -286,8 +333,7 @@ def evaluate(store):
 def health(store, window_hours=24):
     """One-shot health verdict: scorecard + independent audit + per-project freshness.
     Verdict reflects RECENT activity (default 24h): 'attention' (exit 1) if the gate
-    errored in the window or a leak is present now; else 'healthy'. Old, resolved errors
-    age out so the watchdog doesn't stay red forever. Missing gitleaks is a note, not a fail."""
+    errored in the window or a leak is present now; else 'healthy'. Missing gitleaks is a note."""
     sc = evaluate(store)
     recent_errors = 0
     ev = os.path.join(os.path.realpath(store), EVENTS_DIR, "events.jsonl")
@@ -306,23 +352,25 @@ def health(store, window_hours=24):
             except Exception:
                 pass
     leaks = None; scanner = "unavailable"
-    try:                                                    # Layer-2 audit, best-effort
-        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+    try:                                                    # Layer-2 audit, best-effort; scan the published blobs only
+        sys.path.insert(0, os.path.join(_ROOT, "tools"))
         import knokeep_audit
-        a = knokeep_audit.audit(store)
+        a = knokeep_audit.audit(_data_dir(store))
         leaks = a.get("leaks"); scanner = a.get("scanner")
     except Exception:
         pass
     projects = []
     try:
-        root = os.path.realpath(store)
-        for name in sorted(os.listdir(root)):
-            base = os.path.join(root, name)
-            statep = os.path.join(base, "system_state.md")
-            if name.startswith(".") or not os.path.exists(statep):
+        b = _backend(store)
+        for key in b.list(""):
+            if not key.endswith("/system_state") or key.count("/") != 1:
+                continue                                     # top-level project state docs only
+            blob = b.read(key)
+            if blob is None:
                 continue
-            fm, _ = parse(read(statep))
-            projects.append({"project": name, "revision": fm.get("revision"), "updated": fm.get("updated")})
+            fm, _ = parse(blob.body.decode("utf-8"))
+            projects.append({"project": key[: -len("/system_state")],
+                             "revision": fm.get("revision"), "updated": fm.get("updated")})
     except Exception:
         pass
     problems, notes = [], []
@@ -339,7 +387,7 @@ def health(store, window_hours=24):
 def _bodyfile(path):
     if not path or not os.path.exists(path):
         die(reason="missing --body-file", path=path)         # empty file is allowed; missing is an error
-    return read(path)
+    return _readfile(path)
 
 def _entry(a):
     if a.entry_file == "-":
@@ -351,10 +399,12 @@ def _entry(a):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["init", "flush-state", "flush-log", "session-append", "bootstrap", "rollup", "eval", "health"])
-    ap.add_argument("--store", required=True); ap.add_argument("--project")
+    ap.add_argument("--store"); ap.add_argument("--project")   # --store optional: defaults to the shared cross-tool root
     ap.add_argument("--session-id"); ap.add_argument("--client", default="cowork")
     ap.add_argument("--body-file"); ap.add_argument("--entry"); ap.add_argument("--entry-file"); ap.add_argument("--expect-hash")
     a = ap.parse_args()
+    if not a.store:
+        a.store = default_store_root()                     # shared cross-tool default (T-4)
     if a.cmd == "eval":                                     # read-only scorecard, no project needed
         print(json.dumps(evaluate(a.store))); return
     if a.cmd == "health":                                   # read-only verdict; exit 1 on attention

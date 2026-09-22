@@ -15,4 +15,4 @@
 Local-only; **fake secrets only** (see `fixtures/fake-project`); no remote writes; caps (≤3 retries/test, wall-clock + cost cap, HALT+HANDOFF on breach); crash-resume via our own HANDOFF. Output = release CANDIDATE, not released.
 
 ## Review
-This model must be re-checked by a different model/agent (frontier-gate) before the remote-write gate is opened.
+This model must be re-checked by a different model/agent (an independent, non-Anthropic-model review) before the remote-write gate is opened.

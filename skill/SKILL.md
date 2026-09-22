@@ -23,8 +23,9 @@ State the returned `resume_line` to the user ("resuming: … / next: … / v<has
 
 ### Flush commands
 - Invariants: `flush-state --body-file <f> [--expect-hash <h>]` — pass the `version_hash` you last saw. Sections: `## Architecture`, `## Path & Variable Directory`, `## Hard Constraints`.
-- Active/Next: `flush-log --body-file <f> [--expect-hash <h>]` — sections `## Completed & Verified`, `## Active State`, `## Next Step`.
+- Active/Next: `flush-log --body-file <f> [--expect-hash <log_hash>]` — sections `## Completed & Verified`, `## Active State`, `## Next Step`. Pass the `log_hash` from `bootstrap` (the log doc's own hash), NOT the state `version_hash` — the two docs have separate hashes.
 - **Single-section update (concurrency-safe):** add `--section "<Heading>"` (with `--expect-hash <h>`, and ideally `--session-id <id>`) to replace ONLY that section's body. On a concurrent edit the helper re-reads and re-applies your section onto the latest version and retries; if that same section changed under you — or on a whole-document (no-`--section`) conflict — your losing body is **parked** under `{project}/conflicts/…` with a journal record, never silently dropped. Prefer `--section` for targeted `Active State` / `Next Step` updates when other agents or tools may be writing the same doc.
+  - **Limit (by design in V1.6):** reapply is section-granular — it only auto-merges when the two writers touched *different* sections. It does **not** merge two edits inside the *same* section; that case parks the loser instead of interleaving text. Split unrelated updates into different sections if you want them to auto-merge.
 - This session's journal: `session-append --session-id <id> --entry "<text>"` (append-only; parallel-safe — each session writes only its own file).
 - Consolidate journals: `rollup`.
 

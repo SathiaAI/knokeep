@@ -112,7 +112,8 @@ def test_same_section_conflict_is_parked_not_lost(tmp_path, monkeypatch):
     assert cblob.body.decode("utf-8") == "loser-content"
 
     # Journal has a conflict record with the key, no body bytes.
-    jblob = backend.read(ks._key(project, "journal", "unknown"))
+    # Conflict notes route to a FIXED, gate-safe "conflicts" journal.
+    jblob = backend.read(ks._key(project, "journal", "conflicts"))
     assert jblob is not None
     jtext = jblob.body.decode("utf-8")
     assert "conflict_parked" in jtext
@@ -245,6 +246,9 @@ def test_conflict_key_gate_safe_with_high_entropy_session(tmp_path):
                         expect_hash=r0["version_hash"], section="Active State", session=sid)
     payload = _die_payload(exc)
     assert payload["reason"] == "conflict_parked"      # not conflict_body_secret_blocked / park_failed
+    # The gate-safe journal write must succeed for a high-entropy session too:
+    # the note uses a hex session label, so the journal key is not entropy-flagged.
+    assert payload["journal_recorded"] is True
     backend = ks._backend(store)
     assert backend.read(payload["conflict_key"]).body.decode("utf-8") == "loser-clean-body"
 
@@ -311,3 +315,40 @@ def test_threaded_disjoint_sections_no_loss(tmp_path):
             cblob = backend.read(r["conflict_key"])
             assert cblob is not None
             assert cblob.body.decode("utf-8") == content
+
+
+def test_section_eq_semantics():
+    """_section_eq: trailing-newline-insensitive, but None (absent) stays
+    distinct from "" (present-but-empty) so a real add/remove is not masked."""
+    assert ks._section_eq("body", "body\n") is True
+    assert ks._section_eq("body\n\n", "body") is True
+    assert ks._section_eq(None, None) is True
+    assert ks._section_eq(None, "") is False       # absent vs empty: a real change
+    assert ks._section_eq("", None) is False
+    assert ks._section_eq("a", "b") is False
+
+
+def test_bootstrap_surfaces_parked_conflicts(tmp_path):
+    """A resuming session must SEE parked conflicts, never silently miss a
+    losing writer's work: bootstrap reports conflict_count and a marked
+    resume_line."""
+    store = str(tmp_path)
+    project = "proj-bootstrap-surface"
+    r0 = ks.flush_state(store, project, "## Active State\n\n## Notes\n\n")
+
+    # No conflicts yet.
+    b0 = ks.bootstrap(store, project)
+    assert b0["conflict_count"] == 0
+    assert "parked conflict" not in b0["resume_line"]
+
+    # Force a park: winner commits Active State before the loser reads.
+    _direct_section_write(ks._persist, store, project, "Active State",
+                          "winner", r0["version_hash"])
+    with pytest.raises(SystemExit):
+        ks.flush_state(store, project, "loser-body",
+                        expect_hash=r0["version_hash"], section="Active State")
+
+    b1 = ks.bootstrap(store, project)
+    assert b1["conflict_count"] == 1
+    assert "[!] 1 parked conflict(s)" in b1["resume_line"]
+    assert len(b1["conflicts"]) == 1

@@ -221,7 +221,7 @@ def _flush_doc(kind, store, project, new_content, expect_hash=None, section=None
                 else:
                     _park_conflict(backend, store, project, sess, new_content, section,
                                     expect_hash, cur_hash, reason="conflict_parked")
-            elif cur_section != base_section:
+            elif not _section_eq(cur_section, base_section):
                 _park_conflict(backend, store, project, sess, new_content, section,
                                 base_hash, cur_hash, reason="conflict_parked")
 
@@ -372,6 +372,18 @@ def _replace_section(body, heading, new_content):
     return body[:start] + block + body[end:]
 
 
+def _section_eq(a, b):
+    """Compare section contents ignoring trailing separator newlines, but keep an
+    absent section (None) distinct from an empty one (""). A competing edit to a
+    different section can add/remove a trailing newline on the last section's
+    content without the target text actually changing — that must not false-park."""
+    if (a is None) != (b is None):
+        return False
+    if a is None:
+        return True
+    return a.rstrip("\n") == b.rstrip("\n")
+
+
 _MAX_CAS_ATTEMPTS = 5
 
 
@@ -408,15 +420,18 @@ def _park_conflict(backend, store, project, session, losing_content, section,
         # Could not even park a copy — fail closed without pretending success.
         die(reason="conflict_park_failed", base_hash=base_hash, current_hash=current_hash)
 
-    # Journal note carries keys/hashes only — never body bytes. The section name
-    # is caller text: flatten any CR/LF so it cannot break the note line (it still
-    # passes through the secret gate on the journal write).
-    note = f"conflict_parked key={conflict_key} base_hash={base_hash or 'none'} current_hash={current_hash or 'none'}"
+    # Journal note carries keys, hashes and the gate-safe session label only —
+    # never body bytes or the raw session id (a high-entropy id would make the
+    # journal key itself gate-rejected). It is written to a FIXED "conflicts"
+    # journal. The section name is caller text: flatten any CR/LF so it cannot
+    # break the note line (it still passes through the secret gate on write).
+    note = (f"conflict_parked key={conflict_key} sess={sess_label} "
+            f"base_hash={base_hash or 'none'} current_hash={current_hash or 'none'}")
     if section:
         note += " section=" + str(section).replace("\r", " ").replace("\n", " ")
     journal_recorded = True
     try:
-        session_append(store, project, session, "system", note)
+        session_append(store, project, "conflicts", "system", note)
     except SystemExit:
         journal_recorded = False  # surfaced in the die payload — never silently swallowed
 
@@ -466,9 +481,19 @@ def bootstrap(store, project):
     vh = sblob.version_hash if sblob else None
     lh = lblob.version_hash if lblob else None
     rev = int(fm["revision"]) if fm.get("revision") else None
+    # Surface any parked conflicts so a resuming session cannot silently miss
+    # a losing writer's work. Each key under {project}/conflicts/ is one parked
+    # body; ASCII marker only (no emoji) so it renders on every console.
+    conflicts = list(backend.list(project + "/conflicts/"))
+    conflict_count = len(conflicts)
+    resume = f"resuming: {active or '(none)'} / next: {nxt or '(none)'} / v{(vh or '?')[:12]}"
+    if conflict_count:
+        resume += (f"  [!] {conflict_count} parked conflict(s) - "
+                   f"review {project}/conflicts/")
     return {"version_hash": vh, "revision": rev, "log_hash": lh,
             "active": active, "next": nxt,
-            "resume_line": f"resuming: {active or '(none)'} / next: {nxt or '(none)'} / v{(vh or '?')[:12]}"}
+            "conflicts": conflicts, "conflict_count": conflict_count,
+            "resume_line": resume}
 
 def rollup(store, project):
     _validate_project(project)

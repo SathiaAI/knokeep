@@ -178,6 +178,13 @@ def _flush_doc(kind, store, project, new_content, expect_hash=None, section=None
     key = _key(project, kind)
     sess = session if (session and valid_id(str(session))) else "unknown"
 
+    # Validate the expected-hash SHAPE up front. A malformed hash (truncated,
+    # uppercase, non-hex) is a caller input error, not a concurrency conflict:
+    # fail loud as invalid_expect_hash BEFORE any read/reapply/park, so a typo
+    # never produces a durable park write or pollutes the conflict list.
+    if expect_hash is not None and not re.fullmatch(r"[0-9a-f]{64}", str(expect_hash)):
+        die(reason="invalid_expect_hash", value=str(expect_hash))
+
     base_section = None
     base_hash = None
     base_established = False
@@ -205,7 +212,7 @@ def _flush_doc(kind, store, project, new_content, expect_hash=None, section=None
                 got = _get_section(cur_body, section)
             except ValueError:
                 _park_conflict(backend, store, project, sess, new_content, section,
-                                base_hash, cur_hash, reason="conflict_parked")
+                                base_hash, cur_hash, reason="conflict_parked", doc_kind=kind)
             cur_section = got[2] if got else None
 
             if not base_established:
@@ -220,16 +227,16 @@ def _flush_doc(kind, store, project, new_content, expect_hash=None, section=None
                     base_established = True
                 else:
                     _park_conflict(backend, store, project, sess, new_content, section,
-                                    expect_hash, cur_hash, reason="conflict_parked")
+                                    expect_hash, cur_hash, reason="conflict_parked", doc_kind=kind)
             elif not _section_eq(cur_section, base_section):
                 _park_conflict(backend, store, project, sess, new_content, section,
-                                base_hash, cur_hash, reason="conflict_parked")
+                                base_hash, cur_hash, reason="conflict_parked", doc_kind=kind)
 
             try:
                 new_body = _replace_section(cur_body, section, new_content)
             except ValueError:
                 _park_conflict(backend, store, project, sess, new_content, section,
-                                base_hash, cur_hash, reason="conflict_parked")
+                                base_hash, cur_hash, reason="conflict_parked", doc_kind=kind)
 
             persist_expect = cur_hash   # always CAS against the version we built upon
         else:
@@ -267,7 +274,7 @@ def _flush_doc(kind, store, project, new_content, expect_hash=None, section=None
             # Whole-doc mode: exactly one CAS attempt, never blindly resubmit.
             _park_conflict(backend, store, project, sess, new_content, None,
                             base_hash, getattr(res, "current_hash", None),
-                            reason="conflict_parked")
+                            reason="conflict_parked", doc_kind=kind)
 
         if attempt >= _MAX_CAS_ATTEMPTS:
             break
@@ -275,7 +282,7 @@ def _flush_doc(kind, store, project, new_content, expect_hash=None, section=None
 
     _park_conflict(backend, store, project, sess, new_content, section,
                     base_hash, getattr(res, "current_hash", None),
-                    reason="conflict_retry_exhausted")
+                    reason="conflict_retry_exhausted", doc_kind=kind)
 
 
 def flush_state(store, project, new_body, expect_hash=None, section=None, session=None):
@@ -376,19 +383,22 @@ def _section_eq(a, b):
     """Compare section contents ignoring trailing separator newlines, but keep an
     absent section (None) distinct from an empty one (""). A competing edit to a
     different section can add/remove a trailing newline on the last section's
-    content without the target text actually changing — that must not false-park."""
+    content without the target text actually changing — that must not false-park.
+    Strips trailing CR as well as LF: a CRLF-stored doc can leave the baseline
+    ending in a CR while dump() rewrote the current doc without one, so stripping
+    only '\\n' would compare 'old\\r' with 'old' and wrongly park."""
     if (a is None) != (b is None):
         return False
     if a is None:
         return True
-    return a.rstrip("\n") == b.rstrip("\n")
+    return a.rstrip("\r\n") == b.rstrip("\r\n")
 
 
 _MAX_CAS_ATTEMPTS = 5
 
 
 def _park_conflict(backend, store, project, session, losing_content, section,
-                    base_hash, current_hash, reason):
+                    base_hash, current_hash, reason, doc_kind=None):
     """Never drop a losing writer's work: park it verbatim under
     {project}/conflicts/..., record a hash/key-only note in the session
     journal, then fail closed. Does not return."""
@@ -426,6 +436,7 @@ def _park_conflict(backend, store, project, session, losing_content, section,
     # journal. The section name is caller text: flatten any CR/LF so it cannot
     # break the note line (it still passes through the secret gate on write).
     note = (f"conflict_parked key={conflict_key} sess={sess_label} "
+            f"doc_kind={doc_kind or 'unknown'} "
             f"base_hash={base_hash or 'none'} current_hash={current_hash or 'none'}")
     if section:
         note += " section=" + str(section).replace("\r", " ").replace("\n", " ")
@@ -436,7 +447,7 @@ def _park_conflict(backend, store, project, session, losing_content, section,
         journal_recorded = False  # surfaced in the die payload — never silently swallowed
 
     die(reason=reason, conflict_key=conflict_key, current_hash=current_hash,
-        base_hash=base_hash, journal_recorded=journal_recorded)
+        base_hash=base_hash, doc_kind=doc_kind, journal_recorded=journal_recorded)
 # --- end H1 increment 1 helpers ---------------------------------------------
 
 _BENIGN_STORE_FILES = {".ds_store", "thumbs.db", "desktop.ini"}

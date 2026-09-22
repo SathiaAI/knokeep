@@ -326,6 +326,11 @@ def test_section_eq_semantics():
     assert ks._section_eq(None, "") is False       # absent vs empty: a real change
     assert ks._section_eq("", None) is False
     assert ks._section_eq("a", "b") is False
+    # CRLF: a CRLF-stored baseline vs an LF-rewritten current must compare equal
+    # (Codex 4077649614) — strip trailing CR as well as LF.
+    assert ks._section_eq("body\r\n", "body\n") is True
+    assert ks._section_eq("body\r", "body") is True
+    assert ks._section_eq("body\r\n\r\n", "body") is True
 
 
 def test_bootstrap_surfaces_parked_conflicts(tmp_path):
@@ -386,3 +391,47 @@ def test_target_last_section_reapplies_despite_trailing_newline(tmp_path, monkey
     fm, body = ks.parse(blob.body.decode("utf-8"))
     assert ks._get_section(body, "Notes")[2].strip() == "notes=target"
     assert ks._get_section(body, "Active State")[2].strip() == "active-from-writer2"
+
+
+def test_malformed_expect_hash_fails_fast_not_parked(tmp_path):
+    """CodeRabbit/Codex 4077649632: a malformed --expect-hash (truncated,
+    uppercase, non-hex) is a caller input error. It must fail loud as
+    invalid_expect_hash BEFORE any read/reapply/park — no durable park write,
+    no conflict-list pollution."""
+    store = str(tmp_path)
+    project = "proj-badhash"
+    r0 = ks.flush_state(store, project, "## Active State\n\n## Notes\n\n")
+
+    for bad in ("deadbeef", r0["version_hash"].upper(), r0["version_hash"][:-1], "zz"):
+        with pytest.raises(SystemExit) as exc:
+            ks.flush_state(store, project, "x", expect_hash=bad, section="Active State")
+        assert _die_payload(exc)["reason"] == "invalid_expect_hash"
+
+    # Nothing was parked for any of the malformed attempts.
+    backend = ks._backend(store)
+    assert list(backend.list(project + "/conflicts/")) == []
+    # A valid hash still works.
+    ok = ks.flush_state(store, project, "ok", expect_hash=r0["version_hash"],
+                        section="Active State")
+    assert ok["ok"] is True
+
+
+def test_parked_conflict_records_doc_kind(tmp_path):
+    """Codex 4077649622: the parked conflict must record whether the losing
+    body targeted the state or the log doc, so a later reviewer can reapply it
+    without the original command context."""
+    store = str(tmp_path)
+    project = "proj-dockind"
+    r0 = ks.flush_state(store, project, "## Active State\n\n## Notes\n\n")
+    _direct_section_write(ks._persist, store, project, "Active State", "winner",
+                          r0["version_hash"])
+    with pytest.raises(SystemExit) as exc:
+        ks.flush_state(store, project, "loser", expect_hash=r0["version_hash"],
+                        section="Active State")
+    payload = _die_payload(exc)
+    assert payload["reason"] == "conflict_parked"
+    assert payload["doc_kind"] == "state"
+
+    backend = ks._backend(store)
+    jblob = backend.read(ks._key(project, "journal", "conflicts"))
+    assert "doc_kind=state" in jblob.body.decode("utf-8")

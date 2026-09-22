@@ -352,3 +352,37 @@ def test_bootstrap_surfaces_parked_conflicts(tmp_path):
     assert b1["conflict_count"] == 1
     assert "[!] 1 parked conflict(s)" in b1["resume_line"]
     assert len(b1["conflicts"]) == 1
+
+
+def test_target_last_section_reapplies_despite_trailing_newline(tmp_path, monkeypatch):
+    """CodeRabbit 4077457587: when the target is the LAST section, a competing
+    write to an EARLIER section can shift only the target's trailing separator
+    newlines. _section_eq must treat that as 'unchanged' so the target reapplies
+    instead of false-parking."""
+    store = str(tmp_path)
+    project = "proj-target-last"
+    r0 = ks.flush_state(store, project, "## Active State\n\n## Notes\n\n")
+
+    real_persist = ks._persist
+    done = {"v": False}
+
+    def hijacked(backend, key, kind, raw_bytes, expected_hash):
+        if not done["v"] and kind == "state":
+            done["v"] = True
+            # Competing writer commits to the EARLIER section first.
+            _direct_section_write(real_persist, store, project, "Active State",
+                                   "active-from-writer2", r0["version_hash"])
+        return real_persist(backend, key, kind, raw_bytes, expected_hash)
+
+    monkeypatch.setattr(ks, "_persist", hijacked)
+
+    # Target is the LAST section, "Notes".
+    result = ks.flush_state(store, project, "notes=target",
+                             expect_hash=r0["version_hash"], section="Notes")
+    assert result["ok"] is True
+
+    backend = ks._backend(store)
+    blob = backend.read(ks._key(project, "state"))
+    fm, body = ks.parse(blob.body.decode("utf-8"))
+    assert ks._get_section(body, "Notes")[2].strip() == "notes=target"
+    assert ks._get_section(body, "Active State")[2].strip() == "active-from-writer2"

@@ -390,6 +390,9 @@ def test_case_sensitive_volume_allows_distinct_case_keys(tmp_path):
     default-on-this-host) case-sensitive flag, two keys differing only by
     case are simply two distinct keys."""
     backend = LocalBackend(tmp_path / "store-root")
+    if backend._case_insensitive:
+        backend.close()
+        pytest.skip("host temp volume is case-insensitive (e.g. macOS APFS); this test needs a case-sensitive volume")
     assert backend._case_insensitive is False
 
     r0 = gate.persist(backend, "Notes/Foo", b"v1", expected_hash=None, doc_type="system_state")

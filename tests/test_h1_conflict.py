@@ -229,6 +229,52 @@ def test_crlf_section_replace_no_duplicate():
     assert "old" not in new
 
 
+def test_conflict_key_gate_safe_with_high_entropy_session(tmp_path):
+    """Codex P2: a valid but random-looking session id must NOT make the conflict
+    key trip the gate's high-entropy KEY scanner (which would wrongly fail the
+    park / mislabel it conflict_body_secret_blocked). The key uses a hex digest
+    of the session, so parking a CLEAN body still succeeds."""
+    store = str(tmp_path)
+    project = "proj-randsess"
+    r0 = ks.flush_state(store, project, "## Active State\n\n## Notes\n\n")
+    sid = "aB3xK9mQ2pL5vN8wR1tY4uZ7cD0eF6gH"  # valid id, high-entropy / random-looking
+    # Winner commits Active State before the loser reads -> loser must park.
+    _direct_section_write(ks._persist, store, project, "Active State", "winner", r0["version_hash"])
+    with pytest.raises(SystemExit) as exc:
+        ks.flush_state(store, project, "loser-clean-body",
+                        expect_hash=r0["version_hash"], section="Active State", session=sid)
+    payload = _die_payload(exc)
+    assert payload["reason"] == "conflict_parked"      # not conflict_body_secret_blocked / park_failed
+    backend = ks._backend(store)
+    assert backend.read(payload["conflict_key"]).body.decode("utf-8") == "loser-clean-body"
+
+
+def test_whole_doc_park_records_caller_base_not_winner(tmp_path):
+    """Codex P2: the parked whole-doc conflict must record the caller's DECLARED
+    base (expect_hash) as base_hash, distinct from the winner's current_hash —
+    preserving lineage."""
+    store = str(tmp_path)
+    project = "proj-lineage"
+    r0 = ks.flush_state(store, project, "v0")
+    # Winner commits a whole-doc update using r0's hash -> store advances.
+    backend = ks._backend(store)
+    k = ks._key(project, "state")
+    blob = backend.read(k)
+    fm, _ = ks.parse(blob.body.decode("utf-8"))
+    fm = dict(fm); fm["revision"] = int(fm.get("revision", 0)) + 1; fm["updated"] = ks.now()
+    res = ks._persist(backend, k, "state", ks._bytes(fm, "winner-doc"), r0["version_hash"])
+    assert isinstance(res, ks.OK)
+    winner_hash = res.new_hash
+    # Loser flushes whole-doc with the now-stale r0 hash -> parks.
+    with pytest.raises(SystemExit) as exc:
+        ks.flush_state(store, project, "loser-doc", expect_hash=r0["version_hash"])
+    payload = _die_payload(exc)
+    assert payload["reason"] == "conflict_parked"
+    assert payload["base_hash"] == r0["version_hash"]        # caller's declared base
+    assert payload["current_hash"] == winner_hash            # the winner
+    assert payload["base_hash"] != payload["current_hash"]   # distinct lineage
+
+
 def test_threaded_disjoint_sections_no_loss(tmp_path):
     store = str(tmp_path)
     project = "proj-threaded"

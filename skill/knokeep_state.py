@@ -233,7 +233,10 @@ def _flush_doc(kind, store, project, new_content, expect_hash=None, section=None
 
             persist_expect = cur_hash   # always CAS against the version we built upon
         else:
-            base_hash = cur_hash
+            # Whole-doc base is the caller's DECLARED version (what the losing
+            # body was written against), not the winner we happened to read —
+            # preserves conflict lineage so base != current in the record.
+            base_hash = expect_hash
             new_body = new_content
             persist_expect = expect_hash if blob is not None else None
 
@@ -379,6 +382,11 @@ def _park_conflict(backend, store, project, session, losing_content, section,
     journal, then fail closed. Does not return."""
     raw = (losing_content or "").encode("utf-8")
     shorthash = hashlib.sha256(raw).hexdigest()[:12]
+    # Gate-safe hex digest of the session id, never the raw id: a valid but
+    # random-looking session id embedded in the key can trip the gate's
+    # high-entropy KEY scanner (SECRET_BLOCKED) and wrongly fail the park even
+    # for a clean body. Pure hex is exempt from the entropy heuristic.
+    sess_label = hashlib.sha256((session or "unknown").encode("utf-8")).hexdigest()[:8]
 
     conflict_key = None
     for i in range(3):
@@ -386,7 +394,7 @@ def _park_conflict(backend, store, project, session, losing_content, section,
         # high-entropy KEY scanner never mistakes a conflict key (which embeds
         # a hash) for a secret and blocks the park — that would be silent loss.
         ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
-        candidate = f"{project}/conflicts/{ts}/{session}-{shorthash}" + (f"-{i}" if i else "")
+        candidate = f"{project}/conflicts/{ts}/{sess_label}-{shorthash}" + (f"-{i}" if i else "")
         cres = _persist(backend, candidate, "conflict", raw, None)
         if isinstance(cres, OK):
             conflict_key = candidate

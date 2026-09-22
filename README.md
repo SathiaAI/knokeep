@@ -10,6 +10,23 @@
   <a href="https://github.com/SathiaAI/knokeep/releases"><img src="https://img.shields.io/github/v/release/SathiaAI/knokeep?color=6B7F5B" alt="Release"></a>
 </p>
 
+<p align="center">
+  <b>Works with</b>&nbsp;
+  <img src="https://img.shields.io/badge/Claude_Code-2E3A2F" alt="Claude Code">
+  <img src="https://img.shields.io/badge/Cowork-2E3A2F" alt="Cowork">
+  <img src="https://img.shields.io/badge/Cursor-2E3A2F" alt="Cursor">
+  <img src="https://img.shields.io/badge/Codex-2E3A2F" alt="Codex">
+  <img src="https://img.shields.io/badge/any_shell-2E3A2F" alt="Any tool with a shell">
+</p>
+
+<p align="center">
+  <sub><b>Planned</b>&nbsp;
+  <img src="https://img.shields.io/badge/Windsurf-D9C9B2" alt="Windsurf (planned)">
+  <img src="https://img.shields.io/badge/Devin-D9C9B2" alt="Devin (planned)">
+  <img src="https://img.shields.io/badge/Hermes-D9C9B2" alt="Hermes (planned)">
+  <img src="https://img.shields.io/badge/VS_Code-D9C9B2" alt="VS Code (planned)"></sub>
+</p>
+
 <p align="center"><i>Part of the Kno suite — Knosky routes to the right file; KnoKeep remembers the work.</i></p>
 
 <br>

@@ -31,6 +31,21 @@ On-disk layout under `root`:
                             only "<128-bit-hex-token> <expiry-epoch-float>"
                             (§5: lock/marker file contents are limited to
                             token + expiry int)
+      locks/fence-alloc/    H1 Increment 2, Phase 1b: one small file per key,
+                            holding "<token> <expiry> <fence>" — the DURABLE,
+                            cross-process fence-ownership record. Written
+                            (atomically, same tempfile+fsync+os.replace
+                            pattern as locks/advisory/) only inside lock()'s
+                            existing advisory.lock critical section, and read
+                            fresh from disk (never an in-process cache) by
+                            both lock() (to compute the next fence) and
+                            write()'s fence check — a second LocalBackend
+                            instance over this same root has no shared
+                            Python state with the first, so correctness here
+                            requires the disk, not memory. Unlike
+                            locks/advisory/, unlock() never deletes this
+                            file: a released-but-unexpired lease must remain
+                            a valid CAS-write owner (see write()'s docstring).
 
 JUDGMENT CALLS (each also called out inline at its point of use):
 
@@ -287,6 +302,7 @@ class LocalBackend:
         self._journal_path = self._journal_dir / "journal.log"
         self._locks_dir = self._root / "locks"
         self._advisory_dir = self._locks_dir / "advisory"
+        self._fence_alloc_dir = self._locks_dir / "fence-alloc"
         self._cas_lock_path = self._locks_dir / "cas.lock"
         self._advisory_guard_path = self._locks_dir / "advisory.lock"
 
@@ -295,27 +311,31 @@ class LocalBackend:
         self._replace_retry_attempts = replace_retry_attempts
         self._replace_retry_backoff_s = replace_retry_backoff_s
 
-        # H1 Increment 2, Phase 1: per-key fence-ownership state, kept
-        # SEPARATE from the pre-existing locks/advisory/<hash>.lock file
-        # (that file remains the transient, cross-process, unlock()-cleared
-        # mutual-exclusion mechanism, unchanged below). `_fence_owner` is
-        # in-process-only (NOT restored on reopen — a fresh instance starts
-        # with no owner until its own lock() call mints one) because the
-        # `fenced_ctx` test helper AND both production callers
-        # (mcp/server.py, skill/knokeep_state.py) acquire a lease and
-        # release it immediately, before the write happens; a design that
-        # cleared ownership on unlock() would reject that lease's own write.
-        # `_last_accepted_fence`, by contrast, IS durable: it is rebuilt by
-        # `_resume()` below from the journal, which now carries it alongside
-        # each record's body (see `_journal_append`), so a stale-fence
-        # Overwrite is still correctly refused after a process restart. Both
-        # dicts are guarded by `_fence_lock` — a plain in-process lock,
-        # distinct from the cross-process `cas.lock`/`advisory.lock` file
-        # locks — because `lock()`/`renew()` (guarded by advisory.lock) and
-        # `write()` (guarded by cas.lock) must serialize with each other on
-        # these two dicts despite holding different file locks.
+        # H1 Increment 2, Phase 1b: fence-ownership (owner_token/expiry/
+        # fence) is now DURABLE — a small file per key under
+        # locks/fence-alloc/ (see the class docstring's on-disk layout) —
+        # rather than an in-process dict. Phase 1 originally cached it in
+        # memory, which is exactly the gap Phase 1b closes: two separate
+        # LocalBackend instances over the SAME directory (two processes)
+        # share no Python state, so a purely in-process allocator can hand
+        # out the SAME "next" fence to both. Both `lock()` (which allocates)
+        # and `write()`'s fence check (which validates) now read this file
+        # FRESH from disk — see `_fence_ok`/`_try_acquire_advisory` — instead
+        # of a cache, so a second instance's lock()/write() always sees
+        # whatever the first instance most recently, durably wrote. unlock()
+        # still never touches this file (a released-but-unexpired lease
+        # must remain a valid CAS-write owner — see write()'s docstring).
+        #
+        # `_last_accepted_fence`, unchanged from Phase 1, IS a per-instance
+        # cache, but one rebuilt by `_resume()` below from the journal (which
+        # carries it alongside each record's body — see `_journal_append`),
+        # so a stale-fence Overwrite is still correctly refused after a
+        # process restart. It is guarded by `_fence_lock` — a plain
+        # in-process lock, distinct from the cross-process `cas.lock`/
+        # `advisory.lock` file locks — because `lock()` (guarded by
+        # advisory.lock) and `write()` (guarded by cas.lock) both read/write
+        # it despite holding different file locks.
         self._fence_lock = threading.Lock()
-        self._fence_owner: Dict[str, dict] = {}
         self._last_accepted_fence: Dict[str, int] = {}
 
         for d in (
@@ -325,6 +345,7 @@ class LocalBackend:
             self._journal_dir,
             self._locks_dir,
             self._advisory_dir,
+            self._fence_alloc_dir,
         ):
             d.mkdir(parents=True, exist_ok=True)
 
@@ -671,18 +692,20 @@ class LocalBackend:
             lock.release()
 
     def _fence_ok(self, key: str, lease: Optional[Lock]) -> bool:
-        """H1 Increment 2, Phase 1 (C): the Overwrite lease must be the
-        current fence owner, unexpired, and carry a fence at least as high
-        as the last one that actually committed. Caller holds cas.lock
-        (this method itself only touches the in-process `_fence_lock`, held
-        just long enough to snapshot the three values, matching the
-        `_fence_owner`/`_last_accepted_fence` docstring in __init__)."""
+        """H1 Increment 2, Phase 1b: the Overwrite lease must be the current
+        fence owner, unexpired, and carry a fence at least as high as the
+        last one that actually committed. owner_token/owner_expiry are read
+        FRESH from the durable locks/fence-alloc/ file on every call — NOT
+        an in-process cache — because a second LocalBackend instance over
+        the same directory has no such cache; that in-process gap is
+        exactly what Phase 1b closes (see __init__'s docstring). Caller
+        holds cas.lock; `last_accepted_fence` is unchanged from Phase 1."""
         if lease is None:
             return False
+        owner = self._read_fence_owner(self._fence_owner_path(key))
+        owner_token = owner[0] if owner is not None else None
+        owner_expiry = owner[1] if owner is not None else 0.0
         with self._fence_lock:
-            fs = self._fence_owner.get(key)
-            owner_token = fs.get("owner_token") if fs else None
-            owner_expiry = fs.get("owner_expiry", 0.0) if fs else 0.0
             last_accepted = self._last_accepted_fence.get(key, 0)
         if lease.token != owner_token:
             return False
@@ -743,6 +766,39 @@ class LocalBackend:
             with contextlib.suppress(FileNotFoundError):
                 tmp_path.unlink()
 
+    # -- H1 Increment 2, Phase 1b: durable fence-ownership file -------------
+    # See __init__'s docstring and the class on-disk-layout docstring for
+    # why this is a separate, unlock()-untouched file rather than the
+    # locks/advisory/ file above or an in-process dict.
+
+    def _fence_owner_path(self, key: str) -> Path:
+        name = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        return self._fence_alloc_dir / f"{name}.fence"
+
+    def _read_fence_owner(self, path: Path) -> Optional[Tuple[str, float, int]]:
+        try:
+            content = path.read_text(encoding="ascii")
+        except FileNotFoundError:
+            return None
+        try:
+            token, expiry_s, fence_s = content.split(" ", 2)
+            return token, float(expiry_s), int(fence_s)
+        except ValueError:
+            return None
+
+    def _write_fence_owner(self, path: Path, token: str, expiry: float, fence: int) -> None:
+        tmp_fd, tmp_path_str = tempfile.mkstemp(dir=str(self._fence_alloc_dir))
+        tmp_path = Path(tmp_path_str)
+        try:
+            with os.fdopen(tmp_fd, "w", encoding="ascii") as f:
+                f.write(f"{token} {expiry!r} {fence}")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(str(tmp_path), str(path))
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                tmp_path.unlink()
+
     def lock(self, key: str, ttl_s: float) -> Lock:
         # JUDGMENT CALL: "bounded, never indefinite" governs how long we wait
         # to acquire the *bookkeeping* guard file (a short, purely mechanical
@@ -753,26 +809,15 @@ class LocalBackend:
         # expiring lock retries at the call-site, the adapter doesn't do it
         # silently on their behalf.
         path = self._advisory_lock_path(key)
-        result = self._try_acquire_advisory(path, ttl_s)
+        result = self._try_acquire_advisory(path, ttl_s, key)
         if result is None:
             raise BackendBusyError(f"key {key!r} is locked")
-        token, expiry = result
-        # H1 Increment 2, Phase 1 (B): every successful acquire above (fresh
-        # OR a stale-break takeover of an expired prior owner — both land in
-        # `_try_acquire_advisory` identically) durably advances the fence
-        # past both the previous owner_fence and last_accepted_fence, so two
-        # successive acquisitions on the same key always return a strictly
-        # increasing fence.
-        with self._fence_lock:
-            fs = self._fence_owner.setdefault(key, {"owner_fence": 0})
-            last_accepted = self._last_accepted_fence.get(key, 0)
-            new_fence = max(fs.get("owner_fence", 0), last_accepted) + 1
-            fs["owner_token"] = token
-            fs["owner_expiry"] = expiry
-            fs["owner_fence"] = new_fence
+        token, expiry, new_fence = result
         return Lock(key=key, token=token, expiry_epoch=expiry, fence=new_fence)
 
-    def _try_acquire_advisory(self, path: Path, ttl_s: float) -> Optional[Tuple[str, float]]:
+    def _try_acquire_advisory(
+        self, path: Path, ttl_s: float, key: str
+    ) -> Optional[Tuple[str, float, int]]:
         guard = _FileLock(self._advisory_guard_path)
         if not guard.acquire(self._lock_timeout_s):
             raise BackendBusyError("advisory lock bookkeeping is busy")
@@ -783,8 +828,28 @@ class LocalBackend:
                 return None  # still held by someone else
             token = secrets.token_hex(16)  # 128-bit CSPRNG token
             expiry = now + ttl_s
+
+            # H1 Increment 2, Phase 1b: durable, cross-process-monotonic
+            # fence allocation. `existing_owner` is read from disk — NOT an
+            # in-process cache — so a SECOND LocalBackend instance over this
+            # same directory, racing this same key, sees whatever the FIRST
+            # instance's lock() call most recently, durably wrote here. Both
+            # this read and the write below happen inside the SAME
+            # `advisory_guard_path` critical section that already serializes
+            # concurrent lock() calls across processes (§2), so two
+            # instances can never both compute the same "next" fence — this
+            # closes the exact collision the in-process-only Phase 1
+            # allocator left open.
+            owner_path = self._fence_owner_path(key)
+            existing_owner = self._read_fence_owner(owner_path)
+            durable_alloc = existing_owner[2] if existing_owner is not None else 0
+            with self._fence_lock:
+                last_accepted = self._last_accepted_fence.get(key, 0)
+            new_fence = max(durable_alloc, last_accepted) + 1
+            self._write_fence_owner(owner_path, token, expiry, new_fence)
+
             self._write_advisory(path, token, expiry)
-            return token, expiry
+            return token, expiry, new_fence
         finally:
             guard.release()
 
@@ -802,9 +867,9 @@ class LocalBackend:
                 return False
             with contextlib.suppress(FileNotFoundError):
                 path.unlink()
-            # H1 Increment 2, Phase 1 (B): fence bookkeeping is deliberately
-            # left untouched here — unlock() only releases the advisory
-            # mutual-exclusion above so a fresh lock() can succeed
+            # H1 Increment 2, Phase 1b: the durable fence-owner file is
+            # deliberately left untouched here — unlock() only releases the
+            # advisory mutual-exclusion above so a fresh lock() can succeed
             # immediately; the released lease remains the valid fence owner
             # for CAS writes until superseded by a later lock() on this key
             # or until its TTL elapses on its own (see __init__ docstring).
@@ -826,13 +891,14 @@ class LocalBackend:
                 return False
             new_expiry = time.time() + ttl_s
             self._write_advisory(path, token, new_expiry)
-            # H1 Increment 2, Phase 1 (B): fence unchanged, but extend the
-            # fence-owner's validity window to match the renewed advisory
-            # lock, so a renewed lease keeps its CAS-write authorization.
-            with self._fence_lock:
-                fs = self._fence_owner.get(lock.key)
-                if fs is not None and fs.get("owner_token") == token:
-                    fs["owner_expiry"] = new_expiry
+            # H1 Increment 2, Phase 1b: fence unchanged, but extend the
+            # DURABLE fence-owner's expiry to match the renewed advisory
+            # lock, so a renewed lease keeps its CAS-write authorization
+            # when write() reads the durable file fresh.
+            owner_path = self._fence_owner_path(lock.key)
+            existing_owner = self._read_fence_owner(owner_path)
+            if existing_owner is not None and existing_owner[0] == token:
+                self._write_fence_owner(owner_path, token, new_expiry, existing_owner[2])
             return True
         finally:
             guard.release()

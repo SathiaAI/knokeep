@@ -175,6 +175,52 @@ def test_fence_survives_reload(tmp_path):
     resumed.close()
 
 
+def test_fence_monotonic_across_instances(tmp_path):
+    """H1 Increment 2, Phase 1b: the fence ALLOCATION counter must be
+    durable and cross-process-monotonic, not just last_accepted_fence. Two
+    separate LocalBackend instances over the SAME directory (standing in
+    for two processes) both call lock() on the same key before either has
+    written anything; they must never be handed the same fence number — a
+    purely in-process allocation counter would let both compute the same
+    'next' fence from the same durable last_accepted_fence floor, and the
+    second writer would then silently clobber the first."""
+    root = tmp_path / "store-root"
+    key = "fence/two-instance"
+
+    a = LocalBackend(root)
+    r0 = gate.persist(a, key, b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+
+    b = LocalBackend(root)  # a SECOND instance over the SAME directory
+
+    # A acquires then releases immediately (the fenced_ctx / production
+    # pattern) before B ever tries — otherwise B's lock() would correctly
+    # BackendBusyError on A's still-live advisory lock, which is a
+    # DIFFERENT (already-working) mechanism than the fence-allocation
+    # collision this test targets.
+    lease_a = a.lock(key, ttl_s=30)
+    a.unlock(lease_a)
+    lease_b = b.lock(key, ttl_s=30)
+    assert lease_b.fence > lease_a.fence, "two instances must never allocate the same fence"
+
+    r1 = gate.persist(b, key, b"v2-from-b", ctx=overwrite_ctx(r0.new_hash, lease_b), doc_type="system_state")
+    assert isinstance(r1, OK)
+
+    # A's OLD lease replays against the CURRENT hash (the content-hash CAS
+    # alone would accept this) — the fence, now correctly non-colliding,
+    # must refuse it.
+    r2 = gate.persist(
+        a, key, b"v3-stale-a-replay", ctx=overwrite_ctx(r1.new_hash, lease_a), doc_type="system_state"
+    )
+    assert isinstance(r2, STALE)
+    assert r2.reason == "FENCE"
+    assert a.read(key).body == b"v2-from-b"
+    assert b.read(key).body == b"v2-from-b"
+
+    a.close()
+    b.close()
+
+
 # ---------------------------------------------------------------------------
 # C3 — atomicity under crash: a reader never sees torn bytes at the key
 # ---------------------------------------------------------------------------

@@ -24,7 +24,7 @@ from store import gate
 from store.backend import BackendBusyError
 from store.local import LocalBackend
 from store.types import ERROR, OK, STALE, ErrorKind, sha256_hex
-from tests.ctx_helpers import create_ctx, fenced_ctx
+from tests.ctx_helpers import create_ctx, fenced_ctx, overwrite_ctx
 
 
 def _gen(n: int) -> bytes:
@@ -125,6 +125,53 @@ def test_c8_resume_ignores_torn_tail_journal_record(tmp_path):
     blob = resumed.read(key)
     assert blob is not None and blob.body == b"good-and-durable"
     assert resumed.read("resume/torn-tail") is None
+    resumed.close()
+
+
+# ---------------------------------------------------------------------------
+# H1 Increment 2, Phase 1 — last_accepted_fence survives a store reopen
+# ---------------------------------------------------------------------------
+
+
+def test_fence_survives_reload(tmp_path):
+    """last_accepted_fence is journal-durable (H1 Increment 2, Phase 1 (A)):
+    a fresh LocalBackend constructed over the same root after a reopen must
+    still refuse a stale-fence Overwrite, proving the fence floor was
+    correctly replayed from the journal rather than reset to 0."""
+    root = tmp_path / "store-root"
+    key = "fence/reload"
+
+    backend = LocalBackend(root)
+    r0 = gate.persist(backend, key, b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+
+    lease_a = backend.lock(key, ttl_s=30)
+    backend.unlock(lease_a)
+    r1 = gate.persist(backend, key, b"v1", ctx=overwrite_ctx(r0.new_hash, lease_a), doc_type="system_state")
+    assert isinstance(r1, OK)  # last_accepted_fence is now durably lease_a.fence
+    backend.close()
+
+    # Reopen: a brand-new instance over the same root, forcing journal replay.
+    resumed = LocalBackend(root)
+
+    # A fresh lock() on `resumed` must mint a fence STRICTLY greater than
+    # lease_a.fence -- if last_accepted_fence had NOT survived the reload
+    # (regressed to 0), this would instead be able to reuse/alias a fence at
+    # or below lease_a.fence.
+    lease_b = resumed.lock(key, ttl_s=30)
+    assert lease_b.fence > lease_a.fence
+    resumed.unlock(lease_b)
+    r2 = gate.persist(resumed, key, b"v2", ctx=overwrite_ctx(r1.new_hash, lease_b), doc_type="system_state")
+    assert isinstance(r2, OK)
+
+    # The old, pre-reload lease_a (whose fence is now behind the durably
+    # replayed last_accepted_fence) must still be refused post-reload.
+    r3 = gate.persist(
+        resumed, key, b"v3-stale-a-replay", ctx=overwrite_ctx(r2.new_hash, lease_a), doc_type="system_state"
+    )
+    assert isinstance(r3, STALE)
+    assert r3.reason == "FENCE"
+    assert resumed.read(key).body == b"v2"  # unchanged by the rejected replay
     resumed.close()
 
 

@@ -103,6 +103,7 @@ import re
 import secrets
 import struct
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
@@ -294,6 +295,29 @@ class LocalBackend:
         self._replace_retry_attempts = replace_retry_attempts
         self._replace_retry_backoff_s = replace_retry_backoff_s
 
+        # H1 Increment 2, Phase 1: per-key fence-ownership state, kept
+        # SEPARATE from the pre-existing locks/advisory/<hash>.lock file
+        # (that file remains the transient, cross-process, unlock()-cleared
+        # mutual-exclusion mechanism, unchanged below). `_fence_owner` is
+        # in-process-only (NOT restored on reopen — a fresh instance starts
+        # with no owner until its own lock() call mints one) because the
+        # `fenced_ctx` test helper AND both production callers
+        # (mcp/server.py, skill/knokeep_state.py) acquire a lease and
+        # release it immediately, before the write happens; a design that
+        # cleared ownership on unlock() would reject that lease's own write.
+        # `_last_accepted_fence`, by contrast, IS durable: it is rebuilt by
+        # `_resume()` below from the journal, which now carries it alongside
+        # each record's body (see `_journal_append`), so a stale-fence
+        # Overwrite is still correctly refused after a process restart. Both
+        # dicts are guarded by `_fence_lock` — a plain in-process lock,
+        # distinct from the cross-process `cas.lock`/`advisory.lock` file
+        # locks — because `lock()`/`renew()` (guarded by advisory.lock) and
+        # `write()` (guarded by cas.lock) must serialize with each other on
+        # these two dicts despite holding different file locks.
+        self._fence_lock = threading.Lock()
+        self._fence_owner: Dict[str, dict] = {}
+        self._last_accepted_fence: Dict[str, int] = {}
+
         for d in (
             self._root,
             self._data_dir,
@@ -359,7 +383,7 @@ class LocalBackend:
             with contextlib.suppress(OSError):
                 lower.unlink()
 
-    def _iter_journal_records(self) -> Iterator[Tuple[str, bytes]]:
+    def _iter_journal_records(self) -> Iterator[Tuple[str, bytes, int]]:
         try:
             f = open(self._journal_path, "rb")
         except FileNotFoundError:
@@ -385,17 +409,26 @@ class LocalBackend:
                     return
                 if hashlib.sha256(body).digest() != digest:
                     return  # torn/corrupt record — stop before it
+                # H1 Increment 2, Phase 1: last_accepted_fence trailer, added
+                # after `digest` so every pre-Phase-1 record shape above is
+                # unchanged; a torn trailer (crash mid-append of this last
+                # field) is handled exactly like a torn body/digest above —
+                # stop before this record, keep everything already yielded.
+                fence_bytes = f.read(8)
+                if len(fence_bytes) < 8:
+                    return
+                (last_accepted_fence,) = struct.unpack(">Q", fence_bytes)
                 try:
                     key = key_bytes.decode("utf-8")
                 except UnicodeDecodeError:
                     return
-                yield key, body
+                yield key, body, last_accepted_fence
 
     def _resume(self) -> None:
-        latest: Dict[str, bytes] = {}
-        for key, raw in self._iter_journal_records():
-            latest[key] = raw  # last record per key wins
-        for key, raw in latest.items():
+        latest: Dict[str, Tuple[bytes, int]] = {}
+        for key, raw, last_accepted_fence in self._iter_journal_records():
+            latest[key] = (raw, last_accepted_fence)  # last record per key wins
+        for key, (raw, last_accepted_fence) in latest.items():
             rel_path = self._key_to_relpath(key)
             data_path = self._safe_join(self._data_dir, rel_path)
             expected_hash = sha256_hex(raw)
@@ -408,6 +441,9 @@ class LocalBackend:
                     needs_rebuild = True
             if needs_rebuild:
                 self._publish(rel_path, data_path, raw, create=not data_path.exists())
+            # Construction is single-threaded (this instance is not yet
+            # visible to any other thread), so no lock is needed here.
+            self._last_accepted_fence[key] = last_accepted_fence
 
     def _scavenge_staging(self) -> None:
         now = time.time()
@@ -463,7 +499,12 @@ class LocalBackend:
 
     # -- journal + publish (contract §3/§4.1 write order) -------------------
 
-    def _journal_append(self, key: str, raw: bytes) -> None:
+    def _journal_append(self, key: str, raw: bytes, last_accepted_fence: int = 0) -> None:
+        # H1 Increment 2, Phase 1: `last_accepted_fence` defaults to 0 so
+        # every pre-Phase-1 call site (tests/test_local_backend.py's crash-
+        # simulation tests reach into this private method directly, per its
+        # own module docstring) keeps working unmodified, journaling a
+        # record whose fence trailer is simply 0.
         key_bytes = key.encode("utf-8")
         digest = hashlib.sha256(raw).digest()
         record = (
@@ -472,6 +513,7 @@ class LocalBackend:
             + struct.pack(">Q", len(raw))
             + raw
             + digest
+            + struct.pack(">Q", last_accepted_fence)
         )
         self._journal_fh.write(record)
         self._journal_fh.flush()
@@ -517,7 +559,7 @@ class LocalBackend:
     # -- StoreBackend protocol ---------------------------------------------
 
     def capabilities(self) -> Caps:
-        return Caps(atomic=True, cas=True, lock=True, durable=True, remote=False)
+        return Caps(atomic=True, cas=True, lock=True, durable=True, remote=False, fence=True)
 
     def health(self) -> BackendHealth:
         return BackendHealth(ok=True, detail=f"local filesystem backend at {self._root}")
@@ -562,8 +604,11 @@ class LocalBackend:
         if not gate.verify(key) or not gate.verify(body):
             raise TypeError("LocalBackend.write: gate marker verification failed")
 
-        # H1 Increment 2, Phase 0: ctx is required; derive expected_hash the
-        # same way store/gate.py does. No fence enforcement yet.
+        # H1 Increment 2, Phase 0/1: ctx is required; derive expected_hash the
+        # same way store/gate.py does.
+        precondition_lease: Optional[Lock] = (
+            ctx.precondition.lease if isinstance(ctx.precondition, Overwrite) else None
+        )
         expected_hash: Optional[str] = (
             ctx.precondition.expected_hash if isinstance(ctx.precondition, Overwrite) else None
         )
@@ -593,13 +638,17 @@ class LocalBackend:
             if expected_hash is None:
                 # Create-only.
                 if current_raw is None:
-                    self._commit(k, rel_path, data_path, raw, create=True)
+                    self._commit(k, rel_path, data_path, raw, create=True, last_accepted_fence=0)
                     return OK(new_hash)
                 if current_hash == new_hash:
                     return OK(new_hash)  # idempotent create replay (§3)
                 return EXISTS(current_hash)
 
-            # CAS-update.
+            # CAS-update. Ownership/fence FIRST, then the existing hash CAS
+            # check (H1 Increment 2, Phase 1 (C)) — unchanged otherwise.
+            if not self._fence_ok(k, precondition_lease):
+                return STALE(current_hash, reason="FENCE")
+
             if current_raw is None:
                 return STALE(None)
             if current_hash != expected_hash:
@@ -611,16 +660,58 @@ class LocalBackend:
                 if stored_generation is not None and new_generation <= stored_generation:
                     return STALE(current_hash)
 
-            self._commit(k, rel_path, data_path, raw, create=False)
+            self._commit(
+                k, rel_path, data_path, raw, create=False,
+                last_accepted_fence=precondition_lease.fence,
+            )
             return OK(new_hash)
         except (_ReplaceBusy, _ReservationRace):
             return ERROR(ErrorKind.BUSY)
         finally:
             lock.release()
 
-    def _commit(self, key: str, rel_path: Path, data_path: Path, raw: bytes, *, create: bool) -> None:
-        self._journal_append(key, raw)  # (1) durability commit
+    def _fence_ok(self, key: str, lease: Optional[Lock]) -> bool:
+        """H1 Increment 2, Phase 1 (C): the Overwrite lease must be the
+        current fence owner, unexpired, and carry a fence at least as high
+        as the last one that actually committed. Caller holds cas.lock
+        (this method itself only touches the in-process `_fence_lock`, held
+        just long enough to snapshot the three values, matching the
+        `_fence_owner`/`_last_accepted_fence` docstring in __init__)."""
+        if lease is None:
+            return False
+        with self._fence_lock:
+            fs = self._fence_owner.get(key)
+            owner_token = fs.get("owner_token") if fs else None
+            owner_expiry = fs.get("owner_expiry", 0.0) if fs else 0.0
+            last_accepted = self._last_accepted_fence.get(key, 0)
+        if lease.token != owner_token:
+            return False
+        if owner_expiry <= time.time():
+            return False
+        if lease.fence < last_accepted:
+            return False
+        return True
+
+    def _commit(
+        self,
+        key: str,
+        rel_path: Path,
+        data_path: Path,
+        raw: bytes,
+        *,
+        create: bool,
+        last_accepted_fence: int,
+    ) -> None:
+        self._journal_append(key, raw, last_accepted_fence)  # (1) durability commit
         self._publish(rel_path, data_path, raw, create=create)  # (2) atomic publish
+        # H1 Increment 2, Phase 1 (C): last_accepted_fence lands in the SAME
+        # fsync'd journal record as the body (above) — the durable source of
+        # truth on crash/replay. This in-process cache mirrors it so a
+        # subsequent write() in THIS instance sees it without re-reading the
+        # journal; `write()` holds cas.lock across this whole method, so no
+        # other write() call can observe a half-updated state.
+        with self._fence_lock:
+            self._last_accepted_fence[key] = last_accepted_fence
 
     # -- advisory lock() API (contract §2 — NOT the CAS mechanism) ----------
 
@@ -666,7 +757,20 @@ class LocalBackend:
         if result is None:
             raise BackendBusyError(f"key {key!r} is locked")
         token, expiry = result
-        return Lock(key=key, token=token, expiry_epoch=expiry)
+        # H1 Increment 2, Phase 1 (B): every successful acquire above (fresh
+        # OR a stale-break takeover of an expired prior owner — both land in
+        # `_try_acquire_advisory` identically) durably advances the fence
+        # past both the previous owner_fence and last_accepted_fence, so two
+        # successive acquisitions on the same key always return a strictly
+        # increasing fence.
+        with self._fence_lock:
+            fs = self._fence_owner.setdefault(key, {"owner_fence": 0})
+            last_accepted = self._last_accepted_fence.get(key, 0)
+            new_fence = max(fs.get("owner_fence", 0), last_accepted) + 1
+            fs["owner_token"] = token
+            fs["owner_expiry"] = expiry
+            fs["owner_fence"] = new_fence
+        return Lock(key=key, token=token, expiry_epoch=expiry, fence=new_fence)
 
     def _try_acquire_advisory(self, path: Path, ttl_s: float) -> Optional[Tuple[str, float]]:
         guard = _FileLock(self._advisory_guard_path)
@@ -698,6 +802,12 @@ class LocalBackend:
                 return False
             with contextlib.suppress(FileNotFoundError):
                 path.unlink()
+            # H1 Increment 2, Phase 1 (B): fence bookkeeping is deliberately
+            # left untouched here — unlock() only releases the advisory
+            # mutual-exclusion above so a fresh lock() can succeed
+            # immediately; the released lease remains the valid fence owner
+            # for CAS writes until superseded by a later lock() on this key
+            # or until its TTL elapses on its own (see __init__ docstring).
             return True
         finally:
             guard.release()
@@ -714,7 +824,15 @@ class LocalBackend:
             token, expiry = existing
             if token != lock.token or expiry <= time.time():
                 return False
-            self._write_advisory(path, token, time.time() + ttl_s)
+            new_expiry = time.time() + ttl_s
+            self._write_advisory(path, token, new_expiry)
+            # H1 Increment 2, Phase 1 (B): fence unchanged, but extend the
+            # fence-owner's validity window to match the renewed advisory
+            # lock, so a renewed lease keeps its CAS-write authorization.
+            with self._fence_lock:
+                fs = self._fence_owner.get(lock.key)
+                if fs is not None and fs.get("owner_token") == token:
+                    fs["owner_expiry"] = new_expiry
             return True
         finally:
             guard.release()

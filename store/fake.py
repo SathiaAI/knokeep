@@ -35,6 +35,20 @@ class FakeBackend:
     def __init__(self) -> None:
         self._store: Dict[str, Tuple[bytes, str]] = {}
         self._locks: Dict[str, Tuple[str, float]] = {}
+        # H1 Increment 2, Phase 1: per-key durable (for the life of this
+        # in-memory backend) fence-ownership state, kept SEPARATE from
+        # `_locks` above on purpose. `_locks` is the transient advisory
+        # mutual-exclusion bookkeeping (cleared by unlock() so a fresh
+        # acquire can succeed immediately); `_fence` is the CAS-fencing
+        # identity of the most recent lock()-issued lease and is NEVER
+        # cleared by unlock() — a caller that acquires a lease and releases
+        # it right away (the common `tests/ctx_helpers.fenced_ctx` pattern)
+        # must still be able to use that lease to write until it is either
+        # superseded by a later lock() on the same key or its TTL elapses.
+        # Fields per key: owner_token, owner_expiry, owner_fence,
+        # last_accepted_fence (the last two are pure counters, never
+        # wall-clock).
+        self._fence: Dict[str, Dict[str, object]] = {}
         self._mutex = threading.RLock()
         # Fault injection: each is a one-shot counter consumed by the next
         # matching write() call(s).
@@ -81,7 +95,7 @@ class FakeBackend:
     # -- StoreBackend protocol ---------------------------------------------
 
     def capabilities(self) -> Caps:
-        return Caps(atomic=True, cas=True, lock=True, durable=False, remote=False)
+        return Caps(atomic=True, cas=True, lock=True, durable=False, remote=False, fence=True)
 
     def health(self) -> BackendHealth:
         return BackendHealth(ok=True, detail="in-memory fake backend")
@@ -115,8 +129,11 @@ class FakeBackend:
         if not gate.verify(key) or not gate.verify(body):
             raise TypeError("FakeBackend.write: gate marker verification failed")
 
-        # H1 Increment 2, Phase 0: ctx is required; derive expected_hash the
-        # same way store/gate.py does. No fence enforcement yet.
+        # H1 Increment 2, Phase 0/1: ctx is required; derive expected_hash the
+        # same way store/gate.py does.
+        precondition_lease: Optional[Lock] = (
+            ctx.precondition.lease if isinstance(ctx.precondition, Overwrite) else None
+        )
         expected_hash: Optional[str] = (
             ctx.precondition.expected_hash if isinstance(ctx.precondition, Overwrite) else None
         )
@@ -152,6 +169,9 @@ class FakeBackend:
                 # Create-only.
                 if current is None:
                     self._store[k] = (raw, new_hash)
+                    # H1 Increment 2, Phase 1 (C): a fresh create starts the
+                    # key's fence floor at 0.
+                    self._fence.setdefault(k, {})["last_accepted_fence"] = 0
                     return OK(new_hash)
                 _, current_hash = current
                 if current_hash == new_hash:
@@ -159,14 +179,40 @@ class FakeBackend:
                     return OK(new_hash)
                 return EXISTS(current_hash)
 
-            # CAS-update.
+            # CAS-update. Ownership/fence FIRST, then the content-hash CAS
+            # (H1 Increment 2, Phase 1 (C)).
+            current_hash = current[1] if current is not None else None
+            if not self._fence_ok(k, precondition_lease):
+                return STALE(current_hash, reason="FENCE")
+
             if current is None:
                 return STALE(None)
-            _, current_hash = current
             if current_hash != expected_hash:
                 return STALE(current_hash)
             self._store[k] = (raw, new_hash)
+            # Commit last_accepted_fence atomically with the body: both are
+            # updated inside this same critical section, under self._mutex,
+            # before the write() call returns.
+            self._fence.setdefault(k, {})["last_accepted_fence"] = precondition_lease.fence
             return OK(new_hash)
+
+    def _fence_ok(self, key: str, lease: Optional[Lock]) -> bool:
+        """H1 Increment 2, Phase 1 (C): the Overwrite lease must be the
+        current fence owner, unexpired, and carry a fence at least as high
+        as the last one that actually committed. Caller holds self._mutex."""
+        if lease is None:
+            return False
+        fs = self._fence.get(key)
+        owner_token = fs.get("owner_token") if fs else None
+        owner_expiry = fs.get("owner_expiry", 0.0) if fs else 0.0
+        last_accepted = fs.get("last_accepted_fence", 0) if fs else 0
+        if lease.token != owner_token:
+            return False
+        if owner_expiry <= time.time():
+            return False
+        if lease.fence < last_accepted:
+            return False
+        return True
 
     def lock(self, key: str, ttl_s: float) -> Lock:
         with self._mutex:
@@ -177,7 +223,20 @@ class FakeBackend:
             token = secrets.token_hex(16)  # 128-bit CSPRNG token
             expiry = now + ttl_s
             self._locks[key] = (token, expiry)
-            return Lock(key=key, token=token, expiry_epoch=expiry)
+            # H1 Increment 2, Phase 1 (B): every successful acquire (fresh OR
+            # a stale-break takeover of an expired prior owner — both land
+            # here identically) durably advances the fence past both the
+            # previous owner_fence and last_accepted_fence, so two successive
+            # acquisitions on the same key always return a strictly
+            # increasing fence. This bookkeeping is kept in `_fence`,
+            # SEPARATE from `_locks`, and is intentionally NOT cleared by
+            # unlock() (see the field's docstring in __init__).
+            fs = self._fence.setdefault(key, {"owner_fence": 0, "last_accepted_fence": 0})
+            new_fence = max(fs.get("owner_fence", 0), fs.get("last_accepted_fence", 0)) + 1
+            fs["owner_token"] = token
+            fs["owner_expiry"] = expiry
+            fs["owner_fence"] = new_fence
+            return Lock(key=key, token=token, expiry_epoch=expiry, fence=new_fence)
 
     def unlock(self, lock: Lock) -> bool:
         with self._mutex:
@@ -188,6 +247,11 @@ class FakeBackend:
             if token != lock.token or expiry <= time.time():
                 return False
             del self._locks[lock.key]
+            # `_fence` bookkeeping is deliberately left untouched: unlock()
+            # only releases the mutual-exclusion (advisory) side so a fresh
+            # lock() can succeed immediately; the released lease remains the
+            # valid fence owner (for CAS writes) until superseded by a later
+            # lock() on this key or until its TTL elapses on its own.
             return True
 
     def renew(self, lock: Lock, ttl_s: float) -> bool:
@@ -198,7 +262,14 @@ class FakeBackend:
             token, expiry = existing
             if token != lock.token or expiry <= time.time():
                 return False
-            self._locks[lock.key] = (token, time.time() + ttl_s)
+            new_expiry = time.time() + ttl_s
+            self._locks[lock.key] = (token, new_expiry)
+            # H1 Increment 2, Phase 1 (B): fence unchanged, but extend the
+            # fence-owner's validity window to match the renewed advisory
+            # lock, so a renewed lease keeps its CAS-write authorization.
+            fs = self._fence.get(lock.key)
+            if fs is not None and fs.get("owner_token") == token:
+                fs["owner_expiry"] = new_expiry
             return True
 
 

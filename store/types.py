@@ -41,6 +41,12 @@ class Caps:
     lock: bool
     durable: bool
     remote: bool
+    # H1 Increment 2, Phase 1: does this backend enforce lock()-issued fence
+    # numbers on an Overwrite CAS write (server-side, not just carried
+    # structurally)? True for local/fake in this phase; the three remote
+    # backends (git/objectstore/postgres) keep accepting `ctx` unchanged and
+    # report False until a later phase adds their enforcement.
+    fence: bool = False
 
 
 @dataclass(frozen=True)
@@ -79,6 +85,12 @@ class OK:
 @dataclass(frozen=True)
 class STALE:
     current_hash: Optional[str]  # None when the key was absent (§3)
+    # H1 Increment 2, Phase 1: optional machine-readable cause, additive and
+    # last so every existing `STALE(current_hash)` construction stays valid.
+    # "FENCE" marks a write refused on lock()-fence ordering (store/context.py
+    # Overwrite.lease), as opposed to the pre-existing plain content-hash CAS
+    # mismatch, which leaves this None.
+    reason: Optional[str] = None
 
 
 @dataclass(frozen=True)

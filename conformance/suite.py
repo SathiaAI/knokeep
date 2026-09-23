@@ -28,7 +28,7 @@ from store.git_backend import GitBackend
 from store.local import LocalBackend
 from store.objectstore import ObjectStoreBackend
 from store.types import ERROR, EXISTS, OK, STALE, ErrorKind, commit_class, sha256_hex
-from tests.ctx_helpers import create_ctx, fenced_ctx
+from tests.ctx_helpers import create_ctx, fenced_ctx, overwrite_ctx
 from tests.moto_support import (
     DUMMY_ACCESS_KEY_ID,
     DUMMY_REGION,
@@ -394,6 +394,91 @@ def test_c7_lock_ttl_and_token(backend):
     assert isinstance(r2, OK)
     # Renew must fail once expired, even with the correct token.
     assert backend.renew(lock3, ttl_s=5) is False
+
+
+# ---------------------------------------------------------------------------
+# C14/C17 — server-side fence enforcement (H1 Increment 2, Phase 1). Gated on
+# backend.capabilities().fence so this runs against local/fake now and lights
+# up automatically for the remote backends once a later phase adds their
+# enforcement (their capabilities().fence is False in this phase, so pytest
+# reports them skipped, not passing-by-vacuity).
+# ---------------------------------------------------------------------------
+
+
+def _require_fence(backend):
+    if not backend.capabilities().fence:
+        pytest.skip(
+            "this backend does not enforce lock()-fence ordering yet "
+            "(H1 Increment 2, Phase 1 adds it to local/fake only; the "
+            "remote backends still accept `ctx` unchanged for now)."
+        )
+
+
+def test_c14_stale_fence_refusal_despite_matching_hash(backend):
+    """The key fencing test: a lease that has been superseded by a later
+    lock() on the same key must be refused on the FENCE even when its
+    expected_hash happens to match the CURRENT content — i.e. fencing is
+    enforced independently of, and in addition to, the pre-existing
+    content-hash CAS guard."""
+    _require_fence(backend)
+
+    r0 = gate.persist(backend, "fence/c14", b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    h0 = r0.new_hash
+
+    lease_a = backend.lock("fence/c14", ttl_s=30)
+    r1 = gate.persist(
+        backend, "fence/c14", b"v1-from-a", ctx=overwrite_ctx(h0, lease_a), doc_type="system_state"
+    )
+    assert isinstance(r1, OK)  # last_accepted_fence is now lease_a.fence
+    h1 = r1.new_hash
+    assert backend.unlock(lease_a) is True
+
+    lease_b = backend.lock("fence/c14", ttl_s=30)
+    assert lease_b.fence > lease_a.fence, "two successive acquisitions must strictly increase the fence"
+    r2 = gate.persist(
+        backend, "fence/c14", b"v2-from-b", ctx=overwrite_ctx(h1, lease_b), doc_type="system_state"
+    )
+    assert isinstance(r2, OK)  # last_accepted_fence is now lease_b.fence
+    h2 = r2.new_hash
+    assert backend.unlock(lease_b) is True
+
+    # The stale writer A replays against the CURRENT hash (h2) — the
+    # content-hash CAS alone would accept this — but its lease's fence
+    # (lease_a.fence) is behind last_accepted_fence (lease_b.fence), so the
+    # fence check must refuse it before the hash check is even reached.
+    r3 = gate.persist(
+        backend, "fence/c14", b"v3-stale-a-replay", ctx=overwrite_ctx(h2, lease_a), doc_type="system_state"
+    )
+    assert isinstance(r3, STALE)
+    assert r3.reason == "FENCE"
+    # Nothing changed: the store still holds B's write.
+    final = backend.read("fence/c14")
+    assert final.body == b"v2-from-b"
+    assert final.version_hash == h2
+
+
+def test_c17_same_fence_repeated_writes_succeed(backend):
+    """The holder of one lease may write through it more than once (each a
+    valid CAS-update against the current hash) without needing to
+    re-acquire a fresh lease between writes."""
+    _require_fence(backend)
+
+    r0 = gate.persist(backend, "fence/c17", b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+
+    lease = backend.lock("fence/c17", ttl_s=30)
+    r1 = gate.persist(
+        backend, "fence/c17", b"v1", ctx=overwrite_ctx(r0.new_hash, lease), doc_type="system_state"
+    )
+    assert isinstance(r1, OK)
+
+    r2 = gate.persist(
+        backend, "fence/c17", b"v2", ctx=overwrite_ctx(r1.new_hash, lease), doc_type="system_state"
+    )
+    assert isinstance(r2, OK)
+    assert backend.read("fence/c17").body == b"v2"
+    backend.unlock(lease)
 
 
 # ---------------------------------------------------------------------------

@@ -495,7 +495,10 @@ class GitBackend:
 
     def capabilities(self) -> Caps:
         # JUDGMENT CALL 6: remote=True (see module docstring).
-        return Caps(atomic=True, cas=True, lock=True, durable=True, remote=True)
+        # fence=False: H1 Increment 2, Phase 1 adds fence enforcement to the
+        # local/fake backends only; this remote backend still accepts `ctx`
+        # unchanged and enforces nothing new until a later phase.
+        return Caps(atomic=True, cas=True, lock=True, durable=True, remote=True, fence=False)
 
     def health(self) -> BackendHealth:
         try:

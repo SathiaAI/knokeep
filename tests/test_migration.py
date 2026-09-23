@@ -21,6 +21,7 @@ from store.fake import FakeBackend
 from store.local import LocalBackend
 from store.objectstore import ObjectStoreBackend
 from store.types import Blob, ERROR, ErrorKind, OK, sha256_hex
+from tests.ctx_helpers import create_ctx
 from tests.moto_support import (
     DUMMY_ACCESS_KEY_ID,
     DUMMY_REGION,
@@ -31,7 +32,7 @@ from tests.moto_support import (
 
 
 def _put(backend, key: str, body: bytes):
-    r = gate.persist(backend, key, body, expected_hash=None, doc_type="system_state")
+    r = gate.persist(backend, key, body, ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r, OK), f"setup write for {key!r} failed: {r!r}"
     return r
 
@@ -347,8 +348,8 @@ class _TimeoutAfterCommitThenLandedBackend(FakeBackend):
         self._flaky_key = flaky_key
         self._armed = True
 
-    def write(self, key, body, *, expected_hash):
-        result = super().write(key, body, expected_hash=expected_hash)
+    def write(self, key, body, *, ctx):
+        result = super().write(key, body, ctx=ctx)
         if self._armed and key.key == self._flaky_key:
             self._armed = False
             if isinstance(result, OK):
@@ -380,10 +381,10 @@ class _TimeoutAfterCommitNeverLandedBackend(FakeBackend):
         super().__init__()
         self._flaky_key = flaky_key
 
-    def write(self, key, body, *, expected_hash):
+    def write(self, key, body, *, ctx):
         if key.key == self._flaky_key:
             return ERROR(ErrorKind.TIMEOUT_AFTER_COMMIT)
-        return super().write(key, body, expected_hash=expected_hash)
+        return super().write(key, body, ctx=ctx)
 
 
 def test_timeout_after_commit_that_never_landed_aborts():
@@ -463,11 +464,11 @@ class _FlakyOnceBackend(FakeBackend):
         self._fail_key = fail_key
         self._armed = True
 
-    def write(self, key, body, *, expected_hash):
+    def write(self, key, body, *, ctx):
         if self._armed and key.key == self._fail_key:
             self._armed = False
             raise ConnectionError("simulated transient network failure mid-migration")
-        return super().write(key, body, expected_hash=expected_hash)
+        return super().write(key, body, ctx=ctx)
 
 
 def test_interrupted_cutover_then_rerun_completes_idempotently():
@@ -516,7 +517,7 @@ def test_frozen_backend_write_raises():
     assert frozen.frozen is True
 
     with pytest.raises(SourceFrozenError):
-        frozen.write(None, None, expected_hash=None)
+        frozen.write(None, None, ctx=create_ctx())
 
     # Reads still work normally through the wrapper.
     blob = frozen.read("x")

@@ -164,6 +164,7 @@ from typing import Callable, List, Optional, Sequence, Tuple
 
 from store import gate
 from store.backend import Lock, StoreBackend
+from store.context import create_ctx
 from store.types import (
     Blob,
     EXISTS,
@@ -506,7 +507,7 @@ def migrate(
 
         try:
             result: WriteResult = gate.persist(
-                target, key, blob.body, expected_hash=None, doc_type=_MIGRATION_DOC_TYPE
+                target, key, blob.body, ctx=create_ctx(), doc_type=_MIGRATION_DOC_TYPE
             )
         except Exception as exc:  # noqa: BLE001 - e.g. a fault-injected
             # ConnectionError from a backend simulating a network failure.

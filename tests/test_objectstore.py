@@ -35,6 +35,7 @@ from store.objectstore import (
 )
 from store.types import ERROR, EXISTS, OK, STALE, ErrorKind, sha256_hex
 
+from tests.ctx_helpers import create_ctx, fenced_ctx
 from tests.moto_support import (
     DUMMY_ACCESS_KEY_ID,
     DUMMY_REGION,
@@ -75,7 +76,7 @@ def backend() -> ObjectStoreBackend:
 
 
 def test_c1_stale_reject_real_412(backend):
-    r0 = gate.persist(backend, "k1", b"hello", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "k1", b"hello", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
 
     # Confirm this really is a live If-Match precondition failure at the
@@ -84,7 +85,7 @@ def test_c1_stale_reject_real_412(backend):
     # unconditioned client call that we independently know must currently
     # collide (bucket already has an object at this key with a different
     # ETag than a wrong If-Match value).
-    r1 = gate.persist(backend, "k1", b"goodbye", expected_hash="0" * 64, doc_type="system_state")
+    r1 = gate.persist(backend, "k1", b"goodbye", ctx=fenced_ctx(backend, "k1", "0" * 64), doc_type="system_state")
     assert isinstance(r1, STALE)
     assert r1.current_hash == r0.new_hash
     assert backend.read("k1").body == b"hello"
@@ -101,7 +102,7 @@ def test_c1_stale_reject_real_412(backend):
 
 
 def test_c2_create_collision_real_412(backend):
-    r0 = gate.persist(backend, "k2", b"first", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "k2", b"first", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
 
     # Direct, low-level confirmation that moto itself returns 412 for a
@@ -112,7 +113,7 @@ def test_c2_create_collision_real_412(backend):
     )
     assert status == 412
 
-    r1 = gate.persist(backend, "k2", b"second", expected_hash=None, doc_type="system_state")
+    r1 = gate.persist(backend, "k2", b"second", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r1, EXISTS)
     assert r1.current_hash == r0.new_hash
     assert backend.read("k2").body == b"first"
@@ -124,12 +125,12 @@ def test_c2_create_collision_real_412(backend):
 
 
 def test_cas_update_issues_exactly_one_head(backend):
-    r0 = gate.persist(backend, "single-head", b"v0", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "single-head", b"v0", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
 
     before = backend._client.head_count
     r1 = gate.persist(
-        backend, "single-head", b"v1", expected_hash=r0.new_hash, doc_type="system_state"
+        backend, "single-head", b"v1", ctx=fenced_ctx(backend, "single-head", r0.new_hash), doc_type="system_state"
     )
     assert isinstance(r1, OK)
     after = backend._client.head_count
@@ -137,7 +138,7 @@ def test_cas_update_issues_exactly_one_head(backend):
 
 
 def test_head_result_carries_both_meta_hash_and_etag(backend):
-    r0 = gate.persist(backend, "head-fields", b"body", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "head-fields", b"body", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
     head = backend._client.head("head-fields")
     assert head is not None
@@ -207,18 +208,18 @@ def test_every_put_call_site_in_objectstore_passes_precondition_ast():
 
 
 def test_412_maps_to_exists_for_create_only_and_stale_for_cas_update(backend):
-    r0 = gate.persist(backend, "map-by-op", b"v0", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "map-by-op", b"v0", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
 
     # Same underlying HTTP status (412) from moto, different WriteResult
     # class depending on which CAS operation triggered it.
     create_conflict = gate.persist(
-        backend, "map-by-op", b"different-body", expected_hash=None, doc_type="system_state"
+        backend, "map-by-op", b"different-body", ctx=create_ctx(), doc_type="system_state"
     )
     assert isinstance(create_conflict, EXISTS)
 
     cas_conflict = gate.persist(
-        backend, "map-by-op", b"v2", expected_hash="f" * 64, doc_type="system_state"
+        backend, "map-by-op", b"v2", ctx=fenced_ctx(backend, "map-by-op", "f" * 64), doc_type="system_state"
     )
     assert isinstance(cas_conflict, STALE)
 
@@ -239,7 +240,7 @@ def test_5xx_after_send_maps_to_timeout_after_commit(backend, monkeypatch):
         return real_request(method, key, **kwargs)
 
     monkeypatch.setattr(backend._client, "_request", _fake_request)
-    result = gate.persist(backend, "fivexx", b"body", expected_hash=None, doc_type="system_state")
+    result = gate.persist(backend, "fivexx", b"body", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.TIMEOUT_AFTER_COMMIT
 
@@ -253,7 +254,7 @@ def test_unclassifiable_status_fails_closed_to_conflict_unknown(backend, monkeyp
         return real_request(method, key, **kwargs)
 
     monkeypatch.setattr(backend._client, "_request", _fake_request)
-    result = gate.persist(backend, "teapot", b"body", expected_hash=None, doc_type="system_state")
+    result = gate.persist(backend, "teapot", b"body", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.CONFLICT_UNKNOWN
     # Fail-closed: nothing was actually written.
@@ -272,7 +273,7 @@ def test_pre_send_connection_failure_is_network_not_timeout(backend, monkeypatch
         raise _PreSendNetworkError("simulated: connect() never succeeded")
 
     monkeypatch.setattr(backend._client, "_request", _boom)
-    result = gate.persist(backend, "presend", b"body", expected_hash=None, doc_type="system_state")
+    result = gate.persist(backend, "presend", b"body", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.NETWORK
 
@@ -284,7 +285,7 @@ def test_post_send_ack_lost_is_timeout_after_commit(backend, monkeypatch):
         raise _PostSendAckLostError("simulated: sent, ack never arrived")
 
     monkeypatch.setattr(backend._client, "_request", _boom)
-    result = gate.persist(backend, "postsend", b"body", expected_hash=None, doc_type="system_state")
+    result = gate.persist(backend, "postsend", b"body", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.TIMEOUT_AFTER_COMMIT
 
@@ -377,14 +378,14 @@ def test_capability_probe_passes_and_cleans_up_against_real_moto():
 def test_generation_monotonicity_rejects_non_increasing_update(backend):
     r0 = gate.persist(
         backend, "lease/x", make_generation_header(5) + b"holder=alice",
-        expected_hash=None, doc_type="lease",
+        ctx=create_ctx(), doc_type="lease",
     )
     assert isinstance(r0, OK)
 
     # Same generation again -> rejected (not strictly greater).
     r1 = gate.persist(
         backend, "lease/x", make_generation_header(5) + b"holder=bob",
-        expected_hash=r0.new_hash, doc_type="lease",
+        ctx=fenced_ctx(backend, "lease/x", r0.new_hash), doc_type="lease",
     )
     assert isinstance(r1, STALE)
     assert backend.read("lease/x").body == make_generation_header(5) + b"holder=alice"
@@ -392,14 +393,14 @@ def test_generation_monotonicity_rejects_non_increasing_update(backend):
     # Lower generation -> also rejected.
     r2 = gate.persist(
         backend, "lease/x", make_generation_header(3) + b"holder=carol",
-        expected_hash=r0.new_hash, doc_type="lease",
+        ctx=fenced_ctx(backend, "lease/x", r0.new_hash), doc_type="lease",
     )
     assert isinstance(r2, STALE)
 
     # Strictly greater generation -> accepted.
     r3 = gate.persist(
         backend, "lease/x", make_generation_header(6) + b"holder=dave",
-        expected_hash=r0.new_hash, doc_type="lease",
+        ctx=fenced_ctx(backend, "lease/x", r0.new_hash), doc_type="lease",
     )
     assert isinstance(r3, OK)
     assert backend.read("lease/x").body == make_generation_header(6) + b"holder=dave"
@@ -408,12 +409,12 @@ def test_generation_monotonicity_rejects_non_increasing_update(backend):
 def test_generation_check_only_reads_when_generation_present(backend):
     """The extra GET for generation monotonicity (JUDGMENT CALL 4) must NOT
     fire for STATE doc types (no generation header, no monotonicity rule)."""
-    r0 = gate.persist(backend, "state/x", b"plain content", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "state/x", b"plain content", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
 
     before = backend._client.get_count
     r1 = gate.persist(
-        backend, "state/x", b"plain content v2", expected_hash=r0.new_hash, doc_type="system_state"
+        backend, "state/x", b"plain content v2", ctx=fenced_ctx(backend, "state/x", r0.new_hash), doc_type="system_state"
     )
     assert isinstance(r1, OK)
     assert backend._client.get_count == before, "no generation header -> no extra GET"
@@ -426,10 +427,10 @@ def test_generation_check_only_reads_when_generation_present(backend):
 
 def test_write_rejects_raw_bytes_and_str_before_any_io(backend):
     with pytest.raises(TypeError):
-        backend.write("plain-str-key", b"raw bytes body", expected_hash=None)  # type: ignore[arg-type]
+        backend.write("plain-str-key", b"raw bytes body", ctx=create_ctx())  # type: ignore[arg-type]
 
     with pytest.raises(TypeError):
-        backend.write(object(), object(), expected_hash=None)  # type: ignore[arg-type]
+        backend.write(object(), object(), ctx=create_ctx())  # type: ignore[arg-type]
 
     # Nothing was written to the real bucket by either rejected call.
     assert backend.read("plain-str-key") is None
@@ -565,11 +566,11 @@ def test_real_provider_acceptance_deferred():
         secret_access_key=_REAL_SECRET_KEY,
     )
     key = f"knokeep-real-provider-acceptance/{threading.get_ident()}"
-    r0 = gate.persist(b, key, b"real-provider-smoke-test", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(b, key, b"real-provider-smoke-test", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
     r1 = gate.persist(
-        b, key, b"real-provider-smoke-test-v2", expected_hash=r0.new_hash, doc_type="system_state"
+        b, key, b"real-provider-smoke-test-v2", ctx=fenced_ctx(b, key, r0.new_hash), doc_type="system_state"
     )
     assert isinstance(r1, OK)
-    r2 = gate.persist(b, key, b"stale-attempt", expected_hash=r0.new_hash, doc_type="system_state")
+    r2 = gate.persist(b, key, b"stale-attempt", ctx=fenced_ctx(b, key, r0.new_hash), doc_type="system_state")
     assert isinstance(r2, STALE)

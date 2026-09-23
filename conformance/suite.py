@@ -28,6 +28,7 @@ from store.git_backend import GitBackend
 from store.local import LocalBackend
 from store.objectstore import ObjectStoreBackend
 from store.types import ERROR, EXISTS, OK, STALE, ErrorKind, commit_class, sha256_hex
+from tests.ctx_helpers import create_ctx, fenced_ctx
 from tests.moto_support import (
     DUMMY_ACCESS_KEY_ID,
     DUMMY_REGION,
@@ -161,13 +162,13 @@ def _gen(n: int) -> bytes:
 
 
 def test_c1_stale_write_single(backend):
-    r0 = gate.persist(backend, "k1", b"hello", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "k1", b"hello", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
     h0 = r0.new_hash
 
     # A CAS-update against a hash that no longer matches must be rejected.
     r1 = gate.persist(
-        backend, "k1", b"goodbye", expected_hash="0" * 64, doc_type="system_state"
+        backend, "k1", b"goodbye", ctx=fenced_ctx(backend, "k1", "0" * 64), doc_type="system_state"
     )
     assert isinstance(r1, STALE)
     assert r1.current_hash == h0
@@ -178,7 +179,7 @@ def test_c1_stale_write_single(backend):
 def test_c1_stale_write_absent_key_is_stale_none(backend):
     r = gate.persist(
         backend, "does/not/exist", b"x",
-        expected_hash="a" * 64, doc_type="system_state",
+        ctx=fenced_ctx(backend, "does/not/exist", "a" * 64), doc_type="system_state",
     )
     assert isinstance(r, STALE)
     assert r.current_hash is None
@@ -188,7 +189,7 @@ def test_c1_stale_write_reject_race(backend):
     """Two writers race a CAS-update against the same expected_hash. Exactly
     one gets OK, the other gets STALE, and the store ends up holding exactly
     the winner's bytes (the loser never clobbers it)."""
-    r0 = gate.persist(backend, "race1", b"base", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "race1", b"base", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
     base_hash = r0.new_hash
 
@@ -200,7 +201,7 @@ def test_c1_stale_write_reject_race(backend):
     def worker(i):
         barrier.wait()
         results[i] = gate.persist(
-            backend, "race1", bodies[i], expected_hash=base_hash, doc_type="system_state"
+            backend, "race1", bodies[i], ctx=fenced_ctx(backend, "race1", base_hash), doc_type="system_state"
         )
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
@@ -229,9 +230,9 @@ def test_c1_stale_write_reject_race(backend):
 
 
 def test_c2_create_only_collision_single(backend):
-    r0 = gate.persist(backend, "k2", b"first", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "k2", b"first", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
-    r1 = gate.persist(backend, "k2", b"second", expected_hash=None, doc_type="system_state")
+    r1 = gate.persist(backend, "k2", b"second", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r1, EXISTS)
     assert r1.current_hash == r0.new_hash
     assert backend.read("k2").body == b"first"
@@ -248,7 +249,7 @@ def test_c2_create_only_collision_race(backend):
     def worker(i):
         barrier.wait()
         results[i] = gate.persist(
-            backend, "race2", bodies[i], expected_hash=None, doc_type="system_state"
+            backend, "race2", bodies[i], ctx=create_ctx(), doc_type="system_state"
         )
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
@@ -286,7 +287,7 @@ def test_c2_create_only_collision_race(backend):
 )
 def test_c4_secret_blocked_nothing_written(backend, planted, expect_label_substr):
     result = gate.persist(
-        backend, "secrets/planted", planted, expected_hash=None, doc_type="system_state"
+        backend, "secrets/planted", planted, ctx=create_ctx(), doc_type="system_state"
     )
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.SECRET_BLOCKED
@@ -311,7 +312,7 @@ def test_c4_high_entropy_token_blocked(backend):
 
     planted = b"session_secret=" + _secrets.token_urlsafe(32).encode()
     result = gate.persist(
-        backend, "secrets/entropy", planted, expected_hash=None, doc_type="system_state"
+        backend, "secrets/entropy", planted, ctx=create_ctx(), doc_type="system_state"
     )
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.SECRET_BLOCKED
@@ -321,7 +322,7 @@ def test_c4_high_entropy_token_blocked(backend):
 def test_c4_clean_body_not_blocked(backend):
     result = gate.persist(
         backend, "notes/clean", b"just an ordinary status note, nothing secret here",
-        expected_hash=None, doc_type="system_state",
+        ctx=create_ctx(), doc_type="system_state",
     )
     assert isinstance(result, OK)
 
@@ -334,7 +335,7 @@ def test_c4_clean_body_not_blocked(backend):
 def test_c5_pointer_stays_pointer(backend):
     pointer_body = _gen(1) + b"s3://knokeep-bucket/objects/1234-abcd-pointer"
     result = gate.persist(
-        backend, "pointers/ref-1", pointer_body, expected_hash=None, doc_type="pointer_ref"
+        backend, "pointers/ref-1", pointer_body, ctx=create_ctx(), doc_type="pointer_ref"
     )
     assert isinstance(result, OK)
     blob = backend.read("pointers/ref-1")
@@ -377,7 +378,7 @@ def test_c7_lock_ttl_and_token(backend):
 
     # CAS succeeds regardless of an active lock (locks are advisory, never
     # the CAS mechanism for this in-memory backend).
-    r = gate.persist(backend, "under-lock", b"v1", expected_hash=None, doc_type="system_state")
+    r = gate.persist(backend, "under-lock", b"v1", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r, OK)
 
     # Clean up the still-valid lock, then let it expire and confirm CAS still
@@ -388,7 +389,7 @@ def test_c7_lock_ttl_and_token(backend):
     time.sleep(0.2)  # generous margin past the 50ms TTL (CI-runner-safe)
     # lock3 is now expired but still present in the backend's bookkeeping.
     r2 = gate.persist(
-        backend, "under-lock", b"v2", expected_hash=r.new_hash, doc_type="system_state"
+        backend, "under-lock", b"v2", ctx=fenced_ctx(backend, "under-lock", r.new_hash), doc_type="system_state"
     )
     assert isinstance(r2, OK)
     # Renew must fail once expired, even with the correct token.
@@ -404,14 +405,14 @@ def test_reconcile_our_write_landed_returns_ok(backend):
     """TIMEOUT_AFTER_COMMIT where the write actually landed: reconcile must
     report OK, and must not re-write."""
     _require_fault_injection(backend)
-    r0 = gate.persist(backend, "amb1", b"v0", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "amb1", b"v0", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
 
     backend.inject_timeout_after_commit(1)
     intended = b"v1"
     intended_hash = sha256_hex(intended)
     r1 = gate.persist(
-        backend, "amb1", intended, expected_hash=r0.new_hash, doc_type="system_state"
+        backend, "amb1", intended, ctx=fenced_ctx(backend, "amb1", r0.new_hash), doc_type="system_state"
     )
     assert isinstance(r1, ERROR) and r1.kind is ErrorKind.TIMEOUT_AFTER_COMMIT
     assert commit_class(r1) == "outcome_unknown"
@@ -431,14 +432,14 @@ def test_reconcile_committed_then_superseded_is_conflict_unknown_never_stale(bac
     per contract §7 ("a lost ack cannot distinguish 'our write committed then
     was superseded' from 'our write never committed'")."""
     _require_fault_injection(backend)
-    r0 = gate.persist(backend, "amb2", b"v0", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "amb2", b"v0", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
 
     backend.inject_conflict_unknown(1)
     intended = b"v1-ours"
     intended_hash = sha256_hex(intended)
     r1 = gate.persist(
-        backend, "amb2", intended, expected_hash=r0.new_hash, doc_type="system_state"
+        backend, "amb2", intended, ctx=fenced_ctx(backend, "amb2", r0.new_hash), doc_type="system_state"
     )
     assert isinstance(r1, ERROR) and r1.kind is ErrorKind.CONFLICT_UNKNOWN
     assert commit_class(r1) == "outcome_unknown"
@@ -447,7 +448,7 @@ def test_reconcile_committed_then_superseded_is_conflict_unknown_never_stale(bac
 
     # Now someone else supersedes the key before we reconcile.
     other = gate.persist(
-        backend, "amb2", b"v1-someone-else", expected_hash=r0.new_hash, doc_type="system_state"
+        backend, "amb2", b"v1-someone-else", ctx=fenced_ctx(backend, "amb2", r0.new_hash), doc_type="system_state"
     )
     assert isinstance(other, OK)
 
@@ -463,14 +464,14 @@ def test_reconcile_still_current_no_retry_stays_conflict_unknown(backend):
     """current == expected_hash (nothing has changed since) and no retry is
     performed: outcome remains CONFLICT_UNKNOWN, not STALE and not OK."""
     _require_fault_injection(backend)
-    r0 = gate.persist(backend, "amb3", b"v0", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "amb3", b"v0", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
 
     backend.inject_conflict_unknown(1)
     intended = b"v1"
     intended_hash = sha256_hex(intended)
     r1 = gate.persist(
-        backend, "amb3", intended, expected_hash=r0.new_hash, doc_type="system_state"
+        backend, "amb3", intended, ctx=fenced_ctx(backend, "amb3", r0.new_hash), doc_type="system_state"
     )
     assert isinstance(r1, ERROR) and r1.kind is ErrorKind.CONFLICT_UNKNOWN
 
@@ -493,14 +494,14 @@ def test_reconcile_retry_stale_is_returned_as_the_true_outcome(backend):
     swallowed the retry's result and always reported CONFLICT_UNKNOWN; that
     was the old, less-informative behavior this test used to encode.)"""
     _require_fault_injection(backend)
-    r0 = gate.persist(backend, "amb4", b"v0", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "amb4", b"v0", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
 
     backend.inject_conflict_unknown(1)
     intended = b"v1"
     intended_hash = sha256_hex(intended)
     r1 = gate.persist(
-        backend, "amb4", intended, expected_hash=r0.new_hash, doc_type="system_state"
+        backend, "amb4", intended, ctx=fenced_ctx(backend, "amb4", r0.new_hash), doc_type="system_state"
     )
     assert isinstance(r1, ERROR) and r1.kind is ErrorKind.CONFLICT_UNKNOWN
     # Our write did NOT actually land: the store still holds the pre-write value.
@@ -509,9 +510,9 @@ def test_reconcile_retry_stale_is_returned_as_the_true_outcome(backend):
     def flaky_retry():
         # Simulate a third party racing in right as we retry: make the retry
         # itself observe a mismatched expected_hash -> STALE.
-        gate.persist(backend, "amb4", b"someone-else", expected_hash=r0.new_hash, doc_type="system_state")
+        gate.persist(backend, "amb4", b"someone-else", ctx=fenced_ctx(backend, "amb4", r0.new_hash), doc_type="system_state")
         return gate.persist(
-            backend, "amb4", intended, expected_hash=r0.new_hash, doc_type="system_state"
+            backend, "amb4", intended, ctx=fenced_ctx(backend, "amb4", r0.new_hash), doc_type="system_state"
         )
 
     result = gate.reconcile(
@@ -523,20 +524,20 @@ def test_reconcile_retry_stale_is_returned_as_the_true_outcome(backend):
 
 def test_reconcile_retry_ok_is_a_fresh_commit(backend):
     _require_fault_injection(backend)
-    r0 = gate.persist(backend, "amb5", b"v0", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "amb5", b"v0", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
 
     backend.inject_conflict_unknown(1)
     intended = b"v1"
     intended_hash = sha256_hex(intended)
     r1 = gate.persist(
-        backend, "amb5", intended, expected_hash=r0.new_hash, doc_type="system_state"
+        backend, "amb5", intended, ctx=fenced_ctx(backend, "amb5", r0.new_hash), doc_type="system_state"
     )
     assert isinstance(r1, ERROR) and r1.kind is ErrorKind.CONFLICT_UNKNOWN
 
     def retry():
         return gate.persist(
-            backend, "amb5", intended, expected_hash=r0.new_hash, doc_type="system_state"
+            backend, "amb5", intended, ctx=fenced_ctx(backend, "amb5", r0.new_hash), doc_type="system_state"
         )
 
     result = gate.reconcile(
@@ -557,7 +558,7 @@ def test_reconcile_retry_ok_is_a_fresh_commit(backend):
 )
 def test_invalid_argument_for_malformed_hash(backend, bad_hash):
     result = gate.persist(
-        backend, "badhash", b"body", expected_hash=bad_hash, doc_type="system_state"
+        backend, "badhash", b"body", ctx=fenced_ctx(backend, "badhash", bad_hash), doc_type="system_state"
     )
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.INVALID_ARGUMENT
@@ -571,7 +572,7 @@ def test_invalid_argument_for_malformed_hash(backend, bad_hash):
 )
 def test_invalid_argument_for_malformed_key(backend, bad_key):
     result = gate.persist(
-        backend, bad_key, b"body", expected_hash=None, doc_type="system_state"
+        backend, bad_key, b"body", ctx=create_ctx(), doc_type="system_state"
     )
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.INVALID_ARGUMENT
@@ -584,9 +585,9 @@ def test_invalid_argument_for_malformed_key(backend, bad_key):
 
 def test_idempotent_create_replay(backend):
     body = b"same-bytes-both-times"
-    r0 = gate.persist(backend, "replay", body, expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "replay", body, ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
-    r1 = gate.persist(backend, "replay", body, expected_hash=None, doc_type="system_state")
+    r1 = gate.persist(backend, "replay", body, ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r1, OK)
     assert r1.new_hash == r0.new_hash
 
@@ -599,7 +600,7 @@ def test_idempotent_create_replay(backend):
 def test_doc_type_allowlist_refuses_non_state_without_generation(backend):
     result = gate.persist(
         backend, "lease/x", b"no generation header here",
-        expected_hash=None, doc_type="lease",
+        ctx=create_ctx(), doc_type="lease",
     )
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.INVALID_ARGUMENT
@@ -609,7 +610,7 @@ def test_doc_type_allowlist_refuses_non_state_without_generation(backend):
 def test_doc_type_allowlist_accepts_non_state_with_generation(backend):
     result = gate.persist(
         backend, "lease/y", _gen(1) + b"leaseholder=alice",
-        expected_hash=None, doc_type="lease",
+        ctx=create_ctx(), doc_type="lease",
     )
     assert isinstance(result, OK)
 
@@ -618,7 +619,7 @@ def test_doc_type_allowlist_accepts_non_state_with_generation(backend):
 def test_doc_type_allowlist_state_types_do_not_need_generation(backend, state_doc_type):
     result = gate.persist(
         backend, f"state/{state_doc_type}", b"plain content, no generation header",
-        expected_hash=None, doc_type=state_doc_type,
+        ctx=create_ctx(), doc_type=state_doc_type,
     )
     assert isinstance(result, OK)
 
@@ -724,7 +725,7 @@ def test_migration_into_every_backend(backend):
         "empty/body": b"",
     }
     for key, body in keys_and_bodies.items():
-        r = gate.persist(source, key, body, expected_hash=None, doc_type="system_state")
+        r = gate.persist(source, key, body, ctx=create_ctx(), doc_type="system_state")
         assert isinstance(r, OK)
 
     report = migrate(source, backend)

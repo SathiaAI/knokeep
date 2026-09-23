@@ -109,6 +109,7 @@ from typing import Dict, Iterator, List, Optional, Tuple
 
 from . import gate
 from .backend import BackendBusyError, Lock
+from .context import Overwrite
 from .gate import ScannedBody, ScannedKey
 from .types import (
     BackendHealth,
@@ -550,7 +551,7 @@ class LocalBackend:
         key: ScannedKey,
         body: ScannedBody,
         *,
-        expected_hash: Optional[str],
+        ctx,
     ) -> WriteResult:
         # Adapter accepts only gate-issued values; raw bytes/str are a
         # TypeError before any I/O (contract §1/§5).
@@ -560,6 +561,12 @@ class LocalBackend:
             )
         if not gate.verify(key) or not gate.verify(body):
             raise TypeError("LocalBackend.write: gate marker verification failed")
+
+        # H1 Increment 2, Phase 0: ctx is required; derive expected_hash the
+        # same way store/gate.py does. No fence enforcement yet.
+        expected_hash: Optional[str] = (
+            ctx.precondition.expected_hash if isinstance(ctx.precondition, Overwrite) else None
+        )
 
         k = key.key
         raw = body.body

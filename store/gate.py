@@ -22,9 +22,13 @@ import math
 import re
 import secrets
 import unicodedata
-from typing import Callable, List, Optional, Sequence
+from typing import TYPE_CHECKING, Callable, List, Optional, Sequence
 
+from .context import Overwrite
 from .types import ERROR, OK, ErrorKind, STALE, EXISTS, WriteResult, sha256_hex
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, no runtime import
+    from .context import OperationContext
 
 # --------------------------------------------------------------------------
 # Runtime-opaque, immutable gate-typed values
@@ -477,11 +481,21 @@ def persist(
     key: str,
     raw_bytes: bytes,
     *,
-    expected_hash: Optional[str],
+    ctx: "OperationContext",
     doc_type: str,
 ) -> WriteResult:
     """The gate's single write entry point (contract §1/§5/§6). Every step
-    happens before any I/O."""
+    happens before any I/O.
+
+    `ctx` (store.context.OperationContext) is now REQUIRED and replaces the
+    old bare `expected_hash: Optional[str]` parameter (H1 Increment 2, Phase
+    0): a `CreateOnly` precondition means create-only (the old
+    `expected_hash=None`); an `Overwrite` precondition carries the
+    CAS-update's `expected_hash` (plus a lease, not yet enforced — fence
+    enforcement is a later phase). This function derives `expected_hash`
+    from `ctx.precondition` and otherwise behaves exactly as before."""
+    expected_hash = ctx.precondition.expected_hash if isinstance(ctx.precondition, Overwrite) else None
+
     # 1. expected_hash shape
     if expected_hash is not None and not _is_valid_hash(expected_hash):
         return ERROR(ErrorKind.INVALID_ARGUMENT)
@@ -529,7 +543,7 @@ def persist(
     nonce = secrets.token_bytes(16)
     scanned_key = ScannedKey(_SENTINEL, key, nonce)
     scanned_body = ScannedBody(_SENTINEL, raw_bytes, nonce)
-    return backend.write(scanned_key, scanned_body, expected_hash=expected_hash)
+    return backend.write(scanned_key, scanned_body, ctx=ctx)
 
 
 # --------------------------------------------------------------------------

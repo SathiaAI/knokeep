@@ -76,6 +76,7 @@ from reconciler.reconcile import DEFAULT_FACT_SPECS, FactSpec, reconcile as run_
 from reconciler.sources import StoreSource
 from store import gate
 from store.backend import StoreBackend
+from store.context import create_ctx, overwrite_ctx
 from store.fake import FakeBackend
 from store.local import LocalBackend
 from store.config import default_store_root
@@ -259,13 +260,24 @@ def _tool_knokeep_write(backend: StoreBackend, args: Mapping[str, Any]) -> Dict[
     else:
         raise ToolInputError("provide one of 'body' (utf-8 text) or 'body_b64' (base64 bytes)")
 
+    # H1 Increment 2, Phase 0: build the now-required OperationContext.
+    # create-only when expected_hash is omitted/null; otherwise a CAS-update
+    # carrying a real (but not yet fence-enforced) advisory lease, acquired
+    # and released immediately around this call.
+    if expected_hash is None:
+        ctx = create_ctx()
+    else:
+        lease = backend.lock(key, ttl_s=30)
+        backend.unlock(lease)
+        ctx = overwrite_ctx(expected_hash, lease)
+
     # The ONE write door (contract §1/§5): never backend.write() directly,
     # never a hand-built ScannedKey/ScannedBody.
     result = gate.persist(
         backend,
         key,
         raw_bytes,
-        expected_hash=expected_hash,
+        ctx=ctx,
         doc_type=doc_type,
     )
     return _write_result_to_dict(result)

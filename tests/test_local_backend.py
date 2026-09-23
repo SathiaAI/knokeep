@@ -24,6 +24,7 @@ from store import gate
 from store.backend import BackendBusyError
 from store.local import LocalBackend
 from store.types import ERROR, OK, STALE, ErrorKind, sha256_hex
+from tests.ctx_helpers import create_ctx, fenced_ctx
 
 
 def _gen(n: int) -> bytes:
@@ -68,7 +69,7 @@ def test_c8_resume_rebuilds_torn_published_blob(tmp_path):
 
     key = "resume/torn"
     good_body = b"the-real-durable-bytes"
-    r = gate.persist(backend, key, good_body, expected_hash=None, doc_type="system_state")
+    r = gate.persist(backend, key, good_body, ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r, OK)
 
     data_path = root / "data" / "resume" / "torn"
@@ -141,7 +142,7 @@ def test_c3_atomicity_reader_never_sees_torn_publish(tmp_path):
     backend = LocalBackend(root)
 
     key = "atomic/k"
-    r0 = gate.persist(backend, key, b"old-complete-value", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, key, b"old-complete-value", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
 
     # Simulate "crash after journal fsync, mid-publish": append the new
@@ -247,20 +248,20 @@ def test_generation_monotonicity_rejects_non_increasing_update(tmp_path):
     backend = LocalBackend(tmp_path / "store-root")
     key = "lease/holder"
 
-    r0 = gate.persist(backend, key, _gen(1) + b"leaseholder=alice", expected_hash=None, doc_type="lease")
+    r0 = gate.persist(backend, key, _gen(1) + b"leaseholder=alice", ctx=create_ctx(), doc_type="lease")
     assert isinstance(r0, OK)
 
     # A same-or-lower generation under a MATCHING hash-CAS must be rejected
     # even though the plain hash-CAS check alone would have allowed it.
     r_same_gen = gate.persist(
         backend, key, _gen(1) + b"leaseholder=bob",
-        expected_hash=r0.new_hash, doc_type="lease",
+        ctx=fenced_ctx(backend, key, r0.new_hash), doc_type="lease",
     )
     assert isinstance(r_same_gen, STALE)
 
     r_lower_gen = gate.persist(
         backend, key, _gen(0) + b"leaseholder=bob",
-        expected_hash=r0.new_hash, doc_type="lease",
+        ctx=fenced_ctx(backend, key, r0.new_hash), doc_type="lease",
     )
     assert isinstance(r_lower_gen, STALE)
 
@@ -270,7 +271,7 @@ def test_generation_monotonicity_rejects_non_increasing_update(tmp_path):
     # A strictly-greater generation is accepted.
     r_higher_gen = gate.persist(
         backend, key, _gen(2) + b"leaseholder=bob",
-        expected_hash=r0.new_hash, doc_type="lease",
+        ctx=fenced_ctx(backend, key, r0.new_hash), doc_type="lease",
     )
     assert isinstance(r_higher_gen, OK)
     assert backend.read(key).body == _gen(2) + b"leaseholder=bob"
@@ -285,7 +286,7 @@ def test_generation_monotonicity_rejects_non_increasing_update(tmp_path):
 def test_write_rejects_raw_bytes_before_any_io(tmp_path):
     backend = LocalBackend(tmp_path / "store-root")
     with pytest.raises(TypeError):
-        backend.write("plain-str-key", b"plain-bytes-body", expected_hash=None)  # type: ignore[arg-type]
+        backend.write("plain-str-key", b"plain-bytes-body", ctx=create_ctx())  # type: ignore[arg-type]
     assert backend.read("plain-str-key") is None
     assert list(backend.list("")) == []
     backend.close()
@@ -299,7 +300,7 @@ class _CaptureBackend:
     def __init__(self) -> None:
         self.captured = None
 
-    def write(self, key, body, *, expected_hash):
+    def write(self, key, body, *, ctx):
         self.captured = (key, body)
         return OK("0" * 64)
 
@@ -311,7 +312,7 @@ def test_scanned_body_is_immutable_after_construction(tmp_path):
     rather than silently succeeding and leaving a stale-but-matching marker
     for the adapter to (previously) reject at write() time."""
     capture = _CaptureBackend()
-    r = gate.persist(capture, "k", b"hello", expected_hash=None, doc_type="system_state")
+    r = gate.persist(capture, "k", b"hello", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r, OK)
     key_obj, body_obj = capture.captured
 
@@ -324,7 +325,7 @@ def test_scanned_body_is_immutable_after_construction(tmp_path):
 
     # Untampered, the legitimately-issued pair still writes fine.
     backend = LocalBackend(tmp_path / "store-root")
-    result = backend.write(key_obj, body_obj, expected_hash=None)
+    result = backend.write(key_obj, body_obj, ctx=create_ctx())
     assert isinstance(result, OK)
     assert backend.read("k").body == b"hello"
     backend.close()
@@ -340,7 +341,7 @@ def test_write_rejects_forged_non_gate_object(tmp_path):
 
     backend = LocalBackend(tmp_path / "store-root")
     with pytest.raises(TypeError):
-        backend.write(forged_key, forged_body, expected_hash=None)
+        backend.write(forged_key, forged_body, ctx=create_ctx())
     assert backend.read("k") is None
     assert gate.verify(forged_key) is False
     assert gate.verify(forged_body) is False
@@ -370,10 +371,10 @@ def test_case_insensitive_collision_refused_when_flagged(tmp_path):
     backend = LocalBackend(tmp_path / "store-root")
     backend._case_insensitive = True  # simulate a case-insensitive volume on this case-sensitive host
 
-    r0 = gate.persist(backend, "Notes/Foo", b"v1", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "Notes/Foo", b"v1", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
 
-    r1 = gate.persist(backend, "Notes/foo", b"v2", expected_hash=None, doc_type="system_state")
+    r1 = gate.persist(backend, "Notes/foo", b"v2", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r1, ERROR)
     assert r1.kind is ErrorKind.INVALID_ARGUMENT
     assert backend.read("Notes/foo") is None  # colliding-case key never created (distinct path on this host)
@@ -395,8 +396,8 @@ def test_case_sensitive_volume_allows_distinct_case_keys(tmp_path):
         pytest.skip("host temp volume is case-insensitive (e.g. macOS APFS); this test needs a case-sensitive volume")
     assert backend._case_insensitive is False
 
-    r0 = gate.persist(backend, "Notes/Foo", b"v1", expected_hash=None, doc_type="system_state")
-    r1 = gate.persist(backend, "Notes/foo", b"v2", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "Notes/Foo", b"v1", ctx=create_ctx(), doc_type="system_state")
+    r1 = gate.persist(backend, "Notes/foo", b"v2", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK) and isinstance(r1, OK)
     backend.close()
 
@@ -422,7 +423,7 @@ def test_write_returns_busy_when_cas_lock_held_externally(tmp_path):
     fcntl.flock(fh.fileno(), fcntl.LOCK_EX)  # hold the exact same lock file
     try:
         start = time.monotonic()
-        result = gate.persist(backend, "busy/k", b"v", expected_hash=None, doc_type="system_state")
+        result = gate.persist(backend, "busy/k", b"v", ctx=create_ctx(), doc_type="system_state")
         elapsed = time.monotonic() - start
         assert isinstance(result, ERROR)
         assert result.kind is ErrorKind.BUSY
@@ -497,7 +498,7 @@ def test_replace_with_retry_gives_up_as_busy(tmp_path, monkeypatch):
 def _mp_create_only_worker(root_str: str, key: str, payload: bytes, queue) -> None:
     # Separate OS process: a fresh LocalBackend instance over the SAME root.
     backend = LocalBackend(root_str)
-    result = gate.persist(backend, key, payload, expected_hash=None, doc_type="system_state")
+    result = gate.persist(backend, key, payload, ctx=create_ctx(), doc_type="system_state")
     backend.close()
     queue.put(type(result).__name__)
 
@@ -538,7 +539,7 @@ def test_two_process_create_only_race(tmp_path):
 
 def _mp_cas_worker(root_str: str, key: str, base_hash: str, payload: bytes, queue) -> None:
     backend = LocalBackend(root_str)
-    result = gate.persist(backend, key, payload, expected_hash=base_hash, doc_type="system_state")
+    result = gate.persist(backend, key, payload, ctx=fenced_ctx(backend, key, base_hash), doc_type="system_state")
     backend.close()
     queue.put(type(result).__name__)
 
@@ -552,7 +553,7 @@ def test_two_process_cas_update_race(tmp_path):
     mechanism" for the local backend)."""
     root = tmp_path / "store-root"
     setup = LocalBackend(root)
-    r0 = gate.persist(setup, "race/cas", b"base", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(setup, "race/cas", b"base", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
     base_hash = r0.new_hash
     setup.close()
@@ -599,7 +600,7 @@ def test_windows_msvcrt_lock_path_busy_on_contention(tmp_path):  # pragma: no co
     fh.seek(0)
     msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
     try:
-        result = gate.persist(backend, "k", b"v", expected_hash=None, doc_type="system_state")
+        result = gate.persist(backend, "k", b"v", ctx=create_ctx(), doc_type="system_state")
         assert isinstance(result, ERROR) and result.kind is ErrorKind.BUSY
     finally:
         fh.seek(0)

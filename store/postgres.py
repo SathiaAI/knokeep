@@ -159,6 +159,7 @@ import pg8000.exceptions
 
 from . import gate
 from .backend import BackendBusyError, Lock
+from .context import Overwrite, create_ctx, overwrite_ctx
 from .gate import ScannedBody, ScannedKey
 from .types import (
     BackendHealth,
@@ -347,19 +348,29 @@ class PostgresBackend:
         probe_key = f".knokeep/probe/{uuid.uuid4().hex}"
         try:
             r1 = gate.persist(
-                self, probe_key, b"probe-create", expected_hash=None, doc_type="system_state"
+                self, probe_key, b"probe-create", ctx=create_ctx(), doc_type="system_state"
             )
             if not isinstance(r1, OK):
                 raise RuntimeError(f"probe create-only did not return OK: {r1!r}")
 
             r2 = gate.persist(
-                self, probe_key, b"probe-duplicate", expected_hash=None, doc_type="system_state"
+                self, probe_key, b"probe-duplicate", ctx=create_ctx(), doc_type="system_state"
             )
             if not isinstance(r2, EXISTS):
                 raise RuntimeError(f"probe duplicate create-only did not return EXISTS: {r2!r}")
 
+            # Phase 0: ctx requires a real (advisory) lease for an Overwrite
+            # precondition; acquired-then-released immediately since fence
+            # enforcement is a later phase and this probe must not hold a
+            # lock past its own call.
+            probe_lease = self.lock(probe_key, ttl_s=30)
+            self.unlock(probe_lease)
             r3 = gate.persist(
-                self, probe_key, b"probe-stale-cas", expected_hash="0" * 64, doc_type="system_state"
+                self,
+                probe_key,
+                b"probe-stale-cas",
+                ctx=overwrite_ctx("0" * 64, probe_lease),
+                doc_type="system_state",
             )
             if not isinstance(r3, STALE):
                 raise RuntimeError(f"probe stale CAS-update did not return STALE: {r3!r}")
@@ -431,7 +442,7 @@ class PostgresBackend:
         key: ScannedKey,
         body: ScannedBody,
         *,
-        expected_hash: Optional[str],
+        ctx,
     ) -> WriteResult:
         # Adapter accepts only gate-issued values; raw bytes/str are a
         # TypeError before any I/O (contract §1/§5).
@@ -441,6 +452,12 @@ class PostgresBackend:
             )
         if not gate.verify(key) or not gate.verify(body):
             raise TypeError("PostgresBackend.write: gate marker verification failed")
+
+        # H1 Increment 2, Phase 0: ctx is required; derive expected_hash the
+        # same way store/gate.py does. No fence enforcement yet.
+        expected_hash: Optional[str] = (
+            ctx.precondition.expected_hash if isinstance(ctx.precondition, Overwrite) else None
+        )
 
         k = key.key
         raw = body.body

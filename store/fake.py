@@ -15,6 +15,7 @@ from typing import Dict, Iterator, Optional, Tuple
 
 from . import gate
 from .backend import BackendBusyError, Lock
+from .context import Overwrite
 from .gate import ScannedBody, ScannedKey
 from .types import (
     BackendHealth,
@@ -103,7 +104,7 @@ class FakeBackend:
         key: ScannedKey,
         body: ScannedBody,
         *,
-        expected_hash: Optional[str],
+        ctx,
     ) -> WriteResult:
         # Adapters must only accept gate-issued values; raw bytes/str are a
         # TypeError before any I/O (contract §1/§5).
@@ -113,6 +114,12 @@ class FakeBackend:
             )
         if not gate.verify(key) or not gate.verify(body):
             raise TypeError("FakeBackend.write: gate marker verification failed")
+
+        # H1 Increment 2, Phase 0: ctx is required; derive expected_hash the
+        # same way store/gate.py does. No fence enforcement yet.
+        expected_hash: Optional[str] = (
+            ctx.precondition.expected_hash if isinstance(ctx.precondition, Overwrite) else None
+        )
 
         # Pre-send fault: nothing touched, definitely-not-committed.
         if self._consume_fault("network"):

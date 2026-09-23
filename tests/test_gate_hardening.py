@@ -36,6 +36,7 @@ from store.types import (
     ErrorKind,
     sha256_hex,
 )
+from tests.ctx_helpers import create_ctx, fenced_ctx
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +51,7 @@ class RecordingBackend:
         self.write_calls = 0
         self.captured = []  # list of (ScannedKey, ScannedBody) ever passed in
         self._store: dict = {}
+        self._locks: dict = {}
 
     def read(self, key):
         return self._store.get(key)
@@ -57,7 +59,10 @@ class RecordingBackend:
     def list(self, prefix):
         return iter(k for k in self._store if k.startswith(prefix))
 
-    def write(self, key, body, *, expected_hash):
+    def write(self, key, body, *, ctx):
+        from store.context import Overwrite
+
+        expected_hash = ctx.precondition.expected_hash if isinstance(ctx.precondition, Overwrite) else None
         self.write_calls += 1
         self.captured.append((key, body))
         if not isinstance(key, gate.ScannedKey) or not isinstance(body, gate.ScannedBody):
@@ -79,11 +84,35 @@ class RecordingBackend:
         self._store[key.key] = Blob(body=body.body, version_hash=new_hash)
         return OK(new_hash)
 
-    def lock(self, key, ttl_s):  # pragma: no cover - unused by these tests
-        raise NotImplementedError
+    def lock(self, key, ttl_s):
+        # Minimal in-memory advisory lock (same shape as store/fake.py),
+        # needed by tests.ctx_helpers.fenced_ctx() to build a real lease for
+        # this stub's CAS-update calls. Never the CAS mechanism itself.
+        import secrets as _secrets
+        import time as _time
 
-    def unlock(self, lock):  # pragma: no cover - unused
-        raise NotImplementedError
+        from store.backend import BackendBusyError, Lock
+
+        now = _time.time()
+        existing = self._locks.get(key)
+        if existing is not None and existing[1] > now:
+            raise BackendBusyError(f"key {key!r} is locked")
+        token = _secrets.token_hex(16)
+        expiry = now + ttl_s
+        self._locks[key] = (token, expiry)
+        return Lock(key=key, token=token, expiry_epoch=expiry)
+
+    def unlock(self, lock):
+        import time as _time
+
+        existing = self._locks.get(lock.key)
+        if existing is None:
+            return False
+        token, expiry = existing
+        if token != lock.token or expiry <= _time.time():
+            return False
+        del self._locks[lock.key]
+        return True
 
     def renew(self, lock, ttl_s):  # pragma: no cover - unused
         raise NotImplementedError
@@ -106,7 +135,7 @@ def test_key_scan_blocks_secret_shaped_key_name():
         rec,
         "sk-abcdefghijklmnopqrstuvwxyz1234567890",
         b"hello",
-        expected_hash=None,
+        ctx=create_ctx(),
         doc_type="journal",
     )
     assert isinstance(result, ERROR)
@@ -125,7 +154,7 @@ def test_plain_hex_hashes_are_not_blocked(doc_type):
     sha256_like = hashlib.sha256(b"some content").hexdigest()  # 64 hex chars
     git_sha_like = hashlib.sha1(b"some other content").hexdigest()  # 40 hex chars
     body = f"version_hash={sha256_like}\ncommit={git_sha_like}\n".encode()
-    result = gate.persist(rec, "state/doc", body, expected_hash=None, doc_type=doc_type)
+    result = gate.persist(rec, "state/doc", body, ctx=create_ctx(), doc_type=doc_type)
     assert isinstance(result, OK)
     assert rec.write_calls == 1
     assert rec.read("state/doc").body == body
@@ -134,7 +163,7 @@ def test_plain_hex_hashes_are_not_blocked(doc_type):
 def test_mixed_case_high_entropy_token_is_blocked():
     rec = RecordingBackend()
     body = b"secret=" + secrets.token_urlsafe(40).encode()
-    result = gate.persist(rec, "journal/entry", body, expected_hash=None, doc_type="journal")
+    result = gate.persist(rec, "journal/entry", body, ctx=create_ctx(), doc_type="journal")
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.SECRET_BLOCKED
     assert rec.write_calls == 0
@@ -163,14 +192,14 @@ def test_reconcile_malformed_intended_hash_is_invalid_argument():
 
 def test_reconcile_current_equals_expected_returns_retrys_real_ok():
     rec = RecordingBackend()
-    r0 = gate.persist(rec, "k", b"v0", expected_hash=None, doc_type="journal")
+    r0 = gate.persist(rec, "k", b"v0", ctx=create_ctx(), doc_type="journal")
     assert isinstance(r0, OK)
 
     intended = b"v1"
     intended_hash = sha256_hex(intended)
 
     def retry():
-        return gate.persist(rec, "k", intended, expected_hash=r0.new_hash, doc_type="journal")
+        return gate.persist(rec, "k", intended, ctx=fenced_ctx(rec, "k", r0.new_hash), doc_type="journal")
 
     result = gate.reconcile(
         rec, "k", intended_new_hash=intended_hash, expected_hash=r0.new_hash, retry=retry
@@ -182,7 +211,7 @@ def test_reconcile_current_equals_expected_returns_retrys_real_ok():
 
 def test_reconcile_current_equals_expected_returns_retrys_real_stale_unchanged():
     rec = RecordingBackend()
-    r0 = gate.persist(rec, "k", b"v0", expected_hash=None, doc_type="journal")
+    r0 = gate.persist(rec, "k", b"v0", ctx=create_ctx(), doc_type="journal")
     assert isinstance(r0, OK)
 
     intended = b"v1"
@@ -190,7 +219,7 @@ def test_reconcile_current_equals_expected_returns_retrys_real_stale_unchanged()
 
     def retry():
         # The retry itself races against a stale expected_hash -> STALE.
-        return gate.persist(rec, "k", intended, expected_hash="f" * 64, doc_type="journal")
+        return gate.persist(rec, "k", intended, ctx=fenced_ctx(rec, "k", "f" * 64), doc_type="journal")
 
     result = gate.reconcile(
         rec, "k", intended_new_hash=intended_hash, expected_hash=r0.new_hash, retry=retry
@@ -206,7 +235,7 @@ def test_reconcile_current_equals_expected_returns_retrys_real_stale_unchanged()
 
 def test_scanned_key_and_body_reject_attribute_mutation():
     rec = RecordingBackend()
-    r = gate.persist(rec, "k", b"hello", expected_hash=None, doc_type="journal")
+    r = gate.persist(rec, "k", b"hello", ctx=create_ctx(), doc_type="journal")
     assert isinstance(r, OK)
     key_obj, body_obj = rec.captured[0]
 
@@ -228,7 +257,7 @@ def test_scanned_key_and_body_reject_attribute_mutation():
 def test_generation_header_with_21_digit_run_is_invalid_argument():
     rec = RecordingBackend()
     bad_header = b"#knokeep-gen:" + b"1" * 21 + b"\n" + b"leaseholder=alice"
-    result = gate.persist(rec, "lease/x", bad_header, expected_hash=None, doc_type="lease")
+    result = gate.persist(rec, "lease/x", bad_header, ctx=create_ctx(), doc_type="lease")
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.INVALID_ARGUMENT
     assert rec.write_calls == 0
@@ -236,7 +265,7 @@ def test_generation_header_with_21_digit_run_is_invalid_argument():
 
 def test_key_segment_ending_in_dot_is_invalid_argument():
     rec = RecordingBackend()
-    result = gate.persist(rec, "foo./bar", b"body", expected_hash=None, doc_type="journal")
+    result = gate.persist(rec, "foo./bar", b"body", ctx=create_ctx(), doc_type="journal")
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.INVALID_ARGUMENT
     assert rec.write_calls == 0
@@ -246,7 +275,7 @@ def test_key_segment_over_255_chars_is_invalid_argument():
     rec = RecordingBackend()
     long_segment = "a" * 256
     result = gate.persist(
-        rec, f"dir/{long_segment}", b"body", expected_hash=None, doc_type="journal"
+        rec, f"dir/{long_segment}", b"body", ctx=create_ctx(), doc_type="journal"
     )
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.INVALID_ARGUMENT
@@ -260,7 +289,7 @@ def test_key_over_1024_chars_total_is_invalid_argument():
     # per-segment cap.
     long_key = "/".join(["ab"] * 400)  # 400*2 + 399 separators = 1199 chars
     assert len(long_key) > 1024
-    result = gate.persist(rec, long_key, b"body", expected_hash=None, doc_type="journal")
+    result = gate.persist(rec, long_key, b"body", ctx=create_ctx(), doc_type="journal")
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.INVALID_ARGUMENT
     assert rec.write_calls == 0
@@ -280,11 +309,11 @@ def test_make_generation_header_accepts_int():
 
 def test_verify_pair_true_for_same_persist_call_false_otherwise():
     rec = RecordingBackend()
-    r1 = gate.persist(rec, "pair/a", b"body-a", expected_hash=None, doc_type="journal")
+    r1 = gate.persist(rec, "pair/a", b"body-a", ctx=create_ctx(), doc_type="journal")
     assert isinstance(r1, OK)
     key_a, body_a = rec.captured[0]
 
-    r2 = gate.persist(rec, "pair/b", b"body-b", expected_hash=None, doc_type="journal")
+    r2 = gate.persist(rec, "pair/b", b"body-b", ctx=create_ctx(), doc_type="journal")
     assert isinstance(r2, OK)
     key_b, body_b = rec.captured[1]
 
@@ -309,7 +338,7 @@ def test_verify_pair_true_for_same_persist_call_false_otherwise():
 def test_oversized_body_is_invalid_argument():
     rec = RecordingBackend()
     oversized = b"a" * (8 * 1024 * 1024 + 1)
-    result = gate.persist(rec, "big/doc", oversized, expected_hash=None, doc_type="journal")
+    result = gate.persist(rec, "big/doc", oversized, ctx=create_ctx(), doc_type="journal")
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.INVALID_ARGUMENT
     assert rec.write_calls == 0
@@ -325,7 +354,7 @@ def test_oversized_body_is_invalid_argument():
 )
 def test_added_secret_prefixes_are_blocked(planted, label_substr):
     rec = RecordingBackend()
-    result = gate.persist(rec, "secrets/x", planted, expected_hash=None, doc_type="journal")
+    result = gate.persist(rec, "secrets/x", planted, ctx=create_ctx(), doc_type="journal")
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.SECRET_BLOCKED
     assert any(label_substr.lower() in lbl.lower() for lbl in result.labels)

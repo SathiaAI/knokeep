@@ -31,6 +31,7 @@ import pytest
 from store import gate
 from store.git_backend import GitBackend, _extract_generation
 from store.types import ERROR, EXISTS, OK, STALE, ErrorKind, sha256_hex
+from tests.ctx_helpers import create_ctx, fenced_ctx
 
 
 def _gen(n: int) -> bytes:
@@ -84,7 +85,7 @@ def _make_backend(tmp_path, name: str = "default") -> GitBackend:
 
 def test_c1_two_concurrent_writers_exactly_one_ok_other_stale(tmp_path):
     backend = _make_backend(tmp_path, "c1")
-    r0 = gate.persist(backend, "k1", b"base", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "k1", b"base", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
     base_hash = r0.new_hash
 
@@ -94,7 +95,7 @@ def test_c1_two_concurrent_writers_exactly_one_ok_other_stale(tmp_path):
     def worker(i, body):
         barrier.wait()
         results[i] = gate.persist(
-            backend, "k1", body, expected_hash=base_hash, doc_type="system_state"
+            backend, "k1", body, ctx=fenced_ctx(backend, "k1", base_hash), doc_type="system_state"
         )
 
     t0 = threading.Thread(target=worker, args=(0, b"writer-0"))
@@ -120,7 +121,7 @@ def test_c1_two_concurrent_writers_exactly_one_ok_other_stale(tmp_path):
 
 def test_c1_eight_way_race_exactly_one_ok(tmp_path):
     backend = _make_backend(tmp_path, "c1b")
-    r0 = gate.persist(backend, "race", b"base", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "race", b"base", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
     base_hash = r0.new_hash
 
@@ -131,7 +132,7 @@ def test_c1_eight_way_race_exactly_one_ok(tmp_path):
     def worker(i):
         barrier.wait()
         results[i] = gate.persist(
-            backend, "race", f"writer-{i}".encode(), expected_hash=base_hash, doc_type="system_state"
+            backend, "race", f"writer-{i}".encode(), ctx=fenced_ctx(backend, "race", base_hash), doc_type="system_state"
         )
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
@@ -157,9 +158,9 @@ def test_c1_eight_way_race_exactly_one_ok(tmp_path):
 
 def test_c2_create_only_collision_single(tmp_path):
     backend = _make_backend(tmp_path, "c2")
-    r0 = gate.persist(backend, "k2", b"first", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "k2", b"first", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
-    r1 = gate.persist(backend, "k2", b"second", expected_hash=None, doc_type="system_state")
+    r1 = gate.persist(backend, "k2", b"second", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r1, EXISTS)
     assert r1.current_hash == r0.new_hash
     assert backend.read("k2").body == b"first"
@@ -174,7 +175,7 @@ def test_c2_create_only_collision_race(tmp_path):
     def worker(i):
         barrier.wait()
         results[i] = gate.persist(
-            backend, "newkey", f"creator-{i}".encode(), expected_hash=None, doc_type="system_state"
+            backend, "newkey", f"creator-{i}".encode(), ctx=create_ctx(), doc_type="system_state"
         )
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
@@ -202,17 +203,17 @@ def test_stale_per_key_hash_rejected_even_on_clean_fast_forward(tmp_path):
     backend = _make_backend(tmp_path, "stale-ff")
 
     # 1. Key A's first version.
-    r_a0 = gate.persist(backend, "keyA", b"a-v0", expected_hash=None, doc_type="system_state")
+    r_a0 = gate.persist(backend, "keyA", b"a-v0", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r_a0, OK)
 
     # 2. A DISTINCT, unrelated key changes (advances the ref; does not touch A).
-    r_b0 = gate.persist(backend, "keyB", b"b-v0", expected_hash=None, doc_type="system_state")
+    r_b0 = gate.persist(backend, "keyB", b"b-v0", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r_b0, OK)
 
     # 3. Key A is legitimately updated for real (a proper CAS write), so the
     #    caller's earlier knowledge of A's hash (r_a0.new_hash) is now stale.
     r_a1 = gate.persist(
-        backend, "keyA", b"a-v1", expected_hash=r_a0.new_hash, doc_type="system_state"
+        backend, "keyA", b"a-v1", ctx=fenced_ctx(backend, "keyA", r_a0.new_hash), doc_type="system_state"
     )
     assert isinstance(r_a1, OK)
 
@@ -225,7 +226,7 @@ def test_stale_per_key_hash_rejected_even_on_clean_fast_forward(tmp_path):
     #    hash even if the push would fast-forward").
     result = gate.persist(
         backend, "keyA", b"a-v2-should-be-rejected",
-        expected_hash=r_a0.new_hash, doc_type="system_state",
+        ctx=fenced_ctx(backend, "keyA", r_a0.new_hash), doc_type="system_state",
     )
     assert isinstance(result, STALE), result
     assert result.current_hash == r_a1.new_hash
@@ -311,7 +312,7 @@ def test_clean_write_after_failed_secret_publish_still_works(tmp_path):
     result = backend._publish_checked(new_commit, None)
     assert isinstance(result, ERROR) and result.kind is ErrorKind.SECRET_BLOCKED
 
-    ok = gate.persist(backend, "notes/after", b"clean content", expected_hash=None, doc_type="system_state")
+    ok = gate.persist(backend, "notes/after", b"clean content", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(ok, OK)
     assert backend.read("notes/after").body == b"clean content"
     assert backend.read("secrets/x") is None
@@ -326,18 +327,18 @@ def test_generation_monotonicity_rejects_non_increasing_update(tmp_path):
     backend = _make_backend(tmp_path, "gen")
     key = "lease/holder"
 
-    r0 = gate.persist(backend, key, _gen(1) + b"leaseholder=alice", expected_hash=None, doc_type="lease")
+    r0 = gate.persist(backend, key, _gen(1) + b"leaseholder=alice", ctx=create_ctx(), doc_type="lease")
     assert isinstance(r0, OK)
 
     r_same_gen = gate.persist(
         backend, key, _gen(1) + b"leaseholder=bob",
-        expected_hash=r0.new_hash, doc_type="lease",
+        ctx=fenced_ctx(backend, key, r0.new_hash), doc_type="lease",
     )
     assert isinstance(r_same_gen, STALE)
 
     r_lower_gen = gate.persist(
         backend, key, _gen(0) + b"leaseholder=bob",
-        expected_hash=r0.new_hash, doc_type="lease",
+        ctx=fenced_ctx(backend, key, r0.new_hash), doc_type="lease",
     )
     assert isinstance(r_lower_gen, STALE)
 
@@ -345,7 +346,7 @@ def test_generation_monotonicity_rejects_non_increasing_update(tmp_path):
 
     r_higher_gen = gate.persist(
         backend, key, _gen(2) + b"leaseholder=bob",
-        expected_hash=r0.new_hash, doc_type="lease",
+        ctx=fenced_ctx(backend, key, r0.new_hash), doc_type="lease",
     )
     assert isinstance(r_higher_gen, OK)
     assert backend.read(key).body == _gen(2) + b"leaseholder=bob"
@@ -359,7 +360,7 @@ def test_generation_monotonicity_rejects_non_increasing_update(tmp_path):
 def test_write_rejects_raw_bytes_before_any_io(tmp_path):
     backend = _make_backend(tmp_path, "typeerror")
     with pytest.raises(TypeError):
-        backend.write("plain-str-key", b"plain-bytes-body", expected_hash=None)  # type: ignore[arg-type]
+        backend.write("plain-str-key", b"plain-bytes-body", ctx=create_ctx())  # type: ignore[arg-type]
     assert backend.read("plain-str-key") is None
     assert list(backend.list("")) == []
 
@@ -373,7 +374,7 @@ class _CaptureBackend:
     def __init__(self) -> None:
         self.captured = None
 
-    def write(self, key, body, *, expected_hash):
+    def write(self, key, body, *, ctx):
         self.captured = (key, body)
         return OK("0" * 64)
 
@@ -383,7 +384,7 @@ def test_scanned_body_is_immutable_after_construction(tmp_path):
     a would-be tamper (rewriting `_body` post-issuance) must raise TypeError
     immediately rather than silently succeeding."""
     capture = _CaptureBackend()
-    r = gate.persist(capture, "k", b"hello", expected_hash=None, doc_type="system_state")
+    r = gate.persist(capture, "k", b"hello", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r, OK)
     key_obj, body_obj = capture.captured
 
@@ -394,7 +395,7 @@ def test_scanned_body_is_immutable_after_construction(tmp_path):
 
     # Untampered, the legitimately-issued pair still writes fine.
     backend = _make_backend(tmp_path, "tamper")
-    result = backend.write(key_obj, body_obj, expected_hash=None)
+    result = backend.write(key_obj, body_obj, ctx=create_ctx())
     assert isinstance(result, OK)
     assert backend.read("k").body == b"hello"
 
@@ -408,7 +409,7 @@ def test_write_rejects_forged_non_gate_object(tmp_path):
 
     backend = _make_backend(tmp_path, "forged")
     with pytest.raises(TypeError):
-        backend.write(forged_key, forged_body, expected_hash=None)
+        backend.write(forged_key, forged_body, ctx=create_ctx())
     assert backend.read("k") is None
     assert gate.verify(forged_key) is False
     assert gate.verify(forged_body) is False
@@ -426,9 +427,9 @@ def test_write_rejects_forged_non_gate_object(tmp_path):
 def test_idempotent_create_replay(tmp_path):
     backend = _make_backend(tmp_path, "idempotent")
     body = b"same-bytes-both-times"
-    r0 = gate.persist(backend, "replay", body, expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "replay", body, ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
-    r1 = gate.persist(backend, "replay", body, expected_hash=None, doc_type="system_state")
+    r1 = gate.persist(backend, "replay", body, ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r1, OK)
     assert r1.new_hash == r0.new_hash
 
@@ -436,9 +437,9 @@ def test_idempotent_create_replay(tmp_path):
 def test_only_target_keys_blob_mutated(tmp_path):
     """Writing key B must not change key A's stored bytes/hash at all."""
     backend = _make_backend(tmp_path, "isolation")
-    r_a = gate.persist(backend, "keyA", b"a-content", expected_hash=None, doc_type="system_state")
+    r_a = gate.persist(backend, "keyA", b"a-content", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r_a, OK)
-    r_b = gate.persist(backend, "keyB", b"b-content", expected_hash=None, doc_type="system_state")
+    r_b = gate.persist(backend, "keyB", b"b-content", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r_b, OK)
 
     blob_a = backend.read("keyA")

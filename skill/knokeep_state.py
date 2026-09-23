@@ -23,6 +23,7 @@ from store import gate
 from store.local import LocalBackend
 from store.types import OK, STALE, EXISTS, ERROR, ErrorKind
 from store.config import default_store_root
+from store.context import create_ctx, overwrite_ctx
 
 SCHEMA_VERSION = 1
 ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -104,7 +105,19 @@ def _bytes(fm, body):
     return dump(fm, body).encode("utf-8")
 
 def _persist(backend, key, kind, raw_bytes, expected_hash):
-    return gate.persist(backend, key, raw_bytes, expected_hash=expected_hash, doc_type=_DOC_TYPE[kind])
+    """Unchanged external signature (expected_hash: Optional[str]) — kept
+    exactly as-is so existing monkeypatches (tests/test_h1_conflict.py) keep
+    working unmodified. Internally builds the now-required OperationContext
+    (H1 Increment 2, Phase 0): create-only when expected_hash is None,
+    otherwise a CAS-update carrying a real (but not yet fence-enforced)
+    advisory lease acquired-and-released immediately around this call."""
+    if expected_hash is None:
+        ctx = create_ctx()
+    else:
+        lease = backend.lock(key, ttl_s=30)
+        backend.unlock(lease)
+        ctx = overwrite_ctx(expected_hash, lease)
+    return gate.persist(backend, key, raw_bytes, ctx=ctx, doc_type=_DOC_TYPE[kind])
 
 def _require_ok(res):
     """Map a WriteResult onto the skill's die()/JSON contract; return the new 64-hex on OK."""

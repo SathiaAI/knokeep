@@ -22,8 +22,10 @@ State the returned `resume_line` to the user ("resuming: … / next: … / v<has
 - `system_state` (invariants) changes rarely; `Active State` / `Next Step` change often.
 
 ### Flush commands
-- Invariants: `flush-state --body-file <f> [--expect-hash <h>]` — pass the `version_hash` you last saw; a **stale** hash is rejected (concurrency guard). Sections: `## Architecture`, `## Path & Variable Directory`, `## Hard Constraints`.
-- Active/Next: `flush-log --body-file <f>` — sections `## Completed & Verified`, `## Active State`, `## Next Step`.
+- Invariants: `flush-state --body-file <f> [--expect-hash <h>]` — pass the `version_hash` you last saw. Sections: `## Architecture`, `## Path & Variable Directory`, `## Hard Constraints`.
+- Active/Next: `flush-log --body-file <f> [--expect-hash <log_hash>]` — sections `## Completed & Verified`, `## Active State`, `## Next Step`. Pass the `log_hash` from `bootstrap` (the log doc's own hash), NOT the state `version_hash` — the two docs have separate hashes.
+- **Single-section update (concurrency-safe):** add `--section "<Heading>"` (with `--expect-hash <h>`, and ideally `--session-id <id>`) to replace ONLY that section's body. On a concurrent edit the helper re-reads and re-applies your section onto the latest version and retries; if that same section changed under you — or on a whole-document (no-`--section`) conflict — your losing body is **parked** under `{project}/conflicts/…` with a journal record, never silently dropped. Prefer `--section` for targeted `Active State` / `Next Step` updates when other agents or tools may be writing the same doc.
+  - **Limits (by design in V1.6):** (1) reapply is section-granular — it auto-merges only when the two writers touched *different* sections; two edits inside the *same* section park the loser instead of interleaving text. (2) reapply only covers conflicts detected *after* a matching first read — if another writer commits *before* this flush's first read (your `--expect-hash` is already stale by the time the helper reads), the section baseline can't be established, so the update parks even if that writer changed a *different* section. This is a deliberate fail-safe: a losing write is parked, never silently dropped. To get auto-merge, split unrelated updates into different sections **and** pass a current `--expect-hash`.
 - This session's journal: `session-append --session-id <id> --entry "<text>"` (append-only; parallel-safe — each session writes only its own file).
 - Consolidate journals: `rollup`.
 

@@ -350,14 +350,23 @@ def test_c5_pointer_stays_pointer(backend):
 
 
 def test_c7_lock_ttl_and_token(backend):
-    lock1 = backend.lock("lockable", ttl_s=0.05)
-    assert len(bytes.fromhex(lock1.token)) * 8 == 128  # 128-bit token
+    # Held-lock mutual-exclusion check uses a generous TTL so the lock is
+    # GUARANTEED still held when the second acquire runs. A tight TTL (e.g. 50ms)
+    # races on a slow/loaded CI runner — the lock can expire between acquire and
+    # the re-acquire, so the expected BackendBusyError never fires (flaky).
+    held = backend.lock("lockable", ttl_s=5)
+    assert len(bytes.fromhex(held.token)) * 8 == 128  # 128-bit token
 
     # While held and unexpired, a second acquire must not succeed.
     with pytest.raises(BackendBusyError):
         backend.lock("lockable", ttl_s=5)
+    assert backend.unlock(held) is True  # release cleanly for the expiry check
 
-    time.sleep(0.08)  # let lock1 expire
+    # Expiry supersession: sleeping PAST a short TTL is monotonic-safe (elapsed
+    # time only grows), unlike relying on a lock to still be held — so this
+    # direction never flakes.
+    lock1 = backend.lock("lockable", ttl_s=0.05)
+    time.sleep(0.2)  # generous margin past the 50ms TTL
 
     # A successor can now acquire the same key.
     lock2 = backend.lock("lockable", ttl_s=5)
@@ -376,7 +385,7 @@ def test_c7_lock_ttl_and_token(backend):
     assert backend.unlock(lock2) is True
 
     lock3 = backend.lock("under-lock", ttl_s=0.05)
-    time.sleep(0.08)
+    time.sleep(0.2)  # generous margin past the 50ms TTL (CI-runner-safe)
     # lock3 is now expired but still present in the backend's bookkeeping.
     r2 = gate.persist(
         backend, "under-lock", b"v2", expected_hash=r.new_hash, doc_type="system_state"

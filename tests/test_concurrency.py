@@ -23,10 +23,13 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
     r = list(ex.map(w, ["A", "B"]))
 
 oks = sum(1 for x in r if x.returncode == 0)
-stales = sum(1 for x in r if "stale" in x.stderr)
-ok = (oks == 1 and stales == 1)
-print(f"oks={oks} stales={stales}")
-print(("PASS " if ok else "FAIL ") + "2-process no-lost-update (exactly one wins)")
+# H1 (bounded_cas_reread_reapply): the losing whole-doc writer no longer gets a
+# bare "stale" — it fails closed with its body PARKED under conflicts/ (no lost
+# update, nothing silently dropped). Exactly one wins, exactly one parks.
+parked = sum(1 for x in r if "conflict_parked" in x.stderr)
+ok = (oks == 1 and parked == 1)
+print(f"oks={oks} parked={parked}")
+print(("PASS " if ok else "FAIL ") + "2-process no-lost-update (one wins, one parked)")
 
 # The store is not wedged after contention: a fresh flush with the current hash
 # proceeds (no deadlock; the winner's lock was released, journal is consistent).

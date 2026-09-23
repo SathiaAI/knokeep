@@ -14,11 +14,71 @@ requirement (§4.2): `SigV4Client` below is a minimal, from-scratch AWS SigV4
 request signer built on `hashlib`/`hmac` for the signature math and
 `http.client` (the stdlib layer `urllib.request` itself is a thin wrapper
 around) for the transport, plus `urllib.parse` for URI/query encoding. It
-implements exactly the three operations this adapter needs — HEAD, GET, PUT
-(with conditional headers) — and nothing else (no multipart, no
+implements exactly the operations this adapter needs — HEAD, GET, PUT (with
+conditional headers) — and nothing else (no multipart, no
 ListObjectsV2-alternatives beyond what `list()` needs). `boto3` is NOT
 imported anywhere in this module; it may only ever appear in test code as an
 independent oracle (contract task instructions), never in the adapter.
+
+H1 INCREMENT 2, PHASE 2 — FENCE ENVELOPE (this section documents the change;
+everything above/below it that still says "JUDGMENT CALLS" from Phase 0/1 is
+otherwise unchanged):
+
+  Server-side fence enforcement (contract: reject a stale-but-hash-matching
+  lease even though the pre-existing content-hash CAS alone would accept it)
+  requires durable, per-key owner_token/owner_expiry/owner_fence/
+  last_accepted_fence state that a `lock()` call can advance WITHOUT any
+  data write, and that a `write()` call can check atomically against the
+  SAME native token used for the data CAS. Object storage offers exactly one
+  atomicity boundary per key: one object, one ETag, one conditional PUT.
+  There is no second, independently-CAS'd side-channel (no per-key "extra
+  metadata API" in the S3 protocol this adapter targets) the way git has a
+  second committed path or postgres has a second table+transaction.
+
+  So this adapter now stores ONE CANONICAL OBJECT per key whose bytes are an
+  ENVELOPE — `owner_token` / `owner_expiry` / `owner_fence` /
+  `last_accepted_fence` / the logical `version_hash` / the logical body — all
+  in the body (never in S3 metadata, which this endpoint's HEAD cannot
+  update independently of a full PUT anyway). Every mutation (`lock()`'s
+  fence advance, `write()`'s CAS-update, `renew()`'s expiry bump) reads the
+  current envelope (GET, which also yields the object's ETag), computes the
+  new envelope, and PUTs it back conditioned on that SAME ETag via
+  `If-Match` — the object store's own native CAS is still the sole
+  linearization point; nothing here adds an application-side lock. `read()`
+  unwraps the envelope transparently so callers never see it.
+
+  PHANTOM OBJECTS: `lock()` must work on a key that has never been written
+  (contract: a caller may acquire a lease before its first CAS-update). Since
+  ownership now lives inside the one object a key has, `lock()` on an
+  unwritten key creates a PHANTOM envelope — owner/fence fields populated,
+  `version_hash: null`, empty logical body — via `If-None-Match: *`. A
+  create-only `write()` that lands on a key already holding a phantom (some
+  caller already `lock()`'d it first) does not report a false EXISTS: it
+  detects the phantom (`version_hash is None`) and fills it in with the real
+  body via a CAS-update-shaped PUT that preserves the phantom's owner/fence
+  fields, conditioned on the phantom's own ETag.
+
+  SETTLING A LOST FENCE RACE: because owner/fence and data share one object,
+  a `write()`'s conditional PUT can be rejected by an UNRELATED concurrent
+  `lock()` (a fence advance for the same key, no data change) landing first
+  — not only by a conflicting data write. A single immediate re-read right
+  after such a rejection can therefore still show this caller's own
+  pre-race snapshot if the actual new owner's data write has not landed yet.
+  `_settle_current_hash_after_fence_loss` closes that gap (same technique as
+  `store/git_backend.py`'s Phase 2 fix, and the same root cause): it polls,
+  bounded, for as long as the envelope shows a fence has been allocated
+  (`owner_fence`) that no write has yet consumed (`last_accepted_fence`),
+  and returns the moment either the logical hash changes or nothing is left
+  pending — so a genuinely non-racing fence rejection (an old lease replayed
+  with nobody else contending) returns on its very first check.
+
+  CAS DECISION COST: Phase 0/1's JUDGMENT CALL 4 ("a single HEAD reads the
+  metadata hash AND captures the native token from the same object version")
+  no longer holds: since ownership/fence state lives in the body, every CAS
+  decision now requires a GET (not just a HEAD) to see it, and this is the
+  ONE GET per CAS-update (never more, on the non-racing path) — HEAD is kept
+  only for the load-time capability probe and `health()`, which do not need
+  envelope contents.
 
 JUDGMENT CALLS (each also called out inline at its point of use):
 
@@ -44,13 +104,10 @@ JUDGMENT CALLS (each also called out inline at its point of use):
 
   2. ETag handling. §4.2 is explicit: "ETag is NOT the content hash; sha256
      in `If-Match` forbidden". This adapter never inspects, parses, or
-     compares ETag bytes to anything — it is captured from one HEAD response
-     header and echoed back VERBATIM (quotes included, exactly as the server
-     sent it) into the next PUT's `If-Match` header. It is treated as a
-     fully opaque native token, by construction (there is no code path that
-     could put a sha256 value into `If-Match` even by mistake — the only
-     value ever placed there is a value the client itself received FROM the
-     server as an `ETag` header, never a locally-computed hash).
+     compares ETag bytes to anything — it is captured from one GET/HEAD
+     response header and echoed back VERBATIM (quotes included, exactly as
+     the server sent it) into the next PUT's `If-Match` header. It is
+     treated as a fully opaque native token, by construction.
 
   3. Structural "no unconditional PUT" guarantee. Rather than rely on
      review/tests alone to prove every PUT carries a precondition (contract
@@ -63,42 +120,26 @@ JUDGMENT CALLS (each also called out inline at its point of use):
      `TypeError`) and via an AST scan of every `put(` call site in this
      module and confirming each carries a `precondition=` keyword literally.
 
-  4. CAS-update generation-monotonicity check costs one extra GET. §4.2's
-     single-HEAD requirement ("a single HEAD reads the knokeep-sha256
-     metadata AND captures the native token... from the SAME object
-     version") is about the CAS decision itself (stale-hash / native-token
-     capture) — exactly one HEAD is issued for that. Contract §6 separately
-     requires rejecting a non-increasing generation for non-STATE doc types,
-     and the generation lives INSIDE the body (§6: "MUST carry a monotonic
-     uint64 generation in the scanned body"), which a HEAD (headers only)
-     cannot see. This adapter therefore issues one additional GET — ONLY
-     when the new body carries a generation header — to read the current
-     body and extract its generation, mirroring the identical judgment call
-     already made in `store/local.py` and `store/git_backend.py` (both of
-     which have the current body in hand anyway from their own read path).
-     This does not add a second HEAD and does not change the CAS
-     linearization point, which remains the single HEAD-then-conditional-PUT
-     pair against the native token.
+  4. (superseded by the envelope section above for the CAS decision itself;
+     generation monotonicity is still a residual, still one extra read of
+     the CURRENT envelope's own logical body — already fetched as part of
+     the same GET the fence/hash decision needs, so it costs nothing extra
+     now.)
 
   5. Fallback content-hash on a create-only conflict against a foreign
-     object. If a create-only PUT's `If-None-Match: *` is rejected (412 →
-     EXISTS class), the adapter re-reads via HEAD to report `current_hash`.
-     If that object was NOT written by this adapter (no
-     `x-amz-meta-knokeep-sha256` present — e.g. probe litter from another
-     process, or an out-of-band write), there is no metadata hash to report.
-     Rather than fabricate one, the adapter falls back to one GET and
-     computes `sha256(body)` directly ONLY on this rare, already-failed
-     branch (never on the hot success path, never instead of the mandatory
-     metadata-hash comparison in the CAS-update path).
+     (non-envelope) object. If a create-only PUT's `If-None-Match: *` is
+     rejected (412 → EXISTS class) and the existing object cannot be parsed
+     as a KnoKeep envelope at all (e.g. probe litter from another process,
+     or an out-of-band write), there is no logical hash to report from
+     envelope metadata. Rather than fabricate one, the adapter falls back to
+     `sha256(body)` of the raw (non-envelope) bytes, ONLY on this rare,
+     already-failed branch (never on the hot success path).
 
-  6. Advisory `lock()`/`unlock()`/`renew()` are kept in-memory (one dict
-     guarded by a `threading.Lock`), identical in shape and rationale to
-     `store/git_backend.py`'s JUDGMENT CALL 1: contract §3 states plainly
-     that "Advisory lock() is never the CAS mechanism" for any backend, and
-     §4.2 does not mandate durable lock storage for object-store — only the
-     native-precondition CAS is load-bearing. Adding a second, durable
-     lock-object mechanism here would itself need its own CAS story that
-     nothing in §4.2 calls for.
+  6. Advisory `lock()`/`unlock()` in-process bookkeeping (`self._locks`) is
+     kept identical in shape to Phase 0/1 and to `store/git_backend.py`'s
+     JUDGMENT CALL 1 — contract §3: "Advisory lock() is never the CAS
+     mechanism" for any backend. What Phase 2 adds is the DURABLE fence
+     envelope (above), not a second advisory-lock storage.
 
   7. TLS verification cannot be turned off by any constructor knob. §4.2:
      "TLS verify ON by default; allow plain http ONLY when the configured
@@ -117,50 +158,28 @@ JUDGMENT CALLS (each also called out inline at its point of use):
      automatically, no EC2/ECS instance-metadata (IMDS) call anywhere in
      this module, and no "try region X, then Y" resolution — the caller
      passes `endpoint`, `bucket`, `region`, `access_key_id`,
-     `secret_access_key` (and optional `session_token`) directly (a caller
-     wanting them sourced from its OWN environment reads `os.environ` itself
-     before constructing this class; that is a caller-side decision, not
-     behavior this module performs on its own). This trivially satisfies
-     "NO default credential chain, NO IMDS/metadata calls" because no such
-     chain is ever consulted — there was nothing to disable.
+     `secret_access_key` (and optional `session_token`) directly.
 
   9. Multipart is not merely "disabled" by a flag — no multipart code path
      exists anywhere in this module. `SigV4Client.put()` always issues one
-     single-shot `PUT` with the full body; there is no upload-id/part-number
-     concept, no `CreateMultipartUpload` call, nothing to accidentally
-     trigger for a large body. A very large body simply means a very large
-     single PUT (bounded by whatever the endpoint itself enforces).
+     single-shot `PUT` with the full body.
 
   10. §8 load-time capability probe. On construction (unless explicitly
       disabled for a targeted unit test), the adapter runs three requests
       against a fresh random key under the reserved prefix `.knokeep/probe/`
       — create-only (expect success), duplicate create-only (expect the
-      endpoint's own 412 → this adapter's own EXISTS-mapping logic is not
-      what's being tested here, the RAW status code is asserted to be 412),
-      and a CAS-update with a deliberately wrong `If-Match` token (expect
-      412) — then deletes the probe object (best-effort; DELETE is not part
-      of the `StoreBackend` protocol and is used ONLY for this internal
-      hygiene, never exposed as a public method). Any of the three checks
-      coming back other than expected, or any transport failure while
-      running them, raises `RuntimeError` and the adapter refuses to be
-      constructed at all — "no degraded mode" (§8) is implemented literally:
-      there is no code path where `ObjectStoreBackend.__init__` returns
-      successfully after a failed probe.
+      endpoint's own 412), and a CAS-update with a deliberately wrong
+      `If-Match` token (expect 412) — then deletes the probe object
+      (best-effort). Any of the three checks coming back other than
+      expected, or any transport failure while running them, raises
+      `RuntimeError` and the adapter refuses to be constructed at all —
+      "no degraded mode" (§8). This probe uses raw (non-envelope) bytes and
+      is entirely independent of the envelope format above (it never goes
+      through `read()`/`write()`).
 
   11. Test-only transport injection seam (`_client=` constructor kwarg,
-      leading underscore, not part of the public API). Contract-mandated
-      behavior this module must prove includes "REFUSE TO START when the
-      endpoint does not enforce preconditions" (§8) — which requires a
-      transport that ACCEPTS every write, unconditionally, to prove the
-      refusal fires. That transport cannot be a real moto server (moto
-      faithfully enforces the preconditions, which is exactly why it is
-      used for every OTHER test) — it must be a stub. Rather than reach into
-      private internals from the test, the constructor accepts a
-      caller-supplied client object satisfying the same duck-typed interface
-      (`head`/`get`/`put`/`delete`/`list_objects`) as `SigV4Client`; this is
-      the same "inject a fake collaborator" shape already used throughout
-      this codebase (`store/fake.py`'s fault-injection knobs serve the same
-      testing purpose for the conformance suite).
+      leading underscore, not part of the public API). See Phase 0/1 notes;
+      unchanged in Phase 2.
 """
 from __future__ import annotations
 
@@ -169,13 +188,15 @@ import datetime
 import hashlib
 import hmac
 import http.client
+import json
 import re
 import ssl
+import struct
 import threading
 import time
 import uuid
 import xml.etree.ElementTree as ET
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Dict, Iterator, List, NamedTuple, Optional, Tuple
 from urllib.parse import quote, urlsplit
 
 from . import gate
@@ -221,6 +242,66 @@ def _extract_generation(raw: bytes) -> Optional[int]:
     if value > _UINT64_MAX:
         return None
     return value
+
+
+# ---------------------------------------------------------------------------
+# H1 Increment 2, Phase 2: the canonical per-key fence envelope. See the
+# module docstring's "FENCE ENVELOPE" section for the design rationale.
+# Binary layout: 4-byte magic, big-endian uint32 header length, UTF-8 JSON
+# header, then the raw logical body (never re-encoded/escaped, so an
+# arbitrary-bytes body round-trips exactly).
+# ---------------------------------------------------------------------------
+
+_ENVELOPE_MAGIC = b"KFE1"
+_ENVELOPE_SCHEMA_VERSION = 1
+
+
+class _Envelope(NamedTuple):
+    owner_token: Optional[str]
+    owner_expiry: float
+    owner_fence: int
+    last_accepted_fence: int
+    version_hash: Optional[str]  # None => phantom: lock()'d, never written
+    body: bytes
+    etag: Optional[str]
+
+
+def _encode_envelope(
+    owner_token: Optional[str],
+    owner_expiry: float,
+    owner_fence: int,
+    last_accepted_fence: int,
+    version_hash: Optional[str],
+    body: bytes,
+) -> bytes:
+    header = {
+        "schema_version": _ENVELOPE_SCHEMA_VERSION,
+        "owner_token": owner_token,
+        "owner_expiry": owner_expiry,
+        "owner_fence": owner_fence,
+        "last_accepted_fence": last_accepted_fence,
+        "version_hash": version_hash,
+    }
+    header_bytes = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    return _ENVELOPE_MAGIC + struct.pack(">I", len(header_bytes)) + header_bytes + body
+
+
+def _decode_envelope(raw: bytes) -> Tuple[dict, bytes]:
+    """Raises ValueError if `raw` is not a KnoKeep fence envelope (e.g. probe
+    litter or another out-of-band object) — callers decide how to handle
+    that per call site (never silently treated as a real key's data)."""
+    if raw[:4] != _ENVELOPE_MAGIC:
+        raise ValueError("not a KnoKeep fence envelope (bad magic)")
+    if len(raw) < 8:
+        raise ValueError("not a KnoKeep fence envelope (truncated)")
+    (header_len,) = struct.unpack_from(">I", raw, 4)
+    header_start = 8
+    header_end = header_start + header_len
+    if header_end > len(raw):
+        raise ValueError("not a KnoKeep fence envelope (truncated header)")
+    header = json.loads(raw[header_start:header_end].decode("utf-8"))
+    body = raw[header_end:]
+    return header, body
 
 
 # ---------------------------------------------------------------------------
@@ -325,8 +406,9 @@ class SigV4Client:
         self._session_token = session_token
         self._timeout_s = timeout_s
 
-        # Call-count instrumentation (tests assert on this — e.g. "single
-        # HEAD" per CAS-update — never used for adapter logic itself).
+        # Call-count instrumentation (tests assert on this — e.g. "exactly
+        # one GET" per non-racing CAS-update — never used for adapter logic
+        # itself).
         self.head_count = 0
         self.get_count = 0
         self.put_count = 0
@@ -506,6 +588,21 @@ class SigV4Client:
             return body
         raise _ObjectStoreTransportError(f"GET {key}: unexpected status {status}")
 
+    def get_with_etag(self, key: str) -> Optional[Tuple[bytes, Optional[str]]]:
+        """H1 Increment 2, Phase 2: like `get()`, but also returns the
+        object's ETag from the SAME response — needed because fence/owner
+        state now lives in the body, so every CAS decision must read the
+        full object (not just HEAD), and the CAS-update PUT that follows
+        must condition on the ETag of the EXACT version just read."""
+        self.get_count += 1
+        status, headers, body = self._request("GET", key)
+        if status == 404:
+            return None
+        if status == 200:
+            etag = headers.get("ETag") or headers.get("etag")
+            return body, etag
+        raise _ObjectStoreTransportError(f"GET {key}: unexpected status {status}")
+
     def put(
         self,
         key: str,
@@ -517,7 +614,7 @@ class SigV4Client:
         """Issue a single PUT. `precondition` is REQUIRED and has no default
         (JUDGMENT CALL 3): it must be exactly one of
         `{"If-None-Match": "*"}` (create-only) or
-        `{"If-Match": "<etag captured from a prior HEAD, verbatim>"}`
+        `{"If-Match": "<etag captured from a prior read, verbatim>"}`
         (CAS-update) — there is no way to call this method and skip sending
         a conditional header at all.
         """
@@ -576,6 +673,10 @@ class SigV4Client:
 class ObjectStoreBackend:
     """S3-protocol object-store StoreBackend adapter. See module docstring."""
 
+    _FENCE_RETRY_ATTEMPTS = 50
+    _FENCE_LOSS_SETTLE_POLL_S = 0.01
+    _FENCE_LOSS_SETTLE_MAX_S = 20.0
+
     def __init__(
         self,
         *,
@@ -619,6 +720,9 @@ class ObjectStoreBackend:
             self._run_capability_probe()
 
     # -- §8 load-time capability probe --------------------------------------
+    # Raw (non-envelope) bytes on purpose: this probes the ENDPOINT's own
+    # precondition enforcement, entirely independent of this adapter's
+    # envelope format above.
 
     def _run_capability_probe(self) -> None:
         probe_key = f"{PROBE_PREFIX}{uuid.uuid4().hex}"
@@ -671,10 +775,10 @@ class ObjectStoreBackend:
     # -- StoreBackend protocol -----------------------------------------------
 
     def capabilities(self) -> Caps:
-        # fence=False: H1 Increment 2, Phase 1 adds fence enforcement to the
-        # local/fake backends only; this remote backend still accepts `ctx`
-        # unchanged and enforces nothing new until a later phase.
-        return Caps(atomic=True, cas=True, lock=True, durable=True, remote=True, fence=False)
+        # H1 Increment 2, Phase 2: this backend now enforces lock()-issued
+        # fence ordering on every Overwrite CAS-update via the canonical
+        # per-key fence envelope (see module docstring).
+        return Caps(atomic=True, cas=True, lock=True, durable=True, remote=True, fence=True)
 
     def health(self) -> BackendHealth:
         try:
@@ -683,14 +787,47 @@ class ObjectStoreBackend:
         except Exception as e:  # noqa: BLE001 - health() reports, never raises
             return BackendHealth(ok=False, detail=str(e))
 
+    # -- H1 Increment 2, Phase 2: canonical fence envelope I/O --------------
+
+    def _read_envelope(self, key: str) -> Optional[_Envelope]:
+        """Read+parse the canonical envelope for `key`. Returns None only
+        when the object truly does not exist (never created, or a phantom
+        that was somehow removed out-of-band). Raises ValueError if an
+        object exists but is not a KnoKeep envelope (foreign/probe object —
+        callers decide how to handle that; `read()` treats it as corruption,
+        `_resolve_create_conflict` falls back to a raw content hash)."""
+        got = self._client.get_with_etag(key)
+        if got is None:
+            return None
+        raw, etag = got
+        header, body = _decode_envelope(raw)
+        return _Envelope(
+            owner_token=header.get("owner_token"),
+            owner_expiry=float(header.get("owner_expiry") or 0.0),
+            owner_fence=int(header.get("owner_fence") or 0),
+            last_accepted_fence=int(header.get("last_accepted_fence") or 0),
+            version_hash=header.get("version_hash"),
+            body=body,
+            etag=etag,
+        )
+
     def read(self, key: str) -> Optional[Blob]:
         try:
-            body = self._client.get(key)
+            got = self._client.get_with_etag(key)
         except (_PreSendNetworkError, _PostSendAckLostError, _ObjectStoreTransportError) as e:
             raise ObjectStoreBackendError(str(e)) from e
-        if body is None:
+        if got is None:
             return None
-        return Blob(body=body, version_hash=sha256_hex(body))
+        raw, _etag = got
+        try:
+            header, body = _decode_envelope(raw)
+        except ValueError as e:
+            raise ObjectStoreBackendError(f"corrupt/non-envelope object at {key!r}: {e}") from e
+        version_hash = header.get("version_hash")
+        if version_hash is None:
+            # Phantom: lock()'d but never written — logically absent.
+            return None
+        return Blob(body=body, version_hash=version_hash)
 
     def list(self, prefix: str) -> Iterator[str]:
         def _iter() -> Iterator[str]:
@@ -723,8 +860,12 @@ class ObjectStoreBackend:
         if not gate.verify(key) or not gate.verify(body):
             raise TypeError("ObjectStoreBackend.write: gate marker verification failed")
 
-        # H1 Increment 2, Phase 0: ctx is required; derive expected_hash the
-        # same way store/gate.py does. No fence enforcement yet.
+        # H1 Increment 2, Phase 2: ctx is required; derive expected_hash the
+        # same way store/gate.py does, plus the caller's lease for fence
+        # enforcement.
+        precondition_lease: Optional[Lock] = (
+            ctx.precondition.lease if isinstance(ctx.precondition, Overwrite) else None
+        )
         expected_hash: Optional[str] = (
             ctx.precondition.expected_hash if isinstance(ctx.precondition, Overwrite) else None
         )
@@ -736,14 +877,15 @@ class ObjectStoreBackend:
 
         if expected_hash is None:
             return self._write_create_only(k, raw, new_hash)
-        return self._write_cas_update(k, raw, new_hash, expected_hash, new_generation)
+        return self._write_cas_update(k, raw, new_hash, expected_hash, new_generation, precondition_lease)
 
     # -- create-only ----------------------------------------------------------
 
     def _write_create_only(self, key: str, raw: bytes, new_hash: str) -> WriteResult:
+        envelope = _encode_envelope(None, 0.0, 0, 0, new_hash, raw)
         try:
             status, _headers = self._client.put(
-                key, raw, precondition={"If-None-Match": "*"}, meta_hash=new_hash
+                key, envelope, precondition={"If-None-Match": "*"}, meta_hash=new_hash
             )
         except _PreSendNetworkError:
             return ERROR(ErrorKind.NETWORK)
@@ -754,8 +896,9 @@ class ObjectStoreBackend:
             return OK(new_hash)
         if status == 412:
             # Map by OPERATION, not status (§4.2): create-only precondition
-            # failure -> EXISTS.
-            return self._resolve_create_conflict(key, new_hash)
+            # failure -> EXISTS (unless the existing object is a PHANTOM —
+            # see _resolve_create_conflict).
+            return self._resolve_create_conflict(key, raw, new_hash)
         if status == 403:
             return ERROR(ErrorKind.PERMISSION)
         if 500 <= status < 600:
@@ -766,34 +909,78 @@ class ObjectStoreBackend:
         # Unclassifiable -> fail closed, never assume success.
         return ERROR(ErrorKind.CONFLICT_UNKNOWN)
 
-    def _resolve_create_conflict(self, key: str, new_hash: str) -> WriteResult:
-        try:
-            head = self._client.head(key)
-        except (_PreSendNetworkError, _PostSendAckLostError, _ObjectStoreTransportError):
-            return ERROR(ErrorKind.CONFLICT_UNKNOWN)
-        if head is None:
-            # Raced away again between our PUT and this HEAD; cannot tell
-            # whether anything landed. Never a false definitely-not-committed.
-            return ERROR(ErrorKind.CONFLICT_UNKNOWN)
-
-        current_hash = head.meta_hash
-        if current_hash is None:
-            # JUDGMENT CALL 5: object exists without our metadata header
-            # (written out-of-band) — fall back to hashing the body itself,
-            # ONLY on this already-failed branch.
+    def _resolve_create_conflict(self, key: str, raw: bytes, new_hash: str) -> WriteResult:
+        """H1 Increment 2, Phase 2: the existing object may be a PHANTOM
+        (some caller already `lock()`'d this key before any data existed) —
+        in that case a create-only write must still succeed, filling in the
+        phantom's body/version_hash while preserving its owner/fence fields,
+        via a CAS-update-shaped PUT conditioned on the phantom's own ETag.
+        Bounded retry: a concurrent racer (another create-only, another
+        lock()) can invalidate our read between GET and PUT."""
+        for _attempt in range(self._FENCE_RETRY_ATTEMPTS):
             try:
-                current_body = self._client.get(key)
+                env = self._read_envelope(key)
+            except ValueError:
+                # Existing object is not a KnoKeep envelope at all (foreign/
+                # probe litter). JUDGMENT CALL 5: fall back to a raw content
+                # hash rather than fabricate envelope semantics for it.
+                try:
+                    foreign_body = self._client.get(key)
+                except (_PreSendNetworkError, _PostSendAckLostError, _ObjectStoreTransportError):
+                    return ERROR(ErrorKind.CONFLICT_UNKNOWN)
+                if foreign_body is None:
+                    return ERROR(ErrorKind.CONFLICT_UNKNOWN)
+                foreign_hash = sha256_hex(foreign_body)
+                if foreign_hash == new_hash:
+                    return OK(new_hash)
+                return EXISTS(foreign_hash)
             except (_PreSendNetworkError, _PostSendAckLostError, _ObjectStoreTransportError):
                 return ERROR(ErrorKind.CONFLICT_UNKNOWN)
-            if current_body is None:
-                return ERROR(ErrorKind.CONFLICT_UNKNOWN)
-            current_hash = sha256_hex(current_body)
 
-        if current_hash == new_hash:
-            # Contract §3: "Retried create-only returning EXISTS where stored
-            # hash == new sha256 -> treat as OK (idempotent replay)."
-            return OK(new_hash)
-        return EXISTS(current_hash)
+            if env is None:
+                # Raced away again (deleted or never really existed) — retry
+                # a plain create-only once more.
+                envelope = _encode_envelope(None, 0.0, 0, 0, new_hash, raw)
+                try:
+                    status, _ = self._client.put(
+                        key, envelope, precondition={"If-None-Match": "*"}, meta_hash=new_hash
+                    )
+                except (_PreSendNetworkError, _PostSendAckLostError):
+                    return ERROR(ErrorKind.CONFLICT_UNKNOWN)
+                if status in (200, 201):
+                    return OK(new_hash)
+                if status == 412:
+                    continue
+                return ERROR(ErrorKind.CONFLICT_UNKNOWN)
+
+            if env.version_hash is None:
+                # Phantom: no real data yet — fill it in, preserving the
+                # owner/fence fields exactly as read.
+                new_envelope = _encode_envelope(
+                    env.owner_token, env.owner_expiry, env.owner_fence,
+                    env.last_accepted_fence, new_hash, raw,
+                )
+                try:
+                    status, _ = self._client.put(
+                        key, new_envelope, precondition={"If-Match": env.etag}, meta_hash=new_hash
+                    )
+                except (_PreSendNetworkError, _PostSendAckLostError):
+                    return ERROR(ErrorKind.CONFLICT_UNKNOWN)
+                if status in (200, 201):
+                    return OK(new_hash)
+                if status == 412:
+                    continue  # someone else raced (another fill-in or a lock()); retry
+                return ERROR(ErrorKind.CONFLICT_UNKNOWN)
+
+            # Real data already present under this key.
+            if env.version_hash == new_hash:
+                # Contract §3: "Retried create-only returning EXISTS where
+                # stored hash == new sha256 -> treat as OK (idempotent
+                # replay)."
+                return OK(new_hash)
+            return EXISTS(env.version_hash)
+
+        return ERROR(ErrorKind.CONFLICT_UNKNOWN)
 
     # -- CAS-update -------------------------------------------------------------
 
@@ -804,42 +991,61 @@ class ObjectStoreBackend:
         new_hash: str,
         expected_hash: str,
         new_generation: Optional[int],
+        precondition_lease: Optional[Lock],
     ) -> WriteResult:
-        # §4.2: "a single HEAD reads the knokeep-sha256 metadata AND captures
-        # the native token ... from the SAME object version" — exactly one
-        # HEAD call for the CAS decision itself.
+        # H1 Increment 2, Phase 2: one GET reads the canonical envelope —
+        # owner/fence state AND the logical hash/body AND the native ETag,
+        # all from the SAME object version (see module docstring's "CAS
+        # DECISION COST" note: HEAD alone can no longer answer this).
         try:
-            head = self._client.head(key)
+            env = self._read_envelope(key)
+        except ValueError:
+            # Not a KnoKeep envelope at all — treat as no usable current
+            # version to CAS against.
+            return ERROR(ErrorKind.CONFLICT_UNKNOWN)
         except (_PreSendNetworkError, _PostSendAckLostError, _ObjectStoreTransportError):
             return ERROR(ErrorKind.NETWORK)
 
-        if head is None:
+        if env is None:
             # CAS-update against an absent key -> STALE{None} (§3: "a
             # CAS-update NEVER creates").
             return STALE(None)
-        if head.meta_hash != expected_hash:
-            return STALE(head.meta_hash)
-        if not head.etag:
-            # Enforcement is broken/missing at the object level (no ETag to
-            # condition on) — fail closed rather than ever issue an
-            # unconditional PUT.
-            return ERROR(ErrorKind.CONFLICT_UNKNOWN)
 
-        # JUDGMENT CALL 4: generation monotonicity (residual from T1, same
-        # rationale as store/local.py / store/git_backend.py) — only for
-        # non-STATE doc types, which carry a generation header in the body.
+        # Ownership/fence FIRST (H1 Increment 2, Phase 2), before the
+        # pre-existing content-hash CAS guard — this is what makes "reject a
+        # stale-but-hash-matching lease" hold, independent of the hash check.
+        fence_ok = (
+            precondition_lease is not None
+            and precondition_lease.token == env.owner_token
+            and env.owner_expiry > time.time()
+            and precondition_lease.fence >= env.last_accepted_fence
+        )
+        if not fence_ok:
+            settled_hash = self._settle_current_hash_after_fence_loss(key, expected_hash)
+            return STALE(settled_hash, reason="FENCE")
+
+        current_hash = env.version_hash
+        if current_hash is None:
+            return STALE(None)  # phantom: fence holder, but nothing to CAS against yet
+        if current_hash != expected_hash:
+            return STALE(current_hash)
+
+        # JUDGMENT CALL (residual from Phase 0/1's #4): generation
+        # monotonicity, only for non-STATE doc types. `env.body` is already
+        # in hand from the same GET — no extra read needed.
         if new_generation is not None:
-            try:
-                current_body = self._client.get(key)
-            except (_PreSendNetworkError, _PostSendAckLostError, _ObjectStoreTransportError):
-                return ERROR(ErrorKind.NETWORK)
-            current_generation = _extract_generation(current_body) if current_body is not None else None
+            current_generation = _extract_generation(env.body)
             if current_generation is not None and new_generation <= current_generation:
-                return STALE(head.meta_hash)
+                return STALE(current_hash)
 
+        assert precondition_lease is not None  # fence_ok requires this
+        new_envelope = _encode_envelope(
+            env.owner_token, env.owner_expiry, env.owner_fence,
+            precondition_lease.fence, new_hash, raw,
+        )
         try:
             status, _headers = self._client.put(
-                key, raw, precondition={"If-Match": head.etag}, meta_hash=new_hash
+                key, new_envelope, precondition={"If-Match": env.etag}, meta_hash=new_hash
             )
         except _PreSendNetworkError:
             return ERROR(ErrorKind.NETWORK)
@@ -849,26 +1055,44 @@ class ObjectStoreBackend:
         if status in (200, 201):
             return OK(new_hash)
         if status == 412:
-            # Map by OPERATION, not status (§4.2): CAS-update precondition
-            # failure -> STALE.
-            return self._resolve_cas_conflict(key, head.meta_hash)
+            # H1 Increment 2, Phase 2: this rejection is not necessarily a
+            # conflicting DATA write — it can equally be another caller's
+            # fence-only advance (lock()) for this same key landing first
+            # (owner/fence and data share one ETag). Settle rather than
+            # trust a single immediate re-read, same rationale and same
+            # technique as store/git_backend.py's Phase 2 fix.
+            settled_hash = self._settle_current_hash_after_fence_loss(key, expected_hash)
+            return STALE(settled_hash)
         if status == 403:
             return ERROR(ErrorKind.PERMISSION)
         if 500 <= status < 600:
             return ERROR(ErrorKind.TIMEOUT_AFTER_COMMIT)
         return ERROR(ErrorKind.CONFLICT_UNKNOWN)
 
-    def _resolve_cas_conflict(self, key: str, fallback_hash: Optional[str]) -> WriteResult:
-        try:
-            head = self._client.head(key)
-        except (_PreSendNetworkError, _PostSendAckLostError, _ObjectStoreTransportError):
-            # Still definitely STALE per §4.2 ("CAS-update precondition
-            # failure -> STALE") — only the reported current_hash detail is
-            # best-effort here.
-            return STALE(fallback_hash)
-        if head is None:
-            return STALE(None)
-        return STALE(head.meta_hash)
+    def _settle_current_hash_after_fence_loss(self, key: str, expected_hash: str) -> Optional[str]:
+        """See module docstring's "SETTLING A LOST FENCE RACE". Polls the
+        canonical envelope, bounded by `_FENCE_LOSS_SETTLE_MAX_S`, for as
+        long as it shows a fence has been allocated (`owner_fence`) that no
+        write has yet consumed (`last_accepted_fence`) — i.e. a write is
+        still owed and may land at any moment — returning the moment either
+        the logical hash changes or nothing is left pending."""
+        deadline = time.monotonic() + self._FENCE_LOSS_SETTLE_MAX_S
+        current_hash = expected_hash
+        while True:
+            try:
+                env = self._read_envelope(key)
+            except (ValueError, _PreSendNetworkError, _PostSendAckLostError, _ObjectStoreTransportError):
+                break
+            current_hash = env.version_hash if env is not None else None
+            if current_hash != expected_hash:
+                return current_hash
+            pending = env is not None and env.owner_fence > env.last_accepted_fence
+            if not pending:
+                return current_hash
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(self._FENCE_LOSS_SETTLE_POLL_S)
+        return current_hash
 
     # -- advisory lock() API (JUDGMENT CALL 6 — NOT the CAS mechanism) --------
 
@@ -880,8 +1104,49 @@ class ObjectStoreBackend:
                 raise BackendBusyError(f"key {key!r} is locked")
             token = _new_token()
             expiry = now + ttl_s
+            new_fence = self._advance_durable_fence(key, token, expiry)
             self._locks[key] = (token, expiry)
-            return Lock(key=key, token=token, expiry_epoch=expiry)
+            return Lock(key=key, token=token, expiry_epoch=expiry, fence=new_fence)
+
+    def _advance_durable_fence(self, key: str, token: str, expiry: float) -> int:
+        """Durable fence allocation via the canonical envelope's native CAS
+        (If-None-Match for a brand-new key's PHANTOM, If-Match to advance an
+        existing envelope's owner fields) — bounded retry on a 412 (a
+        genuinely concurrent lock()/write() by this or another caller moved
+        the object first)."""
+        for _attempt in range(self._FENCE_RETRY_ATTEMPTS):
+            try:
+                env = self._read_envelope(key)
+            except ValueError:
+                raise BackendBusyError(f"lock({key!r}): existing object is not a KnoKeep envelope")
+            except (_PreSendNetworkError, _PostSendAckLostError, _ObjectStoreTransportError) as e:
+                raise BackendBusyError(f"lock({key!r}): read failed: {e}") from e
+
+            if env is None:
+                new_fence = 1
+                envelope = _encode_envelope(token, expiry, new_fence, 0, None, b"")
+                precondition: Dict[str, str] = {"If-None-Match": "*"}
+            else:
+                new_fence = max(env.owner_fence, env.last_accepted_fence) + 1
+                envelope = _encode_envelope(
+                    token, expiry, new_fence, env.last_accepted_fence, env.version_hash, env.body,
+                )
+                precondition = {"If-Match": env.etag}
+
+            try:
+                status, _ = self._client.put(key, envelope, precondition=precondition, meta_hash="")
+            except (_PreSendNetworkError, _PostSendAckLostError) as e:
+                raise BackendBusyError(f"lock({key!r}): fence PUT failed: {e}") from e
+            if status in (200, 201):
+                return new_fence
+            if status == 412:
+                continue  # lost the race; re-read and retry
+            raise BackendBusyError(f"lock({key!r}): unexpected status {status} advancing fence")
+
+        raise BackendBusyError(
+            f"lock({key!r}): fence allocation did not converge after "
+            f"{self._FENCE_RETRY_ATTEMPTS} attempts"
+        )
 
     def unlock(self, lock: Lock) -> bool:
         with self._lock_mutex:
@@ -902,8 +1167,37 @@ class ObjectStoreBackend:
             token, expiry = existing
             if token != lock.token or expiry <= time.time():
                 return False
-            self._locks[lock.key] = (token, time.time() + ttl_s)
+            new_expiry = time.time() + ttl_s
+            self._locks[lock.key] = (token, new_expiry)
+            self._renew_durable_fence(lock.key, token, new_expiry)
             return True
+
+    def _renew_durable_fence(self, key: str, token: str, new_expiry: float) -> None:
+        """Best-effort: extend the canonical envelope's owner_expiry (fence
+        unchanged) to match a renewed advisory lock. Bounded retry on a 412;
+        gives up silently (renew() itself already reports the advisory-lock
+        success it determined) rather than raising."""
+        for _attempt in range(self._FENCE_RETRY_ATTEMPTS):
+            try:
+                env = self._read_envelope(key)
+            except (ValueError, _PreSendNetworkError, _PostSendAckLostError, _ObjectStoreTransportError):
+                return
+            if env is None or env.owner_token != token:
+                return  # nothing to extend, or already superseded
+            new_envelope = _encode_envelope(
+                token, new_expiry, env.owner_fence, env.last_accepted_fence, env.version_hash, env.body,
+            )
+            try:
+                status, _ = self._client.put(
+                    key, new_envelope, precondition={"If-Match": env.etag}, meta_hash=(env.version_hash or "")
+                )
+            except (_PreSendNetworkError, _PostSendAckLostError):
+                return
+            if status in (200, 201):
+                return
+            if status == 412:
+                continue
+            return
 
 
 def _new_token() -> str:

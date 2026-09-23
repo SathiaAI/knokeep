@@ -90,10 +90,18 @@ def test_c1_stale_reject_real_412(backend):
     assert r1.current_hash == r0.new_hash
     assert backend.read("k1").body == b"hello"
 
-    # Independent oracle: the object in the bucket is untouched.
+    # Independent oracle: the object in the bucket is untouched. H1
+    # Increment 2, Phase 2: the stored object is now a KnoKeep fence
+    # envelope (owner/fence state + logical hash live in the body, not S3
+    # metadata — see store/objectstore.py's module docstring), so the raw
+    # oracle body is decoded the same way before comparing the logical
+    # content.
+    from store.objectstore import _decode_envelope
+
     oc = oracle_client()
     obj = oc.get_object(Bucket=backend._client.bucket_name, Key="k1")
-    assert obj["Body"].read() == b"hello"
+    _header, oracle_body = _decode_envelope(obj["Body"].read())
+    assert oracle_body == b"hello"
 
 
 # ---------------------------------------------------------------------------
@@ -120,21 +128,24 @@ def test_c2_create_collision_real_412(backend):
 
 
 # ---------------------------------------------------------------------------
-# Single HEAD captures both metadata-hash AND ETag (contract §4.2)
+# Exactly one GET per non-racing CAS-update (H1 Increment 2, Phase 2:
+# ownership/fence state now lives in the envelope body, so the CAS decision
+# reads the object via GET, not HEAD — see store/objectstore.py's module
+# docstring, "CAS DECISION COST"). fenced_ctx() itself also issues one GET
+# (inside lock()'s fence advance), so the assertion counts from AFTER that.
 # ---------------------------------------------------------------------------
 
 
-def test_cas_update_issues_exactly_one_head(backend):
-    r0 = gate.persist(backend, "single-head", b"v0", ctx=create_ctx(), doc_type="system_state")
+def test_cas_update_issues_exactly_one_get(backend):
+    r0 = gate.persist(backend, "single-get", b"v0", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
 
-    before = backend._client.head_count
-    r1 = gate.persist(
-        backend, "single-head", b"v1", ctx=fenced_ctx(backend, "single-head", r0.new_hash), doc_type="system_state"
-    )
+    ctx = fenced_ctx(backend, "single-get", r0.new_hash)
+    before = backend._client.get_count
+    r1 = gate.persist(backend, "single-get", b"v1", ctx=ctx, doc_type="system_state")
     assert isinstance(r1, OK)
-    after = backend._client.head_count
-    assert after - before == 1, "a CAS-update must issue exactly one HEAD (contract §4.2)"
+    after = backend._client.get_count
+    assert after - before == 1, "a non-racing CAS-update must issue exactly one GET (contract §4.2)"
 
 
 def test_head_result_carries_both_meta_hash_and_etag(backend):
@@ -406,18 +417,27 @@ def test_generation_monotonicity_rejects_non_increasing_update(backend):
     assert backend.read("lease/x").body == make_generation_header(6) + b"holder=dave"
 
 
-def test_generation_check_only_reads_when_generation_present(backend):
-    """The extra GET for generation monotonicity (JUDGMENT CALL 4) must NOT
-    fire for STATE doc types (no generation header, no monotonicity rule)."""
-    r0 = gate.persist(backend, "state/x", b"plain content", ctx=create_ctx(), doc_type="system_state")
+def test_generation_check_costs_no_extra_get(backend):
+    """H1 Increment 2, Phase 2: generation monotonicity (residual JUDGMENT
+    CALL 4) now reads the CURRENT envelope's own logical body, already in
+    hand from the one GET the CAS decision itself requires — so a
+    generation-BEARING write (doc_type="lease") costs exactly the same one
+    GET as a STATE (no-generation) write, never a second one (unlike Phase
+    0/1, where the generation check was a deliberate extra GET)."""
+    r0 = gate.persist(
+        backend, "lease/gen-get-count", make_generation_header(1) + b"holder=alice",
+        ctx=create_ctx(), doc_type="lease",
+    )
     assert isinstance(r0, OK)
 
+    ctx = fenced_ctx(backend, "lease/gen-get-count", r0.new_hash)
     before = backend._client.get_count
     r1 = gate.persist(
-        backend, "state/x", b"plain content v2", ctx=fenced_ctx(backend, "state/x", r0.new_hash), doc_type="system_state"
+        backend, "lease/gen-get-count", make_generation_header(2) + b"holder=bob",
+        ctx=ctx, doc_type="lease",
     )
     assert isinstance(r1, OK)
-    assert backend._client.get_count == before, "no generation header -> no extra GET"
+    assert backend._client.get_count - before == 1, "generation check must not cost an extra GET"
 
 
 # ---------------------------------------------------------------------------
@@ -519,7 +539,10 @@ def test_read_raises_on_transport_failure(backend, monkeypatch):
     def _boom(*a, **kw):
         raise _PreSendNetworkError("simulated")
 
-    monkeypatch.setattr(backend._client, "get", _boom)
+    # H1 Increment 2, Phase 2: read() now goes through get_with_etag() (it
+    # needs the envelope body AND could in principle need the ETag), not
+    # get() — patch the method read() actually calls.
+    monkeypatch.setattr(backend._client, "get_with_etag", _boom)
     with pytest.raises(ObjectStoreBackendError):
         backend.read("anything")
 

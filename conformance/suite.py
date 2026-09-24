@@ -219,9 +219,19 @@ def test_c1_stale_write_reject_race(backend):
     final = backend.read("race1")
     assert final.body == bodies[winner_index]
     assert final.version_hash == oks[0].new_hash
-    # No STALE result may report a current_hash other than the true winner's.
+    # Every STALE loser's current_hash must be the true winner's hash -- EXCEPT
+    # on the git backend, where the owner-approved single-re-read simplification
+    # of _settle_current_hash_after_fence_loss (D-008, 2026-09-24) makes it
+    # best-effort: git has no global mutex, so a loser may re-read the head
+    # before the winner's commit lands (-> the pre-race base). The safety
+    # invariants above (exactly one OK, final == winner) are unchanged, and the
+    # caller reconciles a lagging hash on STALE (contract §7). fake/local/
+    # object-store still provide the strong guarantee.
+    from store.git_backend import GitBackend
+    allowed = ({oks[0].new_hash, base_hash} if isinstance(backend, GitBackend)
+               else {oks[0].new_hash})
     for s in stales:
-        assert s.current_hash == oks[0].new_hash
+        assert s.current_hash in allowed
 
 
 # ---------------------------------------------------------------------------

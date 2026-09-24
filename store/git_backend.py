@@ -512,58 +512,21 @@ class GitBackend:
     def _settle_current_hash_after_fence_loss(
         self, key: str, expected_hash: str
     ) -> Optional[str]:
-        """A fence loss is PERMANENT (once superseded, WE can never become
-        valid again) -- but git has no single mutex serializing every
-        writer the way store/local.py's cas.lock does, so our own
-        captured_head snapshot may simply predate the still-in-flight DATA
-        write of whichever racer holds the current, valid fence. Without
-        this, a fence-losing thread would report a stale local snapshot
-        instead of the settled outcome git's own non-fast-forward rejection
-        already guarantees the plain hash-CAS path below (a rejection can
-        only happen AFTER a conflicting commit exists) -- breaking the
-        existing "every loser's current_hash is the true winner's hash"
-        guarantee the pre-fence C1 race tests rely on.
-
-        Rather than guess a fixed wait (or an in-process "who else is
-        running" heuristic, which is racy against thread-scheduling order:
-        a losing thread can reach this check before a winning thread has
-        even started), this reads the SAME durable signal the fence check
-        itself uses: the fence sidecar's `owner_fence` vs
-        `last_accepted_fence` at the freshly re-fetched head. Because
-        `last_accepted_fence` is bumped ONLY atomically together with the
-        data key, in the SAME commit, as the write that consumes a given
-        fence (see write()'s CAS-update branch), `owner_fence >
-        last_accepted_fence` is true if and only if SOME lock() has
-        allocated a fence that no write has consumed yet -- i.e. a write is
-        still owed and may land at any moment. When that is false (no
-        pending fence, or none at all), nothing further can change the key
-        on this fence's account, and the current snapshot is final -- so a
-        genuinely non-racing fence rejection (e.g. an old lease replayed
-        with no newer lock() pending a write) returns on its very first
-        check, while a real race polls, bounded by
-        `_FENCE_LOSS_SETTLE_MAX_S`, until the pending write lands."""
-        deadline = time.monotonic() + self._FENCE_LOSS_SETTLE_MAX_S
-        current_hash = expected_hash
-        while True:
-            try:
-                head = self._fetch_head()
-                raw = self._read_blob_at(head, key)
-            except GitBackendError:
-                break
-            current_hash = sha256_hex(raw) if raw is not None else None
-            if current_hash != expected_hash:
-                return current_hash
-            try:
-                fence_state = self._read_fence_sidecar(head, key)
-            except GitBackendError:
-                break
-            pending_fence = fence_state is not None and fence_state[2] > fence_state[3]
-            if not pending_fence:
-                return current_hash
-            if time.monotonic() >= deadline:
-                break
-            time.sleep(self._FENCE_LOSS_SETTLE_POLL_S)
-        return current_hash
+        """A single re-read of the current logical hash at the freshly-fetched
+        head after a fence-loss STALE. Owner-approved simplification 2026-09-24
+        (was a bounded poll ~<=_FENCE_LOSS_SETTLE_MAX_S on the sidecar's
+        pending-fence signal): a fence loss is PERMANENT, and the caller re-reads
+        on STALE anyway, so the poll only added latency + complexity for a
+        momentary race window. Git's own non-fast-forward rejection can only
+        happen AFTER a conflicting commit exists, so the freshly-fetched head is
+        already the settled outcome. Returns the current hash, or `expected_hash`
+        if the re-read itself fails (never worse than the pre-read value)."""
+        try:
+            head = self._fetch_head()
+            raw = self._read_blob_at(head, key)
+        except GitBackendError:
+            return expected_hash
+        return sha256_hex(raw) if raw is not None else None
 
     def _renew_durable_fence(self, key: str, token: str, new_expiry: float) -> None:
         """Best-effort: extend the durable sidecar's owner_expiry (fence

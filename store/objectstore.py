@@ -1070,29 +1070,17 @@ class ObjectStoreBackend:
         return ERROR(ErrorKind.CONFLICT_UNKNOWN)
 
     def _settle_current_hash_after_fence_loss(self, key: str, expected_hash: str) -> Optional[str]:
-        """See module docstring's "SETTLING A LOST FENCE RACE". Polls the
-        canonical envelope, bounded by `_FENCE_LOSS_SETTLE_MAX_S`, for as
-        long as it shows a fence has been allocated (`owner_fence`) that no
-        write has yet consumed (`last_accepted_fence`) — i.e. a write is
-        still owed and may land at any moment — returning the moment either
-        the logical hash changes or nothing is left pending."""
-        deadline = time.monotonic() + self._FENCE_LOSS_SETTLE_MAX_S
-        current_hash = expected_hash
-        while True:
-            try:
-                env = self._read_envelope(key)
-            except (ValueError, _PreSendNetworkError, _PostSendAckLostError, _ObjectStoreTransportError):
-                break
-            current_hash = env.version_hash if env is not None else None
-            if current_hash != expected_hash:
-                return current_hash
-            pending = env is not None and env.owner_fence > env.last_accepted_fence
-            if not pending:
-                return current_hash
-            if time.monotonic() >= deadline:
-                break
-            time.sleep(self._FENCE_LOSS_SETTLE_POLL_S)
-        return current_hash
+        """A SINGLE re-read of the canonical envelope's current logical hash
+        after a fence-loss STALE. Owner-approved simplification 2026-09-24
+        (was a bounded poll ~<=_FENCE_LOSS_SETTLE_MAX_S): the caller re-reads on
+        STALE anyway, so the poll only added a latency ceiling + complexity for a
+        momentary race window. Returns the current hash, or `expected_hash` if
+        the re-read itself fails (never a value worse than the pre-read one)."""
+        try:
+            env = self._read_envelope(key)
+        except (ValueError, _PreSendNetworkError, _PostSendAckLostError, _ObjectStoreTransportError):
+            return expected_hash
+        return env.version_hash if env is not None else None
 
     # -- advisory lock() API (JUDGMENT CALL 6 — NOT the CAS mechanism) --------
 

@@ -109,7 +109,16 @@ def test_c1_two_concurrent_writers_exactly_one_ok_other_stale(tmp_path):
     stales = [r for r in results if isinstance(r, STALE)]
     assert len(oks) == 1, results
     assert len(stales) == 1, results
-    assert stales[0].current_hash == oks[0].new_hash
+    # Final committed state is unambiguously the winner (the safety property).
+    assert backend.read("k1").version_hash == oks[0].new_hash
+    # STALE.current_hash is BEST-EFFORT after the owner-approved 2026-09-24
+    # simplification of _settle_current_hash_after_fence_loss to a single
+    # re-read (D-008): git has no global mutex, so a loser may re-read the head
+    # before the winner's commit lands. It is therefore either the winner's hash
+    # or the pre-race base; the caller reconciles on STALE (contract §7), so a
+    # momentary lag self-corrects. Only the immediate "loser hash == winner hash"
+    # convenience was relaxed, never the fence rejection or the final state.
+    assert stales[0].current_hash in (oks[0].new_hash, base_hash)
 
     winner_index = results.index(oks[0])
     winner_body = b"writer-0" if winner_index == 0 else b"writer-1"
@@ -146,9 +155,14 @@ def test_c1_eight_way_race_exactly_one_ok(tmp_path):
     assert len(oks) == 1, results
     assert len(stales) == n - 1
     final = backend.read("race")
-    assert final.version_hash == oks[0].new_hash
+    assert final.version_hash == oks[0].new_hash        # final state = winner (safety)
+    # STALE.current_hash is best-effort after the owner-approved single re-read
+    # simplification (D-008, 2026-09-24): a git loser may re-read before the
+    # winner's commit lands, so each is either the winner's hash or the pre-race
+    # base -- a momentary lag the caller reconciles away on STALE (contract §7).
+    # The fence rejection + final winner are unchanged.
     for s in stales:
-        assert s.current_hash == oks[0].new_hash
+        assert s.current_hash in (oks[0].new_hash, base_hash)
 
 
 # ---------------------------------------------------------------------------

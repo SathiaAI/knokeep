@@ -1,12 +1,15 @@
 """Tests for the H1 Increment 1 skill-side conflict protocol
 (bounded_cas_reread_reapply) in skill/knokeep_state.py.
 
-Races are simulated deterministically by monkeypatching the module-level
-_persist() to inject a competing write between a flush call's read and its
-own persist attempt. The injected competitor only fires on writes to the
-STATE doc (kind == "state"), never on the conflict-park or journal writes the
-protocol itself performs — so the simulation models a real racing writer
-without perturbing the code-under-test's own persistence.
+H1 Increment 2 (D-006/D-007): the skill now HOLDS a per-key advisory lease
+across read->write, so same-doc writers SERIALIZE and a stale-base writer
+PARKS its edit for review (never auto-merged, never lost). Races are therefore
+simulated deterministically by committing a competing write BEFORE the loser's
+flush (a pre-lease competitor via _direct_section_write) so the loser reads an
+already-advanced doc under its lease and parks; retry-exhaustion is simulated by
+monkeypatching _persist to force STALE on the state overwrite. The Increment-1
+mid-write injection no longer applies: while a writer holds the lease, no
+competitor can interpose on the same key.
 """
 import json
 import pathlib
@@ -44,52 +47,68 @@ def _die_payload(exc_info):
     return json.loads(str(exc_info.value))
 
 
-def test_disjoint_sections_both_succeed_via_reapply(tmp_path, monkeypatch):
+def test_disjoint_section_stale_base_parks(tmp_path):
+    """D-007 serialize+park: under the held lease, a writer editing a DIFFERENT
+    section with a STALE base no longer auto-merges — it parks (never lost).
+    Increment-1 auto-merged this; held-lease serialization + the F1 guard make
+    the safe choice to park a never-observed base."""
     store = str(tmp_path)
     project = "proj-disjoint"
     r0 = ks.flush_state(store, project, "## Active State\n\n## Notes\n\n")
 
-    real_persist = ks._persist
-    done = {"v": False}
+    # Competitor commits "Notes" first (pre-lease). The loser edits the DISJOINT
+    # "Active State" but with the now-stale r0 base -> parks, does not merge.
+    _direct_section_write(ks._persist, store, project, "Notes",
+                          "notes-from-writer2", r0["version_hash"])
 
-    def hijacked(backend, key, kind, raw_bytes, expected_hash):
-        if not done["v"] and kind == "state":
-            done["v"] = True
-            # A concurrent writer commits to a DIFFERENT section first.
-            _direct_section_write(real_persist, store, project, "Notes",
-                                   "notes-from-writer2", r0["version_hash"])
-        return real_persist(backend, key, kind, raw_bytes, expected_hash)
-
-    monkeypatch.setattr(ks, "_persist", hijacked)
-
-    result = ks.flush_state(store, project, "state=running",
-                             expect_hash=r0["version_hash"], section="Active State")
-    assert result["ok"] is True
+    with pytest.raises(SystemExit) as exc:
+        ks.flush_state(store, project, "state=running",
+                        expect_hash=r0["version_hash"], section="Active State")
+    payload = _die_payload(exc)
+    assert payload["reason"] == "conflict_parked"
 
     backend = ks._backend(store)
     blob = backend.read(ks._key(project, "state"))
     fm, body = ks.parse(blob.body.decode("utf-8"))
-    assert ks._get_section(body, "Active State")[2].strip() == "state=running"
+    # Competitor's Notes intact; loser's Active State NOT applied, parked verbatim.
     assert ks._get_section(body, "Notes")[2].strip() == "notes-from-writer2"
+    assert ks._get_section(body, "Active State")[2].strip() == ""
+    assert backend.read(payload["conflict_key"]).body.decode("utf-8") == "state=running"
 
 
-def test_same_section_conflict_is_parked_not_lost(tmp_path, monkeypatch):
+def test_disjoint_section_current_base_succeeds(tmp_path):
+    """The complement: a writer editing a section with the CURRENT base still
+    succeeds under the held lease — serialization does not block legitimate
+    sequential edits, it only parks stale-base ones."""
+    store = str(tmp_path)
+    project = "proj-disjoint-ok"
+    r0 = ks.flush_state(store, project, "## Active State\n\n## Notes\n\n")
+
+    # Writer 1 commits Notes; writer 2 re-reads the CURRENT hash and edits the
+    # disjoint Active State -> succeeds (no conflict, no park).
+    h1 = _direct_section_write(ks._persist, store, project, "Notes",
+                               "notes-1", r0["version_hash"])
+    result = ks.flush_state(store, project, "state=running",
+                             expect_hash=h1, section="Active State")
+    assert result["ok"] is True
+
+    backend = ks._backend(store)
+    blob = backend.read(ks._key(project, "state"))
+    _, body = ks.parse(blob.body.decode("utf-8"))
+    assert ks._get_section(body, "Active State")[2].strip() == "state=running"
+    assert ks._get_section(body, "Notes")[2].strip() == "notes-1"
+    assert list(backend.list(project + "/conflicts/")) == []
+
+
+def test_same_section_conflict_is_parked_not_lost(tmp_path):
     store = str(tmp_path)
     project = "proj-same-section"
     r0 = ks.flush_state(store, project, "## Active State\n\n## Notes\n\n")
 
-    real_persist = ks._persist
-    done = {"v": False}
-
-    def hijacked(backend, key, kind, raw_bytes, expected_hash):
-        if not done["v"] and kind == "state":
-            done["v"] = True
-            # A concurrent writer commits to the SAME section first.
-            _direct_section_write(real_persist, store, project, "Active State",
-                                   "winner-content", r0["version_hash"])
-        return real_persist(backend, key, kind, raw_bytes, expected_hash)
-
-    monkeypatch.setattr(ks, "_persist", hijacked)
+    # A concurrent writer commits to the SAME section first (pre-lease), so the
+    # loser reads an already-advanced doc under its held lease and must park.
+    _direct_section_write(ks._persist, store, project, "Active State",
+                          "winner-content", r0["version_hash"])
 
     with pytest.raises(SystemExit) as exc:
         ks.flush_state(store, project, "loser-content",
@@ -121,31 +140,22 @@ def test_same_section_conflict_is_parked_not_lost(tmp_path, monkeypatch):
     assert "loser-content" not in jtext
 
 
-def test_whole_doc_stale_is_parked_not_resubmitted(tmp_path, monkeypatch):
+def test_whole_doc_stale_is_parked_not_resubmitted(tmp_path):
     store = str(tmp_path)
     project = "proj-whole-doc"
     r0 = ks.flush_state(store, project, "v0")
 
-    real_persist = ks._persist
-    done = {"v": False}
+    # Competing whole-doc writer commits first (pre-lease) using r0's base.
+    backend2 = ks._backend(store)
+    key2 = ks._key(project, "state")
+    blob = backend2.read(key2)
+    fm, _ = ks.parse(blob.body.decode("utf-8"))
+    fm = dict(fm); fm["revision"] = int(fm.get("revision", 0)) + 1; fm["updated"] = ks.now()
+    res = ks._persist(backend2, key2, "state", ks._bytes(fm, "winner-doc"), r0["version_hash"])
+    assert isinstance(res, ks.OK)
 
-    def hijacked(backend, key, kind, raw_bytes, expected_hash):
-        if not done["v"] and kind == "state":
-            done["v"] = True
-            # Competing whole-doc writer commits first, using the same base hash.
-            backend2 = ks._backend(store)
-            key2 = ks._key(project, "state")
-            blob = backend2.read(key2)
-            fm, _ = ks.parse(blob.body.decode("utf-8"))
-            fm = dict(fm)
-            fm["revision"] = int(fm.get("revision", 0)) + 1
-            fm["updated"] = ks.now()
-            res = real_persist(backend2, key2, "state", ks._bytes(fm, "winner-doc"), r0["version_hash"])
-            assert isinstance(res, ks.OK)
-        return real_persist(backend, key, kind, raw_bytes, expected_hash)
-
-    monkeypatch.setattr(ks, "_persist", hijacked)
-
+    # Loser flushes whole-doc with the now-stale r0 hash -> parks (single CAS
+    # attempt, never blindly resubmitted).
     with pytest.raises(SystemExit) as exc:
         ks.flush_state(store, project, "loser-doc", expect_hash=r0["version_hash"])
     payload = _die_payload(exc)
@@ -166,18 +176,20 @@ def test_retry_exhaustion_is_parked(tmp_path, monkeypatch):
     r0 = ks.flush_state(store, project, "## Active State\n\n## Notes\n\n")
 
     real_persist = ks._persist
-    state_calls = {"n": 0}
+    state_overwrites = {"n": 0}
 
-    def hijacked(backend, key, kind, raw_bytes, expected_hash):
-        if kind == "state":
-            state_calls["n"] += 1
-            # Every state attempt: a competitor edits a DIFFERENT section right
-            # before we persist, so our target section never conflicts in
-            # content, but our CAS token is stale every time -> exhaustion.
-            cur_hash = ks._backend(store).read(ks._key(project, "state")).version_hash
-            _direct_section_write(real_persist, store, project, "Notes",
-                                   f"notes-{state_calls['n']}", cur_hash)
-        return real_persist(backend, key, kind, raw_bytes, expected_hash)
+    def hijacked(backend, key, kind, raw_bytes, expected_hash, lease=None):
+        # Under the held lease a same-key competitor cannot interpose mid-hold,
+        # so the retry loop is now driven by repeated fence/CAS loss. Simulate it
+        # deterministically: force every STATE overwrite to STALE so the section
+        # reapply loop exhausts _MAX_CAS_ATTEMPTS and parks the loser verbatim.
+        # Conflict-park creates (expected_hash None) pass through to the real
+        # backend so parking still succeeds.
+        if kind == "state" and expected_hash is not None:
+            state_overwrites["n"] += 1
+            cur = backend.read(key)
+            return ks.STALE(cur.version_hash if cur else None)
+        return real_persist(backend, key, kind, raw_bytes, expected_hash, lease=lease)
 
     monkeypatch.setattr(ks, "_persist", hijacked)
 
@@ -186,7 +198,7 @@ def test_retry_exhaustion_is_parked(tmp_path, monkeypatch):
                         expect_hash=r0["version_hash"], section="Active State")
     payload = _die_payload(exc)
     assert payload["reason"] == "conflict_retry_exhausted"
-    assert state_calls["n"] == ks._MAX_CAS_ATTEMPTS
+    assert state_overwrites["n"] == ks._MAX_CAS_ATTEMPTS
 
     backend = ks._backend(store)
     blob = backend.read(ks._key(project, "state"))
@@ -359,31 +371,23 @@ def test_bootstrap_surfaces_parked_conflicts(tmp_path):
     assert len(b1["conflicts"]) == 1
 
 
-def test_target_last_section_reapplies_despite_trailing_newline(tmp_path, monkeypatch):
-    """CodeRabbit 4077457587: when the target is the LAST section, a competing
-    write to an EARLIER section can shift only the target's trailing separator
-    newlines. _section_eq must treat that as 'unchanged' so the target reapplies
-    instead of false-parking."""
+def test_target_last_section_current_base_succeeds(tmp_path):
+    """Editing the LAST section with the CURRENT base succeeds under the held
+    lease even after an earlier section changed. (Increment-1 exercised the
+    trailing-newline reapply path here; under serialize+park a stale base would
+    park instead, so this now covers the current-base success case. The
+    _section_eq trailing-newline tolerance is unit-tested in
+    test_section_eq_semantics.)"""
     store = str(tmp_path)
     project = "proj-target-last"
     r0 = ks.flush_state(store, project, "## Active State\n\n## Notes\n\n")
 
-    real_persist = ks._persist
-    done = {"v": False}
-
-    def hijacked(backend, key, kind, raw_bytes, expected_hash):
-        if not done["v"] and kind == "state":
-            done["v"] = True
-            # Competing writer commits to the EARLIER section first.
-            _direct_section_write(real_persist, store, project, "Active State",
-                                   "active-from-writer2", r0["version_hash"])
-        return real_persist(backend, key, kind, raw_bytes, expected_hash)
-
-    monkeypatch.setattr(ks, "_persist", hijacked)
-
-    # Target is the LAST section, "Notes".
+    # An earlier section changes first; the target writer re-reads the CURRENT
+    # hash and edits the LAST section "Notes" -> succeeds.
+    h1 = _direct_section_write(ks._persist, store, project, "Active State",
+                               "active-from-writer2", r0["version_hash"])
     result = ks.flush_state(store, project, "notes=target",
-                             expect_hash=r0["version_hash"], section="Notes")
+                             expect_hash=h1, section="Notes")
     assert result["ok"] is True
 
     backend = ks._backend(store)

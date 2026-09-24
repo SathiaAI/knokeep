@@ -14,13 +14,14 @@ validation (identifier shape, no-newline metadata) stays skill-side. The bootstr
 out-of-band store audit enumerates via backend.list()/read() and re-scans each blob through
 store.gate (content-based: reject non-utf-8/secret-bearing blobs). knokeep_secretgate retired."""
 import sys, os, re, json, datetime, argparse
-import hashlib, random, time
+import hashlib, random, time, contextlib
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
 sys.path.insert(0, _ROOT)   # store package (parent) — the shared V2 engine
 from store import gate
 from store.local import LocalBackend
+from store.backend import BackendBusyError
 from store.types import OK, STALE, EXISTS, ERROR, ErrorKind
 from store.config import default_store_root
 from store.context import create_ctx, overwrite_ctx
@@ -104,18 +105,55 @@ def _bytes(fm, body):
     _validate_fm(fm)
     return dump(fm, body).encode("utf-8")
 
-def _persist(backend, key, kind, raw_bytes, expected_hash):
-    """Unchanged external signature (expected_hash: Optional[str]) — kept
-    exactly as-is so existing monkeypatches (tests/test_h1_conflict.py) keep
-    working unmodified. Internally builds the now-required OperationContext
-    (H1 Increment 2, Phase 0): create-only when expected_hash is None,
-    otherwise a CAS-update carrying a real (but not yet fence-enforced)
-    advisory lease acquired-and-released immediately around this call."""
+_LEASE_TTL_S = 30  # advisory-lease TTL for the read->compute->persist critical
+                   # section (D-006). That section is milliseconds — well under
+                   # the TTL — so the lease is never held across I/O or a user
+                   # turn and needs no renewal/heartbeat (panel refinement:
+                   # "hold only for that key's persist critical section").
+
+
+@contextlib.contextmanager
+def _hold(backend, key):
+    """Acquire this key's advisory lease and HOLD it across the caller's
+    read->compute->persist critical section (D-006 / checklist #16), releasing
+    it in a finally. LocalBackend.unlock is ownership-conditional (it releases
+    only if OUR token still owns and the TTL has not elapsed), so an expired
+    writer can never release a successor's lease. Raises BackendBusyError if the
+    key is currently held by another writer; the caller treats that as one
+    bounded retry, never an unbounded spin (checklist #11)."""
+    lease = backend.lock(key, ttl_s=_LEASE_TTL_S)
+    try:
+        yield lease
+    finally:
+        try:
+            backend.unlock(lease)
+        except Exception:
+            pass
+
+
+def _persist(backend, key, kind, raw_bytes, expected_hash, lease=None):
+    """Single write door (store.gate.persist) with the required OperationContext.
+
+    - expected_hash is None -> CreateOnly: a create physically cannot clobber, so
+      no lease is needed (D-005; C2 first-writer-wins).
+    - expected_hash set + `lease` given -> Overwrite carrying the HELD lease
+      (D-006 / checklist #16): the runtime caller acquired the lease, read UNDER
+      it, and derived expected_hash from that under-lease read, so the backend
+      enforces the monotonic fence (token + fence) against a lease that was live
+      BEFORE the read — this closes the stale-writer-with-matching-hash hole that
+      the old acquire-then-unlock-then-write pattern left open.
+    - expected_hash set + lease None -> legacy acquire-and-release compatibility
+      for direct callers/tests only. The runtime skill paths
+      (flush_state/flush_log/session_append) always pass a held lease now.
+
+    `lease` is a trailing keyword arg so existing positional 5-arg calls keep
+    working; monkeypatch stubs must accept it (tests/test_h1_conflict.py)."""
     if expected_hash is None:
         ctx = create_ctx()
     else:
-        lease = backend.lock(key, ttl_s=30)
-        backend.unlock(lease)
+        if lease is None:
+            lease = backend.lock(key, ttl_s=_LEASE_TTL_S)
+            backend.unlock(lease)
         ctx = overwrite_ctx(expected_hash, lease)
     return gate.persist(backend, key, raw_bytes, ctx=ctx, doc_type=_DOC_TYPE[kind])
 
@@ -207,73 +245,96 @@ def _flush_doc(kind, store, project, new_content, expect_hash=None, section=None
     attempt = 0
     while attempt < _MAX_CAS_ATTEMPTS:
         attempt += 1
-        blob = backend.read(key)
-        if blob is not None:
-            fm, cur_body = parse(blob.body.decode("utf-8"))
-            if not fm:
-                die(reason=f"malformed {kind} frontmatter")
-            cur_hash = blob.version_hash
-        else:
-            fm, cur_body, cur_hash = None, "", None
-
-        if blob is not None and not expect_hash and attempt == 1:
-            die(reason=("expect_hash required for log update" if kind == "log"
-                        else "expect_hash required for update"), current_hash=cur_hash)
-
-        if section is not None:
-            try:
-                got = _get_section(cur_body, section)
-            except ValueError:
-                _park_conflict(backend, store, project, sess, new_content, section,
-                                base_hash, cur_hash, reason="conflict_parked", doc_kind=kind)
-            cur_section = got[2] if got else None
-
-            if not base_established:
-                # F1 fix: the reapply baseline is valid ONLY against the caller's
-                # known version. expect_hash is None only on a first-ever create
-                # (no prior winner to clobber). If the store has already advanced
-                # past expect_hash, we NEVER observed the caller's true section, so
-                # reapplying could silently overwrite whoever advanced it -> PARK.
-                if expect_hash is None or cur_hash == expect_hash:
-                    base_section = cur_section
-                    base_hash = cur_hash
-                    base_established = True
+        # D-006 / checklist #16: HOLD this key's lease across read->compute->
+        # persist so the backend fence protects us from a stale writer whose
+        # content-hash still matches. A fresh lease per attempt (a higher fence)
+        # is the "re-acquire on retry" path. `park` defers any conflict-parking
+        # until AFTER the lease is released, so only ONE key is ever locked at a
+        # time (checklist #5 — no nested locks, no self-deadlock).
+        park = None
+        try:
+            with _hold(backend, key) as lease:
+                blob = backend.read(key)
+                if blob is not None:
+                    fm, cur_body = parse(blob.body.decode("utf-8"))
+                    if not fm:
+                        die(reason=f"malformed {kind} frontmatter")
+                    cur_hash = blob.version_hash
                 else:
-                    _park_conflict(backend, store, project, sess, new_content, section,
-                                    expect_hash, cur_hash, reason="conflict_parked", doc_kind=kind)
-            elif not _section_eq(cur_section, base_section):
-                _park_conflict(backend, store, project, sess, new_content, section,
-                                base_hash, cur_hash, reason="conflict_parked", doc_kind=kind)
+                    fm, cur_body, cur_hash = None, "", None
 
-            try:
-                new_body = _replace_section(cur_body, section, new_content)
-            except ValueError:
-                _park_conflict(backend, store, project, sess, new_content, section,
-                                base_hash, cur_hash, reason="conflict_parked", doc_kind=kind)
+                if blob is not None and not expect_hash and attempt == 1:
+                    die(reason=("expect_hash required for log update" if kind == "log"
+                                else "expect_hash required for update"), current_hash=cur_hash)
 
-            persist_expect = cur_hash   # always CAS against the version we built upon
-        else:
-            # Whole-doc base is the caller's DECLARED version (what the losing
-            # body was written against), not the winner we happened to read —
-            # preserves conflict lineage so base != current in the record.
-            base_hash = expect_hash
-            new_body = new_content
-            persist_expect = expect_hash if blob is not None else None
+                if section is not None:
+                    try:
+                        got = _get_section(cur_body, section)
+                    except ValueError:
+                        park = (new_content, section, base_hash, cur_hash, "conflict_parked")
+                        break
+                    cur_section = got[2] if got else None
 
-        if blob is not None:
-            out_fm = dict(fm)
-            out_fm["revision"] = int(fm.get("revision", 0)) + 1
-            out_fm["updated"] = now()
-        else:
-            # Legacy metadata preserved per-kind (F7): state carries client, log does not.
-            out_fm = {"schema_version": SCHEMA_VERSION, "project_id": project}
-            if kind == "state":
-                out_fm["client"] = "cowork"
-            out_fm["revision"] = 1
-            out_fm["updated"] = now()
+                    if not base_established:
+                        # F1 fix: the reapply baseline is valid ONLY against the
+                        # caller's known version. expect_hash is None only on a
+                        # first-ever create (no prior winner to clobber). If the
+                        # store already advanced past expect_hash we never observed
+                        # the caller's true section, so reapplying could silently
+                        # overwrite whoever advanced it -> PARK.
+                        if expect_hash is None or cur_hash == expect_hash:
+                            base_section = cur_section
+                            base_hash = cur_hash
+                            base_established = True
+                        else:
+                            park = (new_content, section, expect_hash, cur_hash, "conflict_parked")
+                            break
+                    elif not _section_eq(cur_section, base_section):
+                        park = (new_content, section, base_hash, cur_hash, "conflict_parked")
+                        break
 
-        res = _persist(backend, key, kind, _bytes(out_fm, new_body), persist_expect)
+                    try:
+                        new_body = _replace_section(cur_body, section, new_content)
+                    except ValueError:
+                        park = (new_content, section, base_hash, cur_hash, "conflict_parked")
+                        break
 
+                    persist_expect = cur_hash   # always CAS against the version we built upon
+                else:
+                    # Whole-doc base is the caller's DECLARED version (what the
+                    # losing body was written against), not the winner we happened
+                    # to read — preserves conflict lineage so base != current.
+                    base_hash = expect_hash
+                    new_body = new_content
+                    persist_expect = expect_hash if blob is not None else None
+
+                if blob is not None:
+                    out_fm = dict(fm)
+                    out_fm["revision"] = int(fm.get("revision", 0)) + 1
+                    out_fm["updated"] = now()
+                else:
+                    # Legacy metadata preserved per-kind (F7): state carries
+                    # client, log does not.
+                    out_fm = {"schema_version": SCHEMA_VERSION, "project_id": project}
+                    if kind == "state":
+                        out_fm["client"] = "cowork"
+                    out_fm["revision"] = 1
+                    out_fm["updated"] = now()
+
+                # CreateOnly (persist_expect is None) needs no lease; a fenced
+                # Overwrite carries the HELD lease so write() enforces the fence.
+                res = _persist(backend, key, kind, _bytes(out_fm, new_body),
+                               persist_expect,
+                               lease=(lease if persist_expect is not None else None))
+        except BackendBusyError:
+            # Another writer holds this key's lease. Bounded retry, never an
+            # unbounded spin (checklist #11).
+            if attempt >= _MAX_CAS_ATTEMPTS:
+                break
+            time.sleep(random.uniform(0.01, 0.05) * attempt)
+            continue
+
+        # --- lease released; act on the outcome outside any critical section ---
         if isinstance(res, OK):
             return {"ok": True, "revision": out_fm["revision"], "version_hash": res.new_hash}
 
@@ -292,6 +353,13 @@ def _flush_doc(kind, store, project, new_content, expect_hash=None, section=None
         if attempt >= _MAX_CAS_ATTEMPTS:
             break
         time.sleep(random.uniform(0.01, 0.05) * attempt)
+
+    # A section-mode conflict detected under the lease parks here, AFTER the
+    # lease is released (one key at a time).
+    if park is not None:
+        losing_content, park_section, park_base, park_current, park_reason = park
+        _park_conflict(backend, store, project, sess, losing_content, park_section,
+                        park_base, park_current, reason=park_reason, doc_kind=kind)
 
     _park_conflict(backend, store, project, sess, new_content, section,
                     base_hash, getattr(res, "current_hash", None),
@@ -315,21 +383,35 @@ def session_append(store, project, session_id, client, entry):
     backend = _backend(store)
     jkey = _key(project, "journal", session_id)
     for _ in range(50):                                       # bounded CAS retry: same-session concurrent appends
-        blob = backend.read(jkey)
-        if blob is None:
-            fm = {"schema_version": SCHEMA_VERSION, "project_id": project,
-                  "session_id": session_id, "client": client, "updated": now()}
-            body = "## Journal\n"
-            expect = None
-        else:
-            fm, body = parse(blob.body.decode("utf-8"))
-            fm = fm or {"schema_version": SCHEMA_VERSION, "project_id": project,
-                        "session_id": session_id, "client": client}
-            fm["updated"] = now()
-            body = body or "## Journal\n"
-            expect = blob.version_hash
-        body = body + f"[{now()}] {entry}\n"
-        res = _persist(backend, jkey, "journal", _bytes(fm, body), expect)
+        # D-006 / checklist #16: read the journal and append UNDER a held lease
+        # (a fresh lease per iteration = the re-acquire-on-retry path) so the
+        # fence rejects a stale appender whose content-hash still matches.
+        try:
+            with _hold(backend, jkey) as lease:
+                blob = backend.read(jkey)
+                if blob is None:
+                    fm = {"schema_version": SCHEMA_VERSION, "project_id": project,
+                          "session_id": session_id, "client": client, "updated": now()}
+                    body = "## Journal\n"
+                    expect = None
+                else:
+                    fm, body = parse(blob.body.decode("utf-8"))
+                    fm = fm or {"schema_version": SCHEMA_VERSION, "project_id": project,
+                                "session_id": session_id, "client": client}
+                    fm["updated"] = now()
+                    body = body or "## Journal\n"
+                    expect = blob.version_hash
+                body = body + f"[{now()}] {entry}\n"
+                # CreateOnly (expect is None) needs no lease; an Overwrite append
+                # carries the HELD lease. The whole-doc version_hash stays the CAS
+                # token: under the held lease the fence + hash re-check happen
+                # atomically at write time, which already prevents a lost append,
+                # so no separate tail-hash/sequence precondition is needed (see
+                # decision note in the Phase-3 handoff).
+                res = _persist(backend, jkey, "journal", _bytes(fm, body),
+                               expect, lease=(lease if expect is not None else None))
+        except BackendBusyError:
+            continue                                          # another writer holds the journal lease — bounded retry
         if isinstance(res, OK):
             return {"ok": True, "log": jkey}
         if isinstance(res, ERROR) and res.kind == ErrorKind.SECRET_BLOCKED:

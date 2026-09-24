@@ -13,9 +13,17 @@ of duplicating it here.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from migrate.migrate import FrozenBackend, MigrationReport, SourceFrozenError, migrate
+from migrate.migrate import (
+    FrozenBackend,
+    MigrationReport,
+    SourceFrozenError,
+    migrate,
+    _MIGRATION_LEASE_KEY,
+)
 from store import gate
 from store.fake import FakeBackend
 from store.local import LocalBackend
@@ -249,7 +257,7 @@ def test_planted_secret_aborts_before_any_upload():
     # the planted one in the manifest (two-pass scan-then-copy).
     assert report.keys_copied == 0
     assert report.keys_already_present == 0
-    assert list(target.list("")) == []
+    assert [k for k in target.list("") if k != _MIGRATION_LEASE_KEY] == []
 
 
 def test_custom_scanner_is_additive_defense_in_depth():
@@ -279,7 +287,7 @@ def test_custom_scanner_is_additive_defense_in_depth():
     assert report.status == "aborted"
     assert report.aborted_key == "notes/word"
     assert report.secret_scan_labels == ("contains-banana",)
-    assert list(target.list("")) == []
+    assert [k for k in target.list("") if k != _MIGRATION_LEASE_KEY] == []
 
     # (2) a permissive pre-scanner does NOT let a real secret through --
     # store.gate.persist()'s own mandatory scan still blocks it at write time.
@@ -294,7 +302,7 @@ def test_custom_scanner_is_additive_defense_in_depth():
     report2 = migrate(source2, target2, scanner=_never_flags)
     assert report2.status == "aborted"
     assert report2.aborted_key == "secrets/planted"
-    assert list(target2.list("")) == []
+    assert [k for k in target2.list("") if k != _MIGRATION_LEASE_KEY] == []
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +336,7 @@ def test_secret_shaped_key_name_aborts_before_any_upload_and_key_is_not_leaked()
     # the secret-shaped key name in the manifest.
     assert report.keys_copied == 0
     assert report.keys_already_present == 0
-    assert list(target.list("")) == []
+    assert [k for k in target.list("") if k != _MIGRATION_LEASE_KEY] == []
 
 
 # ---------------------------------------------------------------------------
@@ -559,3 +567,54 @@ def test_report_is_a_migration_report_instance():
     assert report.source_key_count == 0
     assert report.unexpected_target_keys == ()
     assert report.finished_at >= report.started_at
+
+
+# ---------------------------------------------------------------------------
+# H1 Increment 2 / D-008: session-scoped migration lease (mutex + takeover).
+# ---------------------------------------------------------------------------
+
+
+def test_concurrent_migration_refused_when_lease_held(tmp_path):
+    """A second migration must NOT run while a live lease is held on the target
+    (the session-scoped mutex). We simulate a live holder by taking the control
+    lease directly, then migrate() must abort cleanly copying nothing."""
+    source = FakeBackend()
+    _put(source, "proj/system_state", b"the one source note")
+    target = FakeBackend()
+
+    held = target.lock(_MIGRATION_LEASE_KEY, 120.0)  # a live migration holds it
+    try:
+        report = migrate(source, target)
+    finally:
+        target.unlock(held)
+
+    assert report.status == "aborted"
+    assert "lease unavailable" in (report.reason or "")
+    assert report.keys_copied == 0 and report.keys_already_present == 0
+    # The blocked migration copied no DATA (the live holder's lease doc may exist).
+    assert [k for k in target.list("") if k != _MIGRATION_LEASE_KEY] == []
+
+
+def test_migration_rerun_takes_over_released_lease_and_audits_prior_owner(tmp_path):
+    """After a migration finishes (lease released), a later run RE-ACQUIRES the
+    lease (stale/released-owner takeover) and records the prior owner in the
+    control doc for audit (#18 item 8). Both runs succeed; re-run is idempotent
+    (create-only replay skips already-copied keys)."""
+    source = FakeBackend()
+    _put(source, "proj/system_state", b"the one source note")
+
+    target = FakeBackend()
+    r1 = migrate(source, target)
+    assert r1.status == "success" and r1.keys_copied == 1
+
+    doc1 = json.loads(target.read(_MIGRATION_LEASE_KEY).body.decode("utf-8"))
+    assert doc1["status"] == "held" and doc1["took_over_from"] is None
+    owner1 = doc1["owner_id"]
+
+    r2 = migrate(source, target)          # re-run: takes over the released lease
+    assert r2.status == "success"
+    assert r2.keys_copied == 0 and r2.keys_already_present == 1  # idempotent replay
+
+    doc2 = json.loads(target.read(_MIGRATION_LEASE_KEY).body.decode("utf-8"))
+    assert doc2["took_over_from"] == owner1   # audit trail of the prior owner
+    assert doc2["owner_id"] != owner1

@@ -439,3 +439,76 @@ def test_parked_conflict_records_doc_kind(tmp_path):
     backend = ks._backend(store)
     jblob = backend.read(ks._key(project, "journal", "conflicts"))
     assert "doc_kind=state" in jblob.body.decode("utf-8")
+
+
+def test_resolve_conflict_marks_settled_and_survives_replay(tmp_path):
+    """Deferral C: resolving a parked conflict makes bootstrap count it settled,
+    not outstanding; the marker is a durable gate.persist write, so every fresh
+    backend instance (each bootstrap constructs one and replays the journal)
+    still sees it — a raw file delete would have been undone by replay."""
+    store = str(tmp_path)
+    project = "proj-resolve"
+    r0 = ks.flush_state(store, project, "## Active State\n\n## Notes\n\n")
+    _direct_section_write(ks._persist, store, project, "Active State",
+                          "winner", r0["version_hash"])
+    with pytest.raises(SystemExit) as exc:
+        ks.flush_state(store, project, "loser",
+                        expect_hash=r0["version_hash"], section="Active State")
+    conflict_key = _die_payload(exc)["conflict_key"]
+
+    b1 = ks.bootstrap(store, project)
+    assert b1["conflict_count"] == 1 and b1["settled_count"] == 0
+
+    assert ks.resolve_conflict(store, project, conflict_key)["ok"] is True
+
+    b2 = ks.bootstrap(store, project)            # fresh backend + journal replay
+    assert b2["conflict_count"] == 0             # no longer outstanding
+    assert b2["settled_count"] == 1              # counted as settled
+    assert "parked conflict" not in b2["resume_line"]
+    # The parked body itself is retained (resolve records, never deletes).
+    assert ks._backend(store).read(conflict_key) is not None
+
+    # Idempotent: resolving again is a no-op OK.
+    assert ks.resolve_conflict(store, project, conflict_key)["ok"] is True
+    b3 = ks.bootstrap(store, project)
+    assert b3["conflict_count"] == 0 and b3["settled_count"] == 1
+
+
+def test_resolve_conflict_rejects_bad_key(tmp_path):
+    """resolve refuses a key outside this project's conflicts and an unknown
+    (never-parked) key — and writes no marker for either."""
+    store = str(tmp_path)
+    project = "proj-resolve-bad"
+    ks.flush_state(store, project, "## Active State\n\n## Notes\n\n")
+    with pytest.raises(SystemExit) as e1:
+        ks.resolve_conflict(store, project, "other/system_state")
+    assert _die_payload(e1)["reason"] == "invalid_conflict_key"
+    with pytest.raises(SystemExit) as e2:
+        ks.resolve_conflict(store, project, f"{project}/conflicts/never/there-0")
+    assert _die_payload(e2)["reason"] == "unknown_conflict_key"
+    assert list(ks._backend(store).list(project + "/conflict-resolved/")) == []
+
+
+def test_section_body_heading_injection_rejected(tmp_path):
+    """Deferral A: a SECTION body containing a level-2-heading-looking line is
+    rejected up front (it would shift section boundaries on reparse); nothing is
+    parked. A clean body still succeeds; whole-doc writes are exempt."""
+    store = str(tmp_path)
+    project = "proj-inject"
+    r0 = ks.flush_state(store, project, "## Active State\n\n## Notes\n\n")
+
+    with pytest.raises(SystemExit) as exc:
+        ks.flush_state(store, project, "line1\n## Injected\nmore",
+                        expect_hash=r0["version_hash"], section="Active State")
+    assert _die_payload(exc)["reason"] == "section_body_heading_injection"
+    assert list(ks._backend(store).list(project + "/conflicts/")) == []  # nothing parked
+
+    ok = ks.flush_state(store, project, "clean body",
+                        expect_hash=r0["version_hash"], section="Active State")
+    assert ok["ok"] is True
+
+    # Whole-doc writes are the caller's full structure and may contain headings.
+    b = ks.bootstrap(store, project)
+    w = ks.flush_state(store, project, "## Active State\nx\n\n## Notes\ny",
+                       expect_hash=b["version_hash"])
+    assert w["ok"] is True

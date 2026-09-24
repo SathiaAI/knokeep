@@ -236,6 +236,17 @@ def _flush_doc(kind, store, project, new_content, expect_hash=None, section=None
     if expect_hash is not None and not re.fullmatch(r"[0-9a-f]{64}", str(expect_hash)):
         die(reason="invalid_expect_hash", value=str(expect_hash))
 
+    # Deferral A (SAT-1158): a section BODY line that looks like a level-2
+    # heading ("## ...") would shift section boundaries on reparse, letting a
+    # later writer mis-target a section or bleed content across sections.
+    # Increment 1 flattened the section NAME only; here we fail closed on
+    # body-level heading-injection for SECTION-scoped writes (a leaf section's
+    # content is not itself sectioned). Whole-doc writes are the caller's own
+    # full structure (intentional headings), so they are exempt. Fails loud
+    # BEFORE any read/lock/park so a bad body never produces a durable write.
+    if section is not None and _ANY_H2_RE.search(new_content or ""):
+        die(reason="section_body_heading_injection", section=str(section))
+
     base_section = None
     base_hash = None
     base_established = False
@@ -541,9 +552,34 @@ def _park_conflict(backend, store, project, session, losing_content, section,
     except SystemExit:
         journal_recorded = False  # surfaced in the die payload — never silently swallowed
 
+    # Deferral B (SAT-1158): park-noise telemetry. Emit a dedicated durable
+    # event so the dogfood soak can measure how often — and at what scope —
+    # writers park, and decide whether a tighter whole-doc merge is warranted.
+    # decision="park" is its own bucket (never "block"), so it does not pollute
+    # the secret/concurrency block counters in evaluate(). Fail-open (never
+    # blocks or alters the park). No body bytes — labels/keys/hashes only.
+    _event(store, project, "park", "park",
+           {"reason": reason, "doc_kind": doc_kind or "unknown",
+            "scope": "whole_doc" if section is None else "section",
+            "conflict_key": conflict_key})
     die(reason=reason, conflict_key=conflict_key, current_hash=current_hash,
         base_hash=base_hash, doc_kind=doc_kind, journal_recorded=journal_recorded)
 # --- end H1 increment 1 helpers ---------------------------------------------
+
+# --- Deferral C (SAT-1158): conflict resolve / tombstone lifecycle ----------
+# Parked conflict keys accumulate monotonically; bootstrap() kept counting a key
+# even after its edit was reviewed + reapplied, and a raw file delete is undone
+# by LocalBackend's append-only journal replay. A "resolved" marker is therefore
+# itself a durable gate.persist WRITE (survives replay) under a SEPARATE prefix
+# {project}/conflict-resolved/ (which never matches the {project}/conflicts/
+# listing prefix), named by a hex digest of the conflict key so the marker key
+# is short + pure-hex (never entropy-flagged by the gate's KEY scanner).
+
+def _resolved_marker_name(conflict_key):
+    return hashlib.sha256(conflict_key.encode("utf-8")).hexdigest()[:32]
+
+def _resolved_key(project, conflict_key):
+    return f"{project}/conflict-resolved/{_resolved_marker_name(conflict_key)}"
 
 _BENIGN_STORE_FILES = {".ds_store", "thumbs.db", "desktop.ini"}
 
@@ -587,11 +623,18 @@ def bootstrap(store, project):
     vh = sblob.version_hash if sblob else None
     lh = lblob.version_hash if lblob else None
     rev = int(fm["revision"]) if fm.get("revision") else None
-    # Surface any parked conflicts so a resuming session cannot silently miss
-    # a losing writer's work. Each key under {project}/conflicts/ is one parked
-    # body; ASCII marker only (no emoji) so it renders on every console.
-    conflicts = list(backend.list(project + "/conflicts/"))
+    # Surface parked conflicts so a resuming session cannot silently miss a
+    # losing writer's work. Deferral C: subtract those explicitly RESOLVED (a
+    # durable marker under {project}/conflict-resolved/ that survives journal
+    # replay), so conflict_count now means OUTSTANDING (unreviewed) conflicts —
+    # a reviewed+reapplied key stops being counted. Each key under
+    # {project}/conflicts/ is one parked body; ASCII marker only (no emoji).
+    parked = list(backend.list(project + "/conflicts/"))
+    resolved = {name.rsplit("/", 1)[-1]
+                for name in backend.list(project + "/conflict-resolved/")}
+    conflicts = [k for k in parked if _resolved_marker_name(k) not in resolved]
     conflict_count = len(conflicts)
+    settled_count = len(parked) - conflict_count
     resume = f"resuming: {active or '(none)'} / next: {nxt or '(none)'} / v{(vh or '?')[:12]}"
     if conflict_count:
         resume += (f"  [!] {conflict_count} parked conflict(s) - "
@@ -599,7 +642,32 @@ def bootstrap(store, project):
     return {"version_hash": vh, "revision": rev, "log_hash": lh,
             "active": active, "next": nxt,
             "conflicts": conflicts, "conflict_count": conflict_count,
+            "settled_count": settled_count,
             "resume_line": resume}
+
+def resolve_conflict(store, project, conflict_key):
+    """Deferral C: mark a parked conflict RESOLVED with a durable, append-only
+    marker that SURVIVES LocalBackend journal replay (a raw file delete would be
+    undone by replay; a gate.persist write is not). After this, bootstrap()
+    counts the conflict as settled, not outstanding. Idempotent: resolving an
+    already-resolved key is a no-op OK (CreateOnly -> EXISTS)."""
+    _validate_project(project)
+    backend = _backend(store)
+    prefix = project + "/conflicts/"
+    if not isinstance(conflict_key, str) or not conflict_key.startswith(prefix):
+        die(reason="invalid_conflict_key", value=str(conflict_key))
+    if backend.read(conflict_key) is None:
+        die(reason="unknown_conflict_key", value=conflict_key)
+    marker_key = _resolved_key(project, conflict_key)
+    fm = {"schema_version": SCHEMA_VERSION, "project_id": project, "resolved_at": now()}
+    # CreateOnly: first resolve wins; a repeat is EXISTS -> already resolved (OK).
+    res = _persist(backend, marker_key, "conflict", _bytes(fm, "resolved"), None)
+    if isinstance(res, (OK, EXISTS)):
+        return {"ok": True, "resolved": conflict_key, "marker": marker_key}
+    if isinstance(res, ERROR) and res.kind == ErrorKind.SECRET_BLOCKED:
+        die(reasons=list(res.labels))
+    die(reason="resolve_failed",
+        kind=(res.kind.value if isinstance(res, ERROR) else "unknown"))
 
 def rollup(store, project):
     _validate_project(project)
@@ -633,10 +701,14 @@ def evaluate(store):
     block = [r for r in rows if r.get("decision") == "block"]
     error = [r for r in rows if r.get("decision") == "error"]
     boot = [r for r in rows if r.get("op") == "bootstrap"]
+    park = [r for r in rows if r.get("op") == "park"]          # Deferral B: park-noise
     sc = {
         "events": len(rows),
         "writes_allowed": len(allow),
         "blocks_total": len(block),
+        "parks_total": len(park),
+        "whole_doc_parks": sum(1 for r in park if r.get("scope") == "whole_doc"),
+        "section_parks": sum(1 for r in park if r.get("scope") == "section"),
         "secret_blocks": sum(1 for r in block if _has(r, "key") or _has(r, "secret")
                              or _has(r, "token") or _has(r, "private key") or _has(r, "URI")),
         "concurrency_blocks": sum(1 for r in block if _has(r, "stale") or _has(r, "lock_timeout")
@@ -716,10 +788,10 @@ def _entry(a):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["init", "flush-state", "flush-log", "session-append", "bootstrap", "rollup", "eval", "health"])
+    ap.add_argument("cmd", choices=["init", "flush-state", "flush-log", "session-append", "bootstrap", "rollup", "resolve", "eval", "health"])
     ap.add_argument("--store"); ap.add_argument("--project")   # --store optional: defaults to the shared cross-tool root
     ap.add_argument("--session-id"); ap.add_argument("--client", default="cowork")
-    ap.add_argument("--body-file"); ap.add_argument("--entry"); ap.add_argument("--entry-file"); ap.add_argument("--expect-hash"); ap.add_argument("--section")
+    ap.add_argument("--body-file"); ap.add_argument("--entry"); ap.add_argument("--entry-file"); ap.add_argument("--expect-hash"); ap.add_argument("--section"); ap.add_argument("--conflict-key")
     a = ap.parse_args()
     if not a.store:
         a.store = default_store_root()                     # shared cross-tool default (T-4)
@@ -736,6 +808,7 @@ def main():
         elif a.cmd == "session-append": result = session_append(a.store, a.project, a.session_id or _auto_sid(), a.client, _entry(a))
         elif a.cmd == "bootstrap": result = bootstrap(a.store, a.project)
         elif a.cmd == "rollup": result = rollup(a.store, a.project)
+        elif a.cmd == "resolve": result = resolve_conflict(a.store, a.project, a.conflict_key)
     except SystemExit as e:
         _event(a.store, a.project, a.cmd, "block", _labels(e.code))   # observe the block; never alter it
         raise

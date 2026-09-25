@@ -24,14 +24,16 @@ from __future__ import annotations
 
 import subprocess
 import threading
+import time
 import types
 
 import pytest
 
 from store import gate
+from store.backend import Lock
 from store.git_backend import GitBackend, _extract_generation
 from store.types import ERROR, EXISTS, OK, STALE, ErrorKind, sha256_hex
-from tests.ctx_helpers import create_ctx, fenced_ctx
+from tests.ctx_helpers import create_ctx, fenced_ctx, overwrite_ctx
 
 
 def _gen(n: int) -> bytes:
@@ -459,3 +461,111 @@ def test_only_target_keys_blob_mutated(tmp_path):
     blob_a = backend.read("keyA")
     assert blob_a.body == b"a-content"
     assert blob_a.version_hash == r_a.new_hash == sha256_hex(b"a-content")
+
+
+# ---------------------------------------------------------------------------
+# H1 Increment 2, Phase 3: renew() -- advisory lease + durable fence sidecar.
+# GitBackend reads the wall clock directly (time.time()), so expiry is driven
+# with short TTLs and sub-second sleeps rather than an injected clock.
+# ---------------------------------------------------------------------------
+
+
+def _sidecar(backend: GitBackend, key: str):
+    """(owner_token, owner_expiry, owner_fence, last_accepted_fence) at the remote tip."""
+    return backend._read_fence_sidecar(backend._fetch_head(), key)
+
+
+def test_renew_extends_lease_so_write_past_original_expiry_succeeds(tmp_path):
+    backend = _make_backend(tmp_path, "renew-extend")
+    key = "renew-key"
+    r0 = gate.persist(backend, key, b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+
+    lease = backend.lock(key, ttl_s=2.0)
+    original_expiry = lease.expiry_epoch
+    assert backend.renew(lease, ttl_s=30.0) is True
+
+    time.sleep(max(0.0, original_expiry - time.time()) + 0.3)  # past the ORIGINAL expiry, well inside the renewed one
+    assert time.time() > original_expiry
+    r1 = gate.persist(
+        backend, key, b"v1", ctx=overwrite_ctx(r0.new_hash, lease), doc_type="system_state"
+    )
+    assert isinstance(r1, OK), r1
+    assert backend.read(key).body == b"v1"
+    # The accepted write recorded the (unchanged) fence as last_accepted.
+    assert _sidecar(backend, key)[3] == lease.fence
+    assert backend.unlock(lease) is True
+
+
+def test_write_past_expiry_without_renew_is_fence_stale(tmp_path):
+    """Control for the renew test: same timeline, no renew -> the durable
+    fence has lapsed and the CAS-update is refused with reason FENCE."""
+    backend = _make_backend(tmp_path, "renew-control")
+    key = "lapse-key"
+    r0 = gate.persist(backend, key, b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+
+    lease = backend.lock(key, ttl_s=0.4)
+    time.sleep(0.6)
+    r1 = gate.persist(
+        backend, key, b"v1", ctx=overwrite_ctx(r0.new_hash, lease), doc_type="system_state"
+    )
+    assert isinstance(r1, STALE), r1
+    assert r1.reason == "FENCE"
+    assert backend.read(key).body == b"v0"
+
+
+def test_renew_false_for_wrong_released_and_expired_tokens(tmp_path):
+    backend = _make_backend(tmp_path, "renew-false")
+    key = "k"
+
+    # Never-locked key.
+    assert backend.renew(Lock(key="never-locked", token="00" * 16, expiry_epoch=0.0), 5.0) is False
+
+    lease = backend.lock(key, ttl_s=30.0)
+
+    # Wrong token: refused, and the durable sidecar is left exactly as lock() wrote it.
+    wrong = Lock(key=key, token="00" * 16, expiry_epoch=lease.expiry_epoch, fence=lease.fence)
+    assert backend.renew(wrong, ttl_s=5.0) is False
+    assert _sidecar(backend, key) == (lease.token, lease.expiry_epoch, lease.fence, 0)
+
+    # Released token.
+    assert backend.unlock(lease) is True
+    assert backend.renew(lease, ttl_s=5.0) is False
+
+    # Expired token: refused, sidecar expiry not extended.
+    lease2 = backend.lock(key, ttl_s=0.3)
+    time.sleep(0.45)
+    assert backend.renew(lease2, ttl_s=5.0) is False
+    assert _sidecar(backend, key)[1] == lease2.expiry_epoch
+
+
+def test_renew_extends_durable_sidecar_expiry_with_same_fence(tmp_path):
+    backend = _make_backend(tmp_path, "renew-sidecar")
+    key = "fenced"
+    lease = backend.lock(key, ttl_s=30.0)
+
+    before = _sidecar(backend, key)
+    assert before == (lease.token, lease.expiry_epoch, lease.fence, 0)
+
+    t0 = time.time()
+    assert backend.renew(lease, ttl_s=60.0) is True
+    after = _sidecar(backend, key)
+    assert after is not None
+    assert after[0] == lease.token
+    assert after[2] == lease.fence  # fence number unchanged by renew
+    assert after[3] == before[3]
+    assert after[1] > before[1]
+    assert after[1] >= t0 + 60.0
+
+    # A second renew keeps moving expiry forward, still on the same fence.
+    t1 = time.time()
+    assert backend.renew(lease, ttl_s=120.0) is True
+    again = _sidecar(backend, key)
+    assert again[2] == lease.fence
+    assert again[1] >= t1 + 120.0 > after[1]
+
+    # renew() consumed no fence: the next lock() advances by exactly one.
+    assert backend.unlock(lease) is True
+    lease2 = backend.lock(key, ttl_s=1.0)
+    assert lease2.fence == lease.fence + 1

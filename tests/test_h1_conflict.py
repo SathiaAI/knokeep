@@ -512,3 +512,181 @@ def test_section_body_heading_injection_rejected(tmp_path):
     w = ks.flush_state(store, project, "## Active State\nx\n\n## Notes\ny",
                        expect_hash=b["version_hash"])
     assert w["ok"] is True
+
+
+# --- _park_conflict hardening (mutation-testing gaps) ------------------------
+
+def _park_events(store):
+    p = pathlib.Path(store) / ks.EVENTS_DIR / "events.jsonl"
+    if not p.exists():
+        return []
+    lines = [l for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
+    return [(l, json.loads(l)) for l in lines if json.loads(l).get("op") == "park"]
+
+
+def _force_section_park(store, project, losing, session=None):
+    """Winner lands on Active State first; the loser flushes the same section
+    with the stale base and parks. Returns the die() payload."""
+    r0 = ks.flush_state(store, project, "## Active State\n\n## Notes\n\n")
+    _direct_section_write(ks._persist, store, project, "Active State", "winner",
+                          r0["version_hash"])
+    with pytest.raises(SystemExit) as exc:
+        ks.flush_state(store, project, losing, expect_hash=r0["version_hash"],
+                        section="Active State", session=session)
+    return _die_payload(exc)
+
+
+def _force_whole_doc_park(store, project, losing, session=None):
+    """Winner commits a whole-doc update first; the loser's whole-doc flush with
+    the stale base parks. Returns the die() payload."""
+    r0 = ks.flush_state(store, project, "v0")
+    backend = ks._backend(store)
+    k = ks._key(project, "state")
+    fm, _ = ks.parse(backend.read(k).body.decode("utf-8"))
+    fm = dict(fm); fm["revision"] = int(fm.get("revision", 0)) + 1; fm["updated"] = ks.now()
+    res = ks._persist(backend, k, "state", ks._bytes(fm, "winner-doc"), r0["version_hash"])
+    assert isinstance(res, ks.OK)
+    with pytest.raises(SystemExit) as exc:
+        ks.flush_state(store, project, losing, expect_hash=r0["version_hash"], session=session)
+    return _die_payload(exc)
+
+
+# CRLF, a tab, trailing whitespace, non-ASCII, blank line, and NO trailing newline:
+# every one of these is something a normalizing store would silently alter.
+_ODD_BODY = "líne one  \r\nline\ttwo \r\n\r\n  last line without newline"
+
+
+def test_parked_body_is_byte_verbatim_section(tmp_path):
+    """The parked copy is the loser's bytes exactly — not stripped, not
+    newline-normalized, not re-encoded (compare bytes, never .strip())."""
+    store = str(tmp_path)
+    payload = _force_section_park(store, "proj-verbatim-sec", _ODD_BODY)
+    assert payload["reason"] == "conflict_parked"
+    cblob = ks._backend(store).read(payload["conflict_key"])
+    assert cblob.body == _ODD_BODY.encode("utf-8")
+    assert cblob.body.endswith(b"newline")          # no trailing newline was added
+    assert b"\r\n" in cblob.body and b"\t" in cblob.body
+
+
+def test_parked_body_is_byte_verbatim_whole_doc(tmp_path):
+    store = str(tmp_path)
+    payload = _force_whole_doc_park(store, "proj-verbatim-doc", _ODD_BODY)
+    assert payload["reason"] == "conflict_parked"
+    cblob = ks._backend(store).read(payload["conflict_key"])
+    assert cblob.body == _ODD_BODY.encode("utf-8")
+
+
+def test_journal_note_carries_no_raw_session_id_or_body_value(tmp_path):
+    """The conflicts journal note (and the conflict key) name the session and
+    the body only by hex digests: the raw session id and any value from the
+    losing body must never appear, and nothing is written under the raw
+    session's own journal key."""
+    import hashlib
+    import re as _re
+    store = str(tmp_path)
+    project = "proj-journal-hex"
+    sid = "sess-Distinct-Q7x9"                       # valid id, distinctive
+    marker = "marker-value-zq81-distinct"           # gate-safe but unmistakable
+    losing = f"first line\n{marker}\nlast line"
+    payload = _force_section_park(store, project, losing, session=sid)
+    assert payload["reason"] == "conflict_parked"
+    assert payload["journal_recorded"] is True
+
+    backend = ks._backend(store)
+    jtext = backend.read(ks._key(project, "journal", "conflicts")).body.decode("utf-8")
+    assert sid not in jtext
+    assert marker not in jtext and "first line" not in jtext
+    assert backend.read(ks._key(project, "journal", sid)) is None   # no journal under the raw id
+
+    sess_label = hashlib.sha256(sid.encode("utf-8")).hexdigest()[:8]
+    body_label = hashlib.sha256(losing.encode("utf-8")).hexdigest()[:12]
+    assert f"sess={sess_label}" in jtext
+    assert _re.search(r"sess=([0-9a-f]{8})\b", jtext).group(1) == sess_label
+    assert payload["conflict_key"].endswith(f"/{sess_label}-{body_label}")
+    assert payload["conflict_key"] in jtext
+    assert "section=Active State" in jtext
+    # The die() payload itself is labels/hashes only as well.
+    assert sid not in json.dumps(payload) and marker not in json.dumps(payload)
+
+
+def test_park_event_scope_whole_doc(tmp_path):
+    """Deferral B: a whole-document park emits exactly one durable park event
+    with scope=whole_doc, keyed to the parked conflict, carrying no body bytes."""
+    store = str(tmp_path)
+    project = "proj-event-doc"
+    payload = _force_whole_doc_park(store, project, "loser-doc-body", session="sess-ev-doc")
+    events = _park_events(store)
+    assert len(events) == 1
+    line, ev = events[0]
+    assert ev["decision"] == "park" and ev["project"] == project
+    assert ev["scope"] == "whole_doc"
+    assert ev["reason"] == "conflict_parked" and ev["doc_kind"] == "state"
+    assert ev["conflict_key"] == payload["conflict_key"]
+    assert "loser-doc-body" not in line and "sess-ev-doc" not in line
+
+
+def test_park_event_scope_section(tmp_path):
+    """Deferral B: a section-scoped park emits the event with scope=section."""
+    store = str(tmp_path)
+    project = "proj-event-sec"
+    payload = _force_section_park(store, project, "loser-sec-body", session="sess-ev-sec")
+    events = _park_events(store)
+    assert len(events) == 1
+    line, ev = events[0]
+    assert ev["decision"] == "park"
+    assert ev["scope"] == "section"
+    assert ev["reason"] == "conflict_parked" and ev["doc_kind"] == "state"
+    assert ev["conflict_key"] == payload["conflict_key"]
+    assert "loser-sec-body" not in line and "sess-ev-sec" not in line
+
+
+def test_park_event_scope_section_on_retry_exhaustion(tmp_path, monkeypatch):
+    """The exhaustion path parks through the same door: reason differs, scope
+    is still section."""
+    store = str(tmp_path)
+    project = "proj-event-exhaust"
+    r0 = ks.flush_state(store, project, "## Active State\n\n## Notes\n\n")
+    real_persist = ks._persist
+
+    def hijacked(backend, key, kind, raw_bytes, expected_hash, lease=None):
+        if kind == "state" and expected_hash is not None:
+            cur = backend.read(key)
+            return ks.STALE(cur.version_hash if cur else None)
+        return real_persist(backend, key, kind, raw_bytes, expected_hash, lease=lease)
+
+    monkeypatch.setattr(ks, "_persist", hijacked)
+    with pytest.raises(SystemExit) as exc:
+        ks.flush_state(store, project, "loser-active",
+                        expect_hash=r0["version_hash"], section="Active State")
+    payload = _die_payload(exc)
+    events = _park_events(store)
+    assert len(events) == 1
+    _, ev = events[0]
+    assert ev["reason"] == "conflict_retry_exhausted" == payload["reason"]
+    assert ev["scope"] == "section"
+    assert ev["conflict_key"] == payload["conflict_key"]
+
+
+def test_secret_in_losing_body_is_refused_not_parked(tmp_path):
+    """A losing body that contains a secret must NOT be stored anywhere: the
+    park fails loud and distinctly (conflict_body_secret_blocked, labels only),
+    no conflict key exists, no journal note, no park event."""
+    store = str(tmp_path)
+    project = "proj-park-secret"
+    secret = "AKIAIOSFODNN7EXAMPLE"
+    r0 = ks.flush_state(store, project, "## Active State\n\n## Notes\n\n")
+    _direct_section_write(ks._persist, store, project, "Active State", "winner",
+                          r0["version_hash"])
+    with pytest.raises(SystemExit) as exc:
+        ks.flush_state(store, project, f"aws key {secret} here",
+                        expect_hash=r0["version_hash"], section="Active State")
+    payload = _die_payload(exc)
+    assert payload["reason"] == "conflict_body_secret_blocked"
+    assert payload["reasons"]                                  # labels present...
+    assert secret not in str(exc.value)                        # ...the value is not
+    assert payload["base_hash"] == r0["version_hash"]
+
+    backend = ks._backend(store)
+    assert list(backend.list(project + "/conflicts/")) == []
+    assert backend.read(ks._key(project, "journal", "conflicts")) is None
+    assert _park_events(store) == []

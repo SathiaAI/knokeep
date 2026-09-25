@@ -22,7 +22,9 @@ from migrate.migrate import (
     MigrationReport,
     SourceFrozenError,
     migrate,
+    _MIGRATION_HEARTBEAT_EVERY,
     _MIGRATION_LEASE_KEY,
+    _MIGRATION_LEASE_TTL_S,
 )
 from store import gate
 from store.fake import FakeBackend
@@ -618,3 +620,137 @@ def test_migration_rerun_takes_over_released_lease_and_audits_prior_owner(tmp_pa
     doc2 = json.loads(target.read(_MIGRATION_LEASE_KEY).body.decode("utf-8"))
     assert doc2["took_over_from"] == owner1   # audit trail of the prior owner
     assert doc2["owner_id"] != owner1
+
+
+# ---------------------------------------------------------------------------
+# H1 Increment 2 / D-008: PASS-2 heartbeat renew + control-key exclusion.
+# ---------------------------------------------------------------------------
+
+
+class _RenewFailsAfterNBackend(FakeBackend):
+    """A target whose renew() succeeds for the first `ok_renewals` heartbeat
+    calls and then returns False forever -- simulating the migration lease
+    being taken over mid-copy (#18 item 4). Records every renew call so the
+    test can assert the heartbeat cadence and the lock/TTL it was fed."""
+
+    def __init__(self, ok_renewals: int):
+        super().__init__()
+        self._ok_renewals = ok_renewals
+        self.renew_calls = []
+
+    def renew(self, lock, ttl_s):
+        self.renew_calls.append((lock, ttl_s))
+        if len(self.renew_calls) > self._ok_renewals:
+            return False
+        return super().renew(lock, ttl_s)
+
+
+def test_heartbeat_renew_failure_mid_copy_aborts_and_writes_no_further_keys():
+    """The lease is renewed every _MIGRATION_HEARTBEAT_EVERY keys during PASS 2.
+    When a renewal fails (ownership lost), migrate() must abort BEFORE writing
+    the key at that heartbeat boundary: target holds exactly the keys copied
+    before the failed heartbeat, none after, and the report says why."""
+    n_keys = _MIGRATION_HEARTBEAT_EVERY * 2 + 10          # spans two heartbeat boundaries
+    keys = [f"k/{i:03d}" for i in range(n_keys)]          # zero-padded -> sorted == insertion
+    source = FakeBackend()
+    for k in keys:
+        _put(source, k, f"value-{k}".encode())
+
+    target = _RenewFailsAfterNBackend(ok_renewals=1)      # 1st heartbeat ok, 2nd fails
+    report = migrate(source, target)
+
+    boundary = _MIGRATION_HEARTBEAT_EVERY * 2             # index of the key at the failed heartbeat
+    assert report.status == "aborted"
+    assert report.ok is False
+    assert "lease" in report.reason.lower() and "renew" in report.reason.lower()
+    assert report.aborted_key == keys[boundary]
+    assert report.cutover_signaled is False
+    assert report.source_key_count == n_keys
+    assert report.keys_scanned == n_keys                  # PASS 1 completed before any write
+    assert report.keys_copied == boundary
+    assert report.keys_verified == boundary
+    assert report.keys_already_present == 0
+
+    # Exactly the keys before the failed heartbeat landed; nothing at/after it.
+    landed = sorted(k for k in target.list("") if k != _MIGRATION_LEASE_KEY)
+    assert landed == keys[:boundary]
+    for k in keys[boundary:]:
+        assert target.read(k) is None
+    for k in keys[:boundary]:
+        assert target.read(k).body == f"value-{k}".encode()
+
+    # Heartbeat cadence: one renew per boundary crossed (indices 25 and 50),
+    # each on the migration control lease with the lease TTL.
+    assert len(target.renew_calls) == 2
+    for lock, ttl in target.renew_calls:
+        assert lock.key == _MIGRATION_LEASE_KEY
+        assert ttl == _MIGRATION_LEASE_TTL_S
+
+    # Source untouched (frozen).
+    for k in keys:
+        assert source.read(k).body == f"value-{k}".encode()
+
+
+def test_no_heartbeat_below_first_boundary_and_renew_keeps_lease_live():
+    """Below the first heartbeat boundary no renew is issued at all; at exactly
+    one boundary a single successful renew lets the run complete."""
+    source = FakeBackend()
+    for i in range(_MIGRATION_HEARTBEAT_EVERY):           # indices 0..24: no boundary hit
+        _put(source, f"k/{i:03d}", b"v")
+    target = _RenewFailsAfterNBackend(ok_renewals=0)      # ANY renew would fail
+    report = migrate(source, target)
+    assert report.status == "success", report.reason
+    assert target.renew_calls == []
+
+    source2 = FakeBackend()
+    for i in range(_MIGRATION_HEARTBEAT_EVERY + 1):       # index 25 -> one heartbeat
+        _put(source2, f"k/{i:03d}", b"v")
+    target2 = _RenewFailsAfterNBackend(ok_renewals=1)
+    report2 = migrate(source2, target2)
+    assert report2.status == "success", report2.reason
+    assert len(target2.renew_calls) == 1
+    assert report2.keys_copied == _MIGRATION_HEARTBEAT_EVERY + 1
+
+
+def test_control_key_on_source_and_target_is_excluded_from_manifest_and_unexpected():
+    """The reserved migration control key is never migratable data (#18 item 2):
+    when it exists on the SOURCE it is dropped from the source manifest (not
+    scanned, not copied, not counted), and when it pre-exists on the TARGET it
+    is not reported as an unexpected/foreign key. The target's control doc after
+    the run is THIS run's lease doc, not a copy of the source's."""
+    source = FakeBackend()
+    _put(source, "docs/a", b"alpha")
+    _put(source, "docs/b", b"beta")
+    stale_source_doc = json.dumps({"kind": "knokeep-migration-lease",
+                                  "owner_id": "stale-source-owner",
+                                  "status": "held"}, sort_keys=True).encode("utf-8")
+    _put(source, _MIGRATION_LEASE_KEY, stale_source_doc)
+
+    target = FakeBackend()
+    prior_target_doc = json.dumps({"kind": "knokeep-migration-lease",
+                                  "owner_id": "prior-target-owner",
+                                  "status": "held"}, sort_keys=True).encode("utf-8")
+    _put(target, _MIGRATION_LEASE_KEY, prior_target_doc)
+
+    report = migrate(source, target)
+
+    assert report.status == "success", report.reason
+    assert report.source_key_count == 2                   # control key not in manifest
+    assert report.keys_scanned == 2
+    assert report.keys_copied == 2
+    assert report.keys_already_present == 0
+    assert report.keys_verified == 2
+    assert report.unexpected_target_keys == ()            # pre-existing control doc not "unexpected"
+    assert report.aborted_key != _MIGRATION_LEASE_KEY
+
+    # Data landed; the control key on target is this run's own lease doc --
+    # not the source's stale doc, and not the prior target doc either.
+    assert target.read("docs/a").body == b"alpha"
+    assert target.read("docs/b").body == b"beta"
+    ctrl = json.loads(target.read(_MIGRATION_LEASE_KEY).body.decode("utf-8"))
+    assert ctrl["owner_id"] not in ("stale-source-owner", "prior-target-owner")
+    assert ctrl["took_over_from"] == "prior-target-owner"  # audit of the target's prior holder
+    assert target.read(_MIGRATION_LEASE_KEY).body != stale_source_doc
+
+    # Source's own control doc is untouched (frozen).
+    assert source.read(_MIGRATION_LEASE_KEY).body == stale_source_doc

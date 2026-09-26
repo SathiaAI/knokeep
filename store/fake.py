@@ -155,30 +155,22 @@ class FakeBackend:
         k = key.key
 
         with self._mutex:
-            # Ambiguous-outcome faults are applied at the linearization point:
-            # the write may or may not have actually landed, mirroring a real
-            # backend whose ack was lost after (or around) the commit.
-            if self._consume_fault("timeout_after_commit"):
-                # This variant DOES land — exercises the §7 "current ==
-                # intended_new_hash" reconciliation branch.
-                self._store[k] = (raw, new_hash)
-                self._changed.notify_all()
-                return ERROR(ErrorKind.TIMEOUT_AFTER_COMMIT)
-            if self._consume_fault("conflict_unknown"):
-                # This variant does NOT land — exercises the §7 "otherwise"
-                # branch, which must never be reported as STALE.
-                return ERROR(ErrorKind.CONFLICT_UNKNOWN)
-
             current = self._store.get(k)
 
             if expected_hash is None:
                 # Create-only.
                 if current is None:
-                    self._store[k] = (raw, new_hash)
-                    # H1 Increment 2, Phase 1 (C): a fresh create starts the
-                    # key's fence floor at 0.
-                    self._fence.setdefault(k, {})["last_accepted_fence"] = 0
-                    self._changed.notify_all()
+                    def _commit_create() -> None:
+                        self._store[k] = (raw, new_hash)
+                        # H1 Increment 2, Phase 1 (C): a fresh create starts
+                        # the key's fence floor at 0.
+                        self._fence.setdefault(k, {})["last_accepted_fence"] = 0
+                        self._changed.notify_all()
+
+                    fault = self._apply_injected_fault(_commit_create)
+                    if fault is not None:
+                        return fault
+                    _commit_create()
                     return OK(new_hash)
                 _, current_hash = current
                 if current_hash == new_hash:
@@ -201,13 +193,39 @@ class FakeBackend:
                 return STALE(None)
             if current_hash != expected_hash:
                 return STALE(current_hash)
-            self._store[k] = (raw, new_hash)
-            # Commit last_accepted_fence atomically with the body: both are
-            # updated inside this same critical section, under self._mutex,
-            # before the write() call returns.
-            self._fence.setdefault(k, {})["last_accepted_fence"] = precondition_lease.fence
-            self._changed.notify_all()
+
+            def _commit_update() -> None:
+                self._store[k] = (raw, new_hash)
+                # Commit last_accepted_fence atomically with the body: both
+                # are updated inside this same critical section, under
+                # self._mutex, before the write() call returns.
+                self._fence.setdefault(k, {})["last_accepted_fence"] = precondition_lease.fence
+                self._changed.notify_all()
+
+            fault = self._apply_injected_fault(_commit_update)
+            if fault is not None:
+                return fault
+            _commit_update()
             return OK(new_hash)
+
+    def _apply_injected_fault(self, commit) -> Optional[WriteResult]:
+        """Ambiguous-outcome faults are applied at the linearization point --
+        AFTER every precondition (create-only collision, fence ownership,
+        content-hash CAS) has passed, exactly where a real backend's ack
+        would be lost around its commit. A write the backend refuses never
+        reaches this point, so an injected fault can never turn a refused
+        write into one that lands; the fault then stays armed for the next
+        write that does get here. Caller holds self._mutex."""
+        if self._consume_fault("timeout_after_commit"):
+            # This variant DOES land — exercises the §7 "current ==
+            # intended_new_hash" reconciliation branch.
+            commit()
+            return ERROR(ErrorKind.TIMEOUT_AFTER_COMMIT)
+        if self._consume_fault("conflict_unknown"):
+            # This variant does NOT land — exercises the §7 "otherwise"
+            # branch, which must never be reported as STALE.
+            return ERROR(ErrorKind.CONFLICT_UNKNOWN)
+        return None
 
     # Upper bound on how long a fence-losing write() waits for the current
     # fence owner's pending write to land before reporting STALE. Only ever

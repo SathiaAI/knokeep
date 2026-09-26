@@ -24,6 +24,7 @@ import secrets
 import unicodedata
 from typing import Callable, List, Optional, Sequence
 
+from .backend import Lock
 from .context import CreateOnly, OperationContext, Overwrite
 from .types import ERROR, OK, ErrorKind, STALE, EXISTS, WriteResult, sha256_hex
 
@@ -480,35 +481,36 @@ def _is_valid_hash(h: object) -> bool:
     return isinstance(h, str) and _HASH_RE.fullmatch(h) is not None
 
 
-def persist(
-    backend,
-    key: str,
-    raw_bytes: bytes,
+def _is_well_formed_lease(lease: object, key: object) -> bool:
+    return (
+        isinstance(lease, Lock)
+        and lease.key == key
+        and isinstance(lease.token, str)
+        and bool(lease.token)
+        and isinstance(lease.fence, int)
+        and not isinstance(lease.fence, bool)
+        and lease.fence >= 0
+        and isinstance(lease.expiry_epoch, (int, float))
+        and not isinstance(lease.expiry_epoch, bool)
+    )
+
+
+def validate_write(
+    key: object,
+    raw_bytes: object,
     *,
-    ctx: "OperationContext",
-    doc_type: str,
-) -> WriteResult:
-    """The gate's single write entry point (contract §1/§5/§6). Every step
-    happens before any I/O.
-
-    `ctx` (store.context.OperationContext) is now REQUIRED and replaces the
-    old bare `expected_hash: Optional[str]` parameter (H1 Increment 2, Phase
-    0): a `CreateOnly` precondition means create-only (the old
-    `expected_hash=None`); an `Overwrite` precondition carries the
-    CAS-update's `expected_hash` (plus a lease, not yet enforced — fence
-    enforcement is a later phase). This function derives `expected_hash`
-    from `ctx.precondition` and otherwise behaves exactly as before."""
-    # 0. ctx shape: the precondition MUST be exactly one of the two closed
-    # variants. OperationContext is a plain dataclass and Python does not
-    # enforce its annotated union at runtime, so anything else (None, a
-    # look-alike object, a future variant this gate does not know) is
-    # refused before any I/O rather than silently treated as create-only.
-    if not isinstance(ctx, OperationContext) or not isinstance(
-        ctx.precondition, (CreateOnly, Overwrite)
-    ):
-        return ERROR(ErrorKind.INVALID_ARGUMENT)
-    expected_hash = ctx.precondition.expected_hash if isinstance(ctx.precondition, Overwrite) else None
-
+    doc_type: object,
+    expected_hash: Optional[str] = None,
+) -> Optional[ERROR]:
+    """Every pre-I/O check persist() applies to a write's ARGUMENTS (hash
+    shape, doc_type, key shape incl. reserved namespaces, body type/size,
+    doc-type allowlist / generation header, text contract, secret scan of
+    key + body) -- returning the ERROR persist() would return, or None if the
+    write may proceed. Pure: touches no backend. Exposed so a caller that
+    must do side-effecting preparation BEFORE persist() (e.g. the MCP server
+    acquiring the fence lease for a CAS-update) can refuse a malformed
+    request first, instead of advancing a key's durable fence for a write
+    the gate was always going to reject. persist() runs exactly this."""
     # 1. expected_hash shape
     if expected_hash is not None and not _is_valid_hash(expected_hash):
         return ERROR(ErrorKind.INVALID_ARGUMENT)
@@ -551,6 +553,51 @@ def persist(
             if l not in seen:
                 seen.append(l)
         return ERROR(ErrorKind.SECRET_BLOCKED, labels=tuple(seen))
+    return None
+
+
+def persist(
+    backend,
+    key: str,
+    raw_bytes: bytes,
+    *,
+    ctx: "OperationContext",
+    doc_type: str,
+) -> WriteResult:
+    """The gate's single write entry point (contract §1/§5/§6). Every step
+    happens before any I/O.
+
+    `ctx` (store.context.OperationContext) is now REQUIRED and replaces the
+    old bare `expected_hash: Optional[str]` parameter (H1 Increment 2, Phase
+    0): a `CreateOnly` precondition means create-only (the old
+    `expected_hash=None`); an `Overwrite` precondition carries the
+    CAS-update's `expected_hash` (plus a lease, not yet enforced — fence
+    enforcement is a later phase). This function derives `expected_hash`
+    from `ctx.precondition` and otherwise behaves exactly as before."""
+    # 0. ctx shape: the precondition MUST be exactly one of the two closed
+    # variants. OperationContext is a plain dataclass and Python does not
+    # enforce its annotated union at runtime, so anything else (None, a
+    # look-alike object, a future variant this gate does not know) is
+    # refused before any I/O rather than silently treated as create-only.
+    if not isinstance(ctx, OperationContext) or not isinstance(
+        ctx.precondition, (CreateOnly, Overwrite)
+    ):
+        return ERROR(ErrorKind.INVALID_ARGUMENT)
+    expected_hash = None
+    if isinstance(ctx.precondition, Overwrite):
+        expected_hash = ctx.precondition.expected_hash
+        # The carried lease must be a real, well-formed Lock for THIS key:
+        # adapters read its token/fence/key to enforce the fence, so a None
+        # or look-alike lease would otherwise reach backend I/O (and be
+        # refused there as a fence STALE, or raise) instead of the promised
+        # pre-I/O INVALID_ARGUMENT.
+        if not _is_well_formed_lease(ctx.precondition.lease, key):
+            return ERROR(ErrorKind.INVALID_ARGUMENT)
+
+    err = validate_write(key, raw_bytes, doc_type=doc_type, expected_hash=expected_hash)
+    if err is not None:
+        return err
+    raw_bytes = bytes(raw_bytes)
 
     # 6. wrap and call the adapter
     nonce = secrets.token_bytes(16)
@@ -620,6 +667,7 @@ __all__ = [
     "STATE_DOC_TYPES",
     "secret_scan",
     "persist",
+    "validate_write",
     "reconcile",
     "make_generation_header",
 ]

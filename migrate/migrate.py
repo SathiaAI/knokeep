@@ -269,30 +269,68 @@ class _MigrationLease:
         self.took_over_from = took_over_from
         self.last_heartbeat = _monotonic()
 
+    # How many times a fenced control-doc write may re-acquire the fence when
+    # it was refused on FENCE while the doc itself is provably still ours.
+    _FENCE_REACQUIRE_ATTEMPTS = 3
+
     def _write_doc(self, *, status, released_at=None) -> Optional[str]:
         """Fenced CAS-update of the control doc against the hash WE last
         wrote, under the advisory lease we hold. Returns None on success,
-        else the reason the lease must be considered lost."""
-        now = _wall()
-        body = _lease_doc_body(
-            owner_id=self.owner_id, write_id=self.write_id, started_at=self.started_at,
-            status=status, expires_at=now + _MIGRATION_LEASE_TTL_S, heartbeat_at=now,
-            prior_owner=self.prior_owner, took_over_from=self.took_over_from,
-            released_at=released_at,
-        )
-        try:
-            res = gate.persist(self.target, _MIGRATION_LEASE_KEY, body,
-                               ctx=overwrite_ctx(self.doc_hash, self.lock),
-                               doc_type=_MIGRATION_LEASE_DOC_TYPE)
-        except Exception as exc:  # noqa: BLE001 - fail closed: treat as lost
-            return f"control doc write raised: {exc!r}"
-        if isinstance(res, OK):
-            self.doc_hash = res.new_hash
-            return None
-        if isinstance(res, STALE):
-            return ("control doc moved underneath this run (another migration took "
-                    f"the lease; got {res!r})")
-        return f"control doc write failed ({res!r})"
+        else the reason the lease must be considered lost.
+
+        A refusal on FENCE does not by itself mean the lease was lost: on
+        backends whose advisory registry is per process (git/object-store/
+        postgres) a contender that read the control key as absent/expired
+        at the same time we did calls lock() and thereby advances the
+        durable fence past ours, even though it then loses the doc itself
+        (its create-only gets EXISTS / its takeover CAS gets STALE) and
+        never writes again. So: if the doc's current hash is still the one
+        WE last wrote, nobody took the lease -- re-acquire the fence (a
+        fresh lock() supersedes the loser's) and retry, bounded. A doc hash
+        we did not write means another run took over -> lost."""
+        for _attempt in range(self._FENCE_REACQUIRE_ATTEMPTS + 1):
+            now = _wall()
+            body = _lease_doc_body(
+                owner_id=self.owner_id, write_id=self.write_id, started_at=self.started_at,
+                status=status, expires_at=now + _MIGRATION_LEASE_TTL_S, heartbeat_at=now,
+                prior_owner=self.prior_owner, took_over_from=self.took_over_from,
+                released_at=released_at,
+            )
+            try:
+                res = gate.persist(self.target, _MIGRATION_LEASE_KEY, body,
+                                   ctx=overwrite_ctx(self.doc_hash, self.lock),
+                                   doc_type=_MIGRATION_LEASE_DOC_TYPE)
+            except Exception as exc:  # noqa: BLE001 - fail closed: treat as lost
+                return f"control doc write raised: {exc!r}"
+            if isinstance(res, OK):
+                self.doc_hash = res.new_hash
+                return None
+            if not (isinstance(res, STALE) and res.reason == "FENCE"):
+                if isinstance(res, STALE):
+                    return ("control doc moved underneath this run (another migration took "
+                            f"the lease; got {res!r})")
+                return f"control doc write failed ({res!r})"
+            # FENCE: is the doc still ours?
+            try:
+                current = self.target.read(_MIGRATION_LEASE_KEY)
+            except Exception as exc:  # noqa: BLE001
+                return f"control doc re-read raised after a fence refusal: {exc!r}"
+            if current is None or current.version_hash != self.doc_hash:
+                return ("control doc moved underneath this run (another migration took "
+                        f"the lease; got {res!r})")
+            if _attempt == self._FENCE_REACQUIRE_ATTEMPTS:
+                break
+            # Ours, but a losing contender holds the durable fence: re-acquire.
+            try:
+                self.target.unlock(self.lock)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                self.lock = self.target.lock(_MIGRATION_LEASE_KEY, _MIGRATION_LEASE_TTL_S)
+            except Exception as exc:  # noqa: BLE001 - BUSY or backend failure: lost
+                return f"could not re-acquire the migration fence after a fence refusal: {exc!r}"
+        return ("could not re-acquire the migration fence after "
+                f"{self._FENCE_REACQUIRE_ATTEMPTS} attempts")
 
     def heartbeat_if_due(self) -> Optional[str]:
         """Renew when `_MIGRATION_HEARTBEAT_INTERVAL_S` has elapsed since the
@@ -375,6 +413,9 @@ def _acquire_migration_lease(target, owner_id, write_id, started_at):
     except BackendBusyError:
         return None, ("another migration holds a live lease on "
                       f"{_MIGRATION_LEASE_KEY!r} -- refusing to run two migrations at once")
+    except Exception as exc:  # noqa: BLE001 - lock() does I/O on git/object-store/postgres:
+        # fail closed with a report, never raise out of migrate().
+        return None, f"could not acquire the migration lease (lock() raised): {exc!r}"
 
     now = _wall()
     body = _lease_doc_body(
@@ -401,8 +442,19 @@ def _acquire_migration_lease(target, owner_id, write_id, started_at):
             return None, ("another migration took the lease on "
                           f"{_MIGRATION_LEASE_KEY!r} first (control doc {type(res).__name__})")
         return None, f"could not record the migration lease control doc (got {res!r})"
-    return _MigrationLease(target, lock, res.new_hash, owner_id, write_id, started_at,
-                           prior_owner, took_over_from), None
+    lease = _MigrationLease(target, lock, res.new_hash, owner_id, write_id, started_at,
+                            prior_owner, took_over_from)
+    if prior_blob is None:
+        # The create-only write above carries no fence, so it cannot tell
+        # whether a simultaneous contender's lock() advanced the durable
+        # fence past ours before losing the create (EXISTS). Confirm
+        # ownership NOW with a fenced write (re-acquiring the fence if that
+        # is what happened) rather than at the first heartbeat, 40s in.
+        err = lease._write_doc(status="held")
+        if err is not None:
+            lease.release()
+            return None, f"could not confirm the migration lease after creating it: {err}"
+    return lease, None
 
 
 _ROLLBACK_NOTE_SUCCESS = (

@@ -814,3 +814,46 @@ def test_overwrite_lease_is_held_across_persist_and_released_after():
         )
     assert [e[0] for e in backend.events] == ["lock", "unlock"]
     assert "k" not in backend._locks
+
+
+def test_malformed_overwrite_is_refused_before_any_lease_is_taken():
+    """A CAS-update request the gate will reject (bad hash / key / body /
+    doc_type) must not call lock() first: lock() advances the key's durable
+    fence and would supersede a valid lease some other caller still holds."""
+    from mcp.server import _tool_knokeep_write
+    from store.fake import FakeBackend
+    from store.context import overwrite_ctx
+    from store import gate
+
+    class _Recording(FakeBackend):
+        def __init__(self):
+            super().__init__()
+            self.lock_calls = 0
+
+        def lock(self, key, ttl_s):
+            self.lock_calls += 1
+            return super().lock(key, ttl_s)
+
+    backend = _Recording()
+    first = _tool_knokeep_write(backend, {"key": "k", "body": "v1", "doc_type": "system_state"})
+    assert first["status"] == "OK"
+    # Some other caller's still-valid (released-but-unexpired) lease.
+    other = backend.lock("k", ttl_s=30)
+    backend.unlock(other)
+    backend.lock_calls = 0
+
+    bad_requests = [
+        {"key": "k", "body": "v2", "doc_type": "system_state", "expected_hash": "not-a-hash"},
+        {"key": "../k", "body": "v2", "doc_type": "system_state", "expected_hash": first["new_hash"]},
+        {"key": "k", "body": "v2", "doc_type": "lease", "expected_hash": first["new_hash"]},
+        {"key": "k", "body": "AKIAIOSFODNN7EXAMPLE token", "doc_type": "system_state", "expected_hash": first["new_hash"]},
+    ]
+    for args in bad_requests:
+        out = _tool_knokeep_write(backend, args)
+        assert out["status"] == "ERROR", (args, out)
+        assert out["kind"] in ("INVALID_ARGUMENT", "SECRET_BLOCKED"), (args, out)
+    assert backend.lock_calls == 0, "malformed requests must never take (and advance) the fence lease"
+
+    # The other caller's lease is still the fence owner and its write lands.
+    r = gate.persist(backend, "k", b"v2-other", ctx=overwrite_ctx(first["new_hash"], other), doc_type="system_state")
+    assert r.__class__.__name__ == "OK", r

@@ -273,6 +273,15 @@ def _tool_knokeep_write(backend: StoreBackend, args: Mapping[str, Any]) -> Dict[
         result = gate.persist(backend, key, raw_bytes, ctx=create_ctx(), doc_type=doc_type)
         return _write_result_to_dict(result)
 
+    # Refuse a malformed request BEFORE taking the lease: lock() advances the
+    # key's durable fence (and materializes a phantom/sidecar on remote
+    # backends), which would supersede a still-valid lease some other caller
+    # holds -- for a write the gate was going to reject anyway. persist()
+    # re-runs the same checks; this is the pure, side-effect-free copy.
+    err = gate.validate_write(key, raw_bytes, doc_type=doc_type, expected_hash=expected_hash)
+    if err is not None:
+        return _write_result_to_dict(err)
+
     try:
         lease = backend.lock(key, ttl_s=30)
     except BackendBusyError:

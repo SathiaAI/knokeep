@@ -414,3 +414,66 @@ def test_non_reserved_lookalike_keys_still_accepted(key):
     backend = RecordingBackend()
     result = gate.persist(backend, key, b"body", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(result, OK), result
+
+
+# ---------------------------------------------------------------------------
+# An Overwrite must carry a real, well-formed Lock for THIS key; anything else
+# is INVALID_ARGUMENT before any I/O (never a backend-side fence STALE / raise).
+# ---------------------------------------------------------------------------
+
+
+def _bad_leases(key):
+    from store.backend import Lock
+
+    good = Lock(key=key, token="t" * 32, expiry_epoch=4102444800.0, fence=1)
+    return [
+        pytest.param(None, id="None"),
+        pytest.param("lease", id="str"),
+        pytest.param(types.SimpleNamespace(key=key, token="t", expiry_epoch=1.0, fence=1), id="lookalike"),
+        pytest.param(Lock(key="other/key", token="t" * 32, expiry_epoch=4102444800.0, fence=1), id="other-key"),
+        pytest.param(Lock(key=key, token="", expiry_epoch=4102444800.0, fence=1), id="empty-token"),
+        pytest.param(Lock(key=key, token="t" * 32, expiry_epoch=4102444800.0, fence=-1), id="negative-fence"),
+        pytest.param(Lock(key=key, token="t" * 32, expiry_epoch=4102444800.0, fence="1"), id="str-fence"),
+        pytest.param(Lock(key=key, token="t" * 32, expiry_epoch="soon", fence=1), id="str-expiry"),
+        pytest.param(good, id="well-formed"),
+    ]
+
+
+@pytest.mark.parametrize("lease", _bad_leases("docs/k"))
+def test_overwrite_with_malformed_lease_is_invalid_argument_before_io(lease):
+    from store.backend import Lock
+    from store.context import AuthContext, OperationContext, Overwrite
+
+    backend = RecordingBackend()
+    r0 = gate.persist(backend, "docs/k", b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    backend.write_calls = 0
+    ctx = OperationContext(auth=AuthContext(), precondition=Overwrite(r0.new_hash, lease))
+    result = gate.persist(backend, "docs/k", b"v1", ctx=ctx, doc_type="system_state")
+    well_formed = (isinstance(lease, Lock) and lease.key == "docs/k" and lease.token
+                   and lease.fence == 1 and isinstance(lease.expiry_epoch, float))
+    if well_formed:
+        assert isinstance(result, OK) and backend.write_calls == 1  # the stub enforces no fence
+    else:
+        assert isinstance(result, ERROR) and result.kind is ErrorKind.INVALID_ARGUMENT
+        assert backend.write_calls == 0, "malformed lease must be refused before the adapter is called"
+        assert backend.read("docs/k").body == b"v0"
+
+
+def test_validate_write_matches_persist_pre_io_checks():
+    """validate_write() is the pure copy of persist()'s argument checks."""
+    assert gate.validate_write("docs/k", b"body", doc_type="system_state") is None
+    cases = [
+        ("docs/k", b"body", "system_state", "nothex"),           # bad hash
+        ("docs/k", b"body", 7, None),                             # doc_type not str
+        ("../k", b"body", "system_state", None),                  # bad key
+        (".knokeep-fence/x", b"body", "system_state", None),      # reserved key
+        ("docs/k", "str-body", "system_state", None),             # body not bytes
+        ("docs/k", b"no generation", "lease", None),              # non-STATE without generation
+        ("docs/k", b"\x00nul", "system_state", None),             # text contract
+    ]
+    for key, body, doc_type, h in cases:
+        err = gate.validate_write(key, body, doc_type=doc_type, expected_hash=h)
+        assert isinstance(err, ERROR) and err.kind is ErrorKind.INVALID_ARGUMENT, (key, body, doc_type, h)
+    blocked = gate.validate_write("docs/k", b"AKIAIOSFODNN7EXAMPLE token", doc_type="system_state")
+    assert isinstance(blocked, ERROR) and blocked.kind is ErrorKind.SECRET_BLOCKED

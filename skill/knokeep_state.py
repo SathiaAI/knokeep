@@ -244,6 +244,14 @@ def _flush_doc(kind, store, project, new_content, expect_hash=None, section=None
     # content is not itself sectioned). Whole-doc writes are the caller's own
     # full structure (intentional headings), so they are exempt. Fails loud
     # BEFORE any read/lock/park so a bad body never produces a durable write.
+    # The section NAME is interpolated into "## {name}" by _replace_section:
+    # a name carrying a line break would persist a second level-2 heading
+    # (the very boundary ambiguity the body guard below prevents), and an
+    # empty name is not a heading at all. Refuse both before any read/lock.
+    if section is not None and (
+        not isinstance(section, str) or not section.strip() or "\n" in section or "\r" in section
+    ):
+        die(reason="invalid_section_name", section=str(section).replace("\r", " ").replace("\n", " "))
     if section is not None and _ANY_H2_RE.search(new_content or ""):
         die(reason="section_body_heading_injection", section=str(section))
 

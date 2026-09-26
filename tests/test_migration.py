@@ -1032,3 +1032,114 @@ def test_migration_from_objectstore_source_ignores_phantoms():
     assert report.status == "success", report.reason
     assert report.source_key_count == 1 and report.keys_copied == 1
     assert sorted(k for k in target.list("") if k != _MIGRATION_LEASE_KEY) == ["docs/a"]
+
+
+# ---------------------------------------------------------------------------
+# Round-2 review: acquisition races on per-process advisory registries, and
+# fail-closed lock() failures.
+# ---------------------------------------------------------------------------
+
+
+def _objectstore_pair():
+    endpoint, bucket = get_moto_endpoint(), make_bucket()
+
+    def _instance():
+        return ObjectStoreBackend(
+            endpoint=endpoint, bucket=bucket, region=DUMMY_REGION,
+            access_key_id=DUMMY_ACCESS_KEY_ID, secret_access_key=DUMMY_SECRET_ACCESS_KEY,
+        )
+
+    return _instance(), _instance()
+
+
+def test_losing_contender_advancing_the_fence_does_not_kill_the_winners_heartbeat():
+    """Two processes read the control key as absent and both call lock():
+    the LOSER's lock() lands second and holds the durable fence, while the
+    WINNER's unfenced create-only lands the doc. The winner must not abort
+    on its next fenced control-doc write: the doc is provably still its own
+    (hash unchanged), so it re-acquires the fence and carries on."""
+    from migrate.migrate import _MigrationLease, _acquire_migration_lease
+
+    target_a, target_b = _objectstore_pair()
+    lease_a, err = _acquire_migration_lease(target_a, "proc-a", "w-a", time.time())
+    assert err is None
+    doc_hash_after_acquire = lease_a.doc_hash
+
+    # The late loser: its lock() (per-process registry -> succeeds) supersedes
+    # A's durable fence; it then sees the doc held and never writes it.
+    stray = target_b.lock(_MIGRATION_LEASE_KEY, 120.0)
+    assert stray.fence > lease_a.lock.fence
+    assert target_b.read(_MIGRATION_LEASE_KEY).version_hash == doc_hash_after_acquire
+
+    lease_a.last_heartbeat = float("-inf")               # force the heartbeat due
+    assert lease_a.heartbeat_if_due() is None            # recovered, not "lost"
+    assert lease_a.lock.fence > stray.fence              # fence re-acquired past the loser's
+    assert lease_a.doc_hash != doc_hash_after_acquire     # the heartbeat landed
+    doc = json.loads(target_b.read(_MIGRATION_LEASE_KEY).body.decode("utf-8"))
+    assert doc["owner_id"] == "proc-a" and doc["status"] == "held"
+
+    lease_a.release()
+    doc = json.loads(target_b.read(_MIGRATION_LEASE_KEY).body.decode("utf-8"))
+    assert doc["status"] == "released"
+    assert isinstance(lease_a, _MigrationLease)
+
+
+def test_acquisition_confirms_ownership_when_a_loser_took_the_fence_first():
+    """Same race, at acquisition: B's lock() lands between A's lock() and
+    A's create-only. A confirms with a fenced write right after creating the
+    doc, so A still comes out owning both the doc and the fence."""
+    from migrate.migrate import _acquire_migration_lease
+
+    target_a, target_b = _objectstore_pair()
+    real_lock = target_a.lock
+    stray = {}
+
+    def _lock_then_let_b_supersede(key, ttl_s):
+        lock = real_lock(key, ttl_s)
+        if key == _MIGRATION_LEASE_KEY and not stray:
+            stray["lock"] = target_b.lock(_MIGRATION_LEASE_KEY, 120.0)   # B races in
+        return lock
+
+    target_a.lock = _lock_then_let_b_supersede
+    lease_a, err = _acquire_migration_lease(target_a, "proc-a", "w-a", time.time())
+    assert err is None, err
+    assert lease_a.lock.fence > stray["lock"].fence
+    lease_a.last_heartbeat = float("-inf")
+    assert lease_a.heartbeat_if_due() is None
+    # B (the loser) is refused by the durable doc, as before.
+    source = FakeBackend()
+    _put(source, "docs/a", b"alpha")
+    assert migrate(source, target_b).status == "aborted"
+    lease_a.release()
+
+
+def test_control_doc_taken_by_another_run_is_still_reported_lost():
+    """The recovery only applies while the doc is provably ours: if another
+    run actually took the lease (doc hash changed), a heartbeat reports the
+    loss and does not re-acquire anything."""
+    from migrate.migrate import _acquire_migration_lease
+
+    target_a, target_b = _objectstore_pair()
+    lease_a, err = _acquire_migration_lease(target_a, "proc-a", "w-a", time.time())
+    assert err is None
+    # Simulate a crash-takeover by another run: it locks and rewrites the doc.
+    _plant_control_doc(target_b, owner_id="taker", status="held", expires_at=time.time() + 300)
+    lease_a.last_heartbeat = float("-inf")
+    lost = lease_a.heartbeat_if_due()
+    assert lost is not None and "another migration took the lease" in lost
+    doc = json.loads(target_b.read(_MIGRATION_LEASE_KEY).body.decode("utf-8"))
+    assert doc["owner_id"] == "taker"
+
+
+def test_lock_raising_a_non_busy_error_aborts_with_a_report_not_an_exception():
+    class _LockExplodes(FakeBackend):
+        def lock(self, key, ttl_s):
+            raise RuntimeError("simulated backend I/O failure inside lock()")
+
+    source = FakeBackend()
+    _put(source, "docs/a", b"alpha")
+    target = _LockExplodes()
+    report = migrate(source, target)
+    assert report.status == "aborted"
+    assert "lock() raised" in report.reason and "RuntimeError" in report.reason
+    assert target.read("docs/a") is None and target.read(_MIGRATION_LEASE_KEY) is None

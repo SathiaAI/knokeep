@@ -632,3 +632,60 @@ def test_failed_fence_advance_rolls_back_and_leaves_connection_usable(monkeypatc
         backend.unlock(lease2)
     finally:
         backend._conformance_teardown()
+
+
+def test_renew_returns_false_once_another_instance_superseded_the_durable_owner():
+    """The advisory registry is per PostgresBackend instance, so a second
+    instance's lock() on the same key replaces the durable owner_token. The
+    first instance's renew() must then report False (contract: succeeds ONLY
+    if this token still owns), not extend a lease it no longer holds."""
+    schema = "knokeep_renew2_" + uuid.uuid4().hex[:20]
+    a = PostgresBackend(dict(_PG_CONNECT_KWARGS), schema=schema)
+    b = PostgresBackend(dict(_PG_CONNECT_KWARGS), schema=schema, run_probe=False)
+    try:
+        r0 = gate.persist(a, "renew/x", b"v0", ctx=create_ctx(), doc_type="system_state")
+        assert isinstance(r0, OK)
+        lease_a = a.lock("renew/x", ttl_s=30)
+        assert a.renew(lease_a, ttl_s=30) is True          # still the durable owner
+
+        lease_b = b.lock("renew/x", ttl_s=30)              # supersedes A's durable ownership
+        assert lease_b.fence > lease_a.fence
+        assert a.renew(lease_a, ttl_s=30) is False, "renew must not report success for a superseded lease"
+        # And the superseded lease cannot write.
+        r1 = gate.persist(a, "renew/x", b"v1", ctx=overwrite_ctx(r0.new_hash, lease_a), doc_type="system_state")
+        assert isinstance(r1, STALE) and r1.reason == "FENCE"
+        # The real owner can.
+        r2 = gate.persist(b, "renew/x", b"v1", ctx=overwrite_ctx(r0.new_hash, lease_b), doc_type="system_state")
+        assert isinstance(r2, OK)
+    finally:
+        b._conformance_teardown()
+        a._conformance_teardown()
+
+
+def test_fence_table_name_never_narrows_the_accepted_table_name_range():
+    """A store table name that was valid before the fence table existed (up
+    to 63 chars) must still construct; the derived fence identifier stays
+    within 63 chars and is stable + distinct for long names sharing a prefix."""
+    from store.postgres import _fence_table_name
+
+    assert _fence_table_name("store") == "store_fence"
+    long_a = "t" * 63
+    long_b = "t" * 62 + "u"
+    fa, fb = _fence_table_name(long_a), _fence_table_name(long_b)
+    assert len(fa) <= 63 and len(fb) <= 63
+    assert fa.endswith("_fence") and fb.endswith("_fence")
+    assert fa != fb, "long names sharing a 57-char prefix must not share a fence table"
+    assert _fence_table_name(long_a) == fa  # stable
+
+    schema = "knokeep_longname_" + uuid.uuid4().hex[:20]
+    backend = PostgresBackend(dict(_PG_CONNECT_KWARGS), schema=schema, table=long_a)
+    try:
+        assert backend._fence_table == fa
+        r0 = gate.persist(backend, "k", b"v0", ctx=create_ctx(), doc_type="system_state")
+        assert isinstance(r0, OK)
+        lease = backend.lock("k", ttl_s=30)
+        backend.unlock(lease)
+        r1 = gate.persist(backend, "k", b"v1", ctx=overwrite_ctx(r0.new_hash, lease), doc_type="system_state")
+        assert isinstance(r1, OK)
+    finally:
+        backend._conformance_teardown()

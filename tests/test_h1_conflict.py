@@ -723,3 +723,20 @@ def test_session_append_waits_out_a_briefly_held_journal_lease(tmp_path):
     assert elapsed >= 0.3, "must have waited for the holder rather than exhausting instantly"
     body = ks._backend(store).read(jkey).body.decode("utf-8")
     assert "entry landed after the holder released" in body
+
+
+@pytest.mark.parametrize("bad_section", ["Missing\n## Injected", "Active State\r\n## X", "", "   ", "a\rb"])
+def test_section_name_with_line_breaks_or_empty_is_rejected(tmp_path, bad_section):
+    """The section NAME is interpolated into '## {name}'; a multi-line name
+    would persist a second level-2 heading (the boundary ambiguity the body
+    guard prevents), so it is refused up front, before any read/lock/park."""
+    store = str(tmp_path)
+    project = "proj-secname"
+    r0 = ks.flush_state(store, project, "## Active State\n\n## Notes\n\n")
+    with pytest.raises(SystemExit) as exc:
+        ks.flush_state(store, project, "clean body", expect_hash=r0["version_hash"], section=bad_section)
+    assert _die_payload(exc)["reason"] == "invalid_section_name"
+    backend = ks._backend(store)
+    assert list(backend.list(project + "/conflicts/")) == []
+    body = backend.read(ks._key(project, "state")).body.decode("utf-8")
+    assert body.count("\n## ") + body.startswith("## ") == 2, body  # still exactly the two headings

@@ -149,6 +149,7 @@ JUDGMENT CALLS (numbered, also called out inline at point of use):
 """
 from __future__ import annotations
 
+import hashlib
 import re
 import threading
 import time
@@ -213,6 +214,26 @@ def _validate_identifier(name: str, what: str) -> str:
     return name
 
 
+_FENCE_TABLE_SUFFIX = "_fence"
+_PG_IDENTIFIER_MAX = 63
+
+
+def _fence_table_name(table: str) -> str:
+    """The companion fence table's identifier, derived from the (already
+    validated) store table name WITHOUT narrowing the accepted range: any
+    table name that was valid before the fence table existed (up to 63
+    chars) must still construct. When `<table>_fence` would exceed
+    Postgres's 63-char identifier limit, the table name is truncated and
+    disambiguated with a stable 8-hex digest of the full name, so two
+    long names that share a prefix never share a fence table."""
+    candidate = f"{table}{_FENCE_TABLE_SUFFIX}"
+    if len(candidate) <= _PG_IDENTIFIER_MAX:
+        return candidate
+    digest = hashlib.sha256(table.encode("utf-8")).hexdigest()[:8]
+    keep = _PG_IDENTIFIER_MAX - len(_FENCE_TABLE_SUFFIX) - 1 - len(digest)
+    return _validate_identifier(f"{table[:keep]}_{digest}{_FENCE_TABLE_SUFFIX}", "fence table")
+
+
 # Postgres SQLSTATEs that mean "couldn't get the row lock / ran past our own
 # timeout" — definitely-not-committed, never an outcome-unknown kind
 # (JUDGMENT CALL 3).
@@ -256,7 +277,7 @@ class PostgresBackend:
         # (conformance/suite.py's C7 calls backend.lock() before any write)
         # -- a companion table with no such constraint is the only way to
         # satisfy both without weakening that existing test.
-        self._fence_table = _validate_identifier(f"{self._table}_fence", "fence table")
+        self._fence_table = _fence_table_name(self._table)
         self._qualified_fence_table = f'"{self._schema}"."{self._fence_table}"'
 
         self._local = threading.local()
@@ -845,6 +866,7 @@ class PostgresBackend:
                     """,
                     (new_expiry, lock.key, token),
                 )
+                matched = cur.rowcount
                 conn.commit()
             except pg8000.exceptions.DatabaseError:
                 try:
@@ -854,6 +876,13 @@ class PostgresBackend:
                 return False
             except (pg8000.exceptions.InterfaceError, OSError):
                 self._reset_conn()
+                return False
+            if matched != 1:
+                # The durable owner is no longer this token: another
+                # PostgresBackend instance/process lock()'d the key and
+                # superseded this lease (the advisory registry is per
+                # instance, so only the fence row can tell). Contract:
+                # renew "succeeds ONLY if this token still owns".
                 return False
             self._locks[lock.key] = (token, new_expiry)
             return True

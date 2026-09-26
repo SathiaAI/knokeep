@@ -906,3 +906,31 @@ def test_migration_into_every_backend(backend):
     assert report2.status == "success", report2.reason
     assert report2.keys_copied == 0
     assert report2.keys_already_present == len(keys_and_bodies)
+
+
+def test_injected_ambiguous_outcome_never_bypasses_the_fence_or_cas(backend):
+    """Fault injection simulates a lost ack AROUND a commit -- it must never
+    turn a write the backend would have refused (superseded fence, stale
+    hash, create-only collision) into one that lands. The fault applies only
+    after the same preconditions as a normal write have passed, and an
+    unreached fault stays armed for the next write that does reach it."""
+    _require_fault_injection(backend)
+    r0 = gate.persist(backend, "amb6", b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    ctx_old = fenced_ctx(backend, "amb6", r0.new_hash)
+    ctx_new = fenced_ctx(backend, "amb6", r0.new_hash)  # supersedes ctx_old's fence
+
+    backend.inject_timeout_after_commit(1)
+    r1 = gate.persist(backend, "amb6", b"stale-writer", ctx=ctx_old, doc_type="system_state")
+    assert isinstance(r1, STALE) and r1.reason == "FENCE", r1
+    assert backend.read("amb6").body == b"v0", "a fence-refused write must not land via an injected fault"
+
+    backend.inject_conflict_unknown(1)
+    r2 = gate.persist(backend, "amb6", b"dup", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r2, EXISTS), r2
+
+    # Both faults are still armed: the next write that passes its checks
+    # consumes the timeout_after_commit (lands + reports outcome-unknown).
+    r3 = gate.persist(backend, "amb6", b"winner", ctx=ctx_new, doc_type="system_state")
+    assert isinstance(r3, ERROR) and r3.kind is ErrorKind.TIMEOUT_AFTER_COMMIT, r3
+    assert backend.read("amb6").body == b"winner"

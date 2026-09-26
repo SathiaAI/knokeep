@@ -454,8 +454,18 @@ class GitBackend:
         name = hashlib.sha256(key.encode("utf-8")).hexdigest()
         return f"{self._FENCE_NAMESPACE}{name}.fence"
 
-    def _is_internal_path(self, key: str) -> bool:
+    def _is_sidecar_path(self, key: str) -> bool:
         return self._SIDECAR_RE.match(key) is not None
+
+    def _is_internal_blob(self, commit_sha: Optional[str], path: str) -> bool:
+        """True only for a canonical sidecar path whose blob PARSES as a
+        sidecar. A pre-reservation logical key that happened to use that
+        exact shape holds user data and stays visible (the same distinction
+        `_advance_durable_fence` makes before it refuses to overwrite)."""
+        if not self._is_sidecar_path(path):
+            return False
+        raw = self._read_blob_at(commit_sha, path)
+        return raw is not None and self._parse_fence_sidecar(raw) is not None
 
     def _encode_fence_sidecar(
         self, owner_token: Optional[str], owner_expiry: float, owner_fence: int,
@@ -472,6 +482,10 @@ class GitBackend:
         raw = self._read_blob_at(commit_sha, self._fence_sidecar_path(key))
         if raw is None:
             return None
+        return self._parse_fence_sidecar(raw)
+
+    @staticmethod
+    def _parse_fence_sidecar(raw: bytes) -> Optional[Tuple[Optional[str], float, int, int]]:
         try:
             token_s, expiry_s, owner_fence_s, last_accepted_s = raw.decode("ascii").split(" ")
         except (UnicodeDecodeError, ValueError):
@@ -696,12 +710,12 @@ class GitBackend:
         # PERMISSION/NETWORK/CORRUPTION raise (contract §2); GitBackendError
         # covers all three here (no finer classification is derivable from
         # a git subprocess's stderr in general).
-        if self._is_internal_path(key):
-            return None  # fence sidecars are not logical keys (see _FENCE_NAMESPACE)
         head = self._fetch_head()
         raw = self._read_blob_at(head, key)
         if raw is None:
             return None
+        if self._is_sidecar_path(key) and self._parse_fence_sidecar(raw) is not None:
+            return None  # a fence sidecar is not a logical key (see _FENCE_NAMESPACE)
         return Blob(body=raw, version_hash=sha256_hex(raw))
 
     def list(self, prefix: str) -> Iterator[str]:
@@ -711,7 +725,7 @@ class GitBackend:
         proc = self._run(["ls-tree", "-r", "--name-only", head], check=True)
         names = [n for n in proc.stdout.decode("utf-8", "replace").splitlines() if n]
         return iter(sorted(
-            n for n in names if n.startswith(prefix) and not self._is_internal_path(n)
+            n for n in names if n.startswith(prefix) and not self._is_internal_blob(head, n)
         ))
 
     def write(

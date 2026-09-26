@@ -472,7 +472,10 @@ def _section(b, h):
 # followed by whitespace (so "### Sub" never matches — after the 2nd '#' a
 # 3rd '#' is not whitespace), anchored to the start of a line so "##" text
 # appearing mid-paragraph is never mistaken for a heading.
-_ANY_H2_RE = re.compile(r"(?m)^##(?=[ \t]|\r?$)")
+# CommonMark allows an ATX heading to be indented by up to three spaces, so
+# the guard and _get_section agree on that too (a body line "   ## X" is a
+# heading to every Markdown consumer and must be treated as one here).
+_ANY_H2_RE = re.compile(r"(?m)^[ ]{0,3}##(?=[ \t]|\r?$)")
 
 
 def _get_section(body, heading):
@@ -485,7 +488,7 @@ def _get_section(body, heading):
     The heading match tolerates a trailing CR (CRLF docs) so it never fails
     to find an existing heading and blindly appends a duplicate.
     """
-    hre = re.compile(rf"(?m)^##[ \t]+{re.escape(heading)}[ \t]*\r?$")
+    hre = re.compile(rf"(?m)^[ ]{{0,3}}##[ \t]+{re.escape(heading)}[ \t]*\r?$")
     matches = list(hre.finditer(body))
     if not matches:
         return None

@@ -756,10 +756,14 @@ class PostgresBackend:
             try:
                 conn = self._get_conn()
                 cur = conn.cursor()
-                cur.execute(
-                    f"SELECT version_hash FROM {self._qualified_table} WHERE key = %s", (key,)
-                )
-                srow = cur.fetchone()
+                # READ ORDER MATTERS: fence row FIRST, store row SECOND. Under
+                # READ COMMITTED each statement has its own snapshot, so the
+                # opposite order can straddle the winner's commit -- hash read
+                # before it (still the pre-race value), fence read after it
+                # (consumed -> "nothing pending") -- and settle on the stale
+                # hash. Reading the fence first means a "not pending"
+                # observation is followed by a hash read that also postdates
+                # the commit that consumed the fence.
                 cur.execute(
                     f"""
                     SELECT owner_fence, last_accepted_fence, owner_expiry
@@ -768,6 +772,10 @@ class PostgresBackend:
                     (key,),
                 )
                 frow = cur.fetchone()
+                cur.execute(
+                    f"SELECT version_hash FROM {self._qualified_table} WHERE key = %s", (key,)
+                )
+                srow = cur.fetchone()
                 conn.commit()  # READ COMMITTED: end the snapshot so the next poll sees new commits
             except pg8000.exceptions.DatabaseError:
                 try:

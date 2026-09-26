@@ -794,6 +794,21 @@ class LocalBackend:
         owner_path = self._fence_owner_path(key)
         current_hash: Optional[str] = expected_hash
         while True:
+            # READ ORDER MATTERS: fence state FIRST, published hash SECOND.
+            # _commit() publishes the data file and THEN records the
+            # consumed fence, so the opposite order could read the old data
+            # file, then a fence already marked consumed ("nothing pending")
+            # and settle on the stale hash. Observing the fence first means
+            # a "not pending" reading is followed by a hash read that
+            # postdates the publish that preceded it.
+            owner = self._read_fence_owner(owner_path)
+            with self._fence_lock:
+                last_accepted = self._last_accepted_fence.get(key, 0)
+            pending = (
+                owner is not None
+                and owner[2] > last_accepted
+                and owner[1] > time.time()
+            )
             try:
                 current_hash = sha256_hex(data_path.read_bytes())
             except FileNotFoundError:
@@ -804,14 +819,6 @@ class LocalBackend:
                 pass
             if current_hash != expected_hash:
                 return current_hash
-            owner = self._read_fence_owner(owner_path)
-            with self._fence_lock:
-                last_accepted = self._last_accepted_fence.get(key, 0)
-            pending = (
-                owner is not None
-                and owner[2] > last_accepted
-                and owner[1] > time.time()
-            )
             if not pending or time.monotonic() >= deadline:
                 return current_hash
             time.sleep(self._FENCE_LOSS_SETTLE_POLL_S)

@@ -694,3 +694,23 @@ def test_legacy_logical_key_under_fence_prefix_stays_visible(tmp_path):
     # Still reserved for new writes.
     r = gate.persist(backend, ".knokeep-fence/notes", b"update", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r, ERROR) and r.kind is ErrorKind.INVALID_ARGUMENT
+
+
+def test_legacy_user_blob_at_canonical_sidecar_path_stays_visible(tmp_path):
+    """Hiding is decided by CONTENT, not path shape: a pre-reservation user
+    blob whose key happens to have the canonical `<sha256>.fence` shape
+    (but is not a sidecar) is still listed and readable, while a real
+    sidecar at another such path is hidden."""
+    backend = _make_backend(tmp_path, "legacy-canonical")
+    r0 = gate.persist(backend, "docs/a", b"a", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    backend.lock("docs/a", ttl_s=30)                                      # real sidecar
+    legacy_path = ".knokeep-fence/" + "ab" * 32 + ".fence"                # canonical shape, user content
+    head = backend._fetch_head()
+    commit = backend._build_commit(head, legacy_path, b"this is not a sidecar, it is user data")
+    ok, rejected, _ = backend._push(commit)
+    assert ok and not rejected
+
+    assert list(backend.list("")) == [legacy_path, "docs/a"]
+    assert backend.read(legacy_path).body == b"this is not a sidecar, it is user data"
+    assert backend.read(backend._fence_sidecar_path("docs/a")) is None

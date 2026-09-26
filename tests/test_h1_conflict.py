@@ -803,3 +803,28 @@ def test_busy_wait_is_bounded_and_then_parks(tmp_path, monkeypatch):
         holder.unlock(lease)
     assert _die_payload(exc)["reason"] == "conflict_retry_exhausted"
     assert len(list(ks._backend(store).list(project + "/conflicts/"))) == 1   # parked, never lost
+
+
+@pytest.mark.parametrize("body", [" ## Indented", "   ## Indented\nmore", "safe\r   ## Indented", "safe\n  ## Indented"])
+def test_section_body_indented_heading_is_rejected(tmp_path, body):
+    """CommonMark lets an ATX heading be indented by up to three spaces; the
+    guard and the section parser both honour that, so an indented heading in
+    a section body is refused like a column-zero one."""
+    store = str(tmp_path)
+    project = "proj-inject-indent"
+    r0 = ks.flush_state(store, project, "## Active State\n\n## Notes\n\n")
+    with pytest.raises(SystemExit) as exc:
+        ks.flush_state(store, project, body, expect_hash=r0["version_hash"], section="Active State")
+    assert _die_payload(exc)["reason"] == "section_body_heading_injection"
+
+
+def test_get_section_and_replace_section_recognize_indented_headings():
+    body = "## A\na\n\n   ## B\nb\n"
+    assert ks._get_section(body, "B")[2].strip() == "b"
+    replaced = ks._replace_section(body, "B", "b2")
+    assert replaced.count("## B") == 1 and "b2" in replaced and "\nb\n" not in replaced
+    # Four spaces is a code block, not a heading (CommonMark), so it is neither
+    # a section nor an injection.
+    code = "## A\na\n    ## not-a-heading\n"
+    assert ks._get_section(code, "not-a-heading") is None
+    assert ks._ANY_H2_RE.search("    ## not-a-heading") is None

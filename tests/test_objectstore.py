@@ -753,9 +753,12 @@ def test_renew_survives_transport_failure_on_durable_reread(backend, monkeypatch
 
 
 # ---------------------------------------------------------------------------
-# H1 Increment 2, Phase 3d: _settle_current_hash_after_fence_loss is a single
-# re-read (owner-approved D-008): winner's current hash after a fence-loss
-# STALE; None for an absent/phantom key; expected_hash if the re-read fails.
+# H1 Increment 2: _settle_current_hash_after_fence_loss is a BOUNDED settle
+# (poll while a newer fence is pending and the hash is unchanged, never past
+# the owner's expiry or _FENCE_LOSS_SETTLE_MAX_S): the winner's current hash
+# after a fence-loss STALE; None for an absent/phantom key; expected_hash if
+# the re-read fails. The C1 race guarantee itself is exercised by
+# conformance/suite.py::test_c1_fence_loss_stale_settles_to_winner_hash.
 # ---------------------------------------------------------------------------
 
 
@@ -1041,3 +1044,135 @@ def test_real_provider_acceptance_deferred():
     assert isinstance(r1, OK)
     r2 = gate.persist(b, key, b"stale-attempt", ctx=fenced_ctx(b, key, r0.new_hash), doc_type="system_state")
     assert isinstance(r2, STALE)
+
+
+# ---------------------------------------------------------------------------
+# Backward compatibility with PRE-ENVELOPE objects (written by the previous
+# adapter as the raw body + x-amz-meta-knokeep-sha256), envelope integrity
+# (header hash verified against the body), and phantom-free listing.
+# ---------------------------------------------------------------------------
+
+
+def _plant_legacy_object(backend: ObjectStoreBackend, key: str, body: bytes) -> None:
+    """Exactly what the pre-envelope adapter wrote: the raw logical body and
+    the sha256 metadata -- via the boto3 oracle, never the adapter."""
+    oracle_client().put_object(
+        Bucket=backend._client.bucket_name, Key=key, Body=body,
+        Metadata={"knokeep-sha256": sha256_hex(body)},
+    )
+
+
+def test_legacy_pre_envelope_object_reads_back_with_its_logical_body(backend):
+    key = "legacy/plain"
+    _plant_legacy_object(backend, key, b"written before the envelope existed")
+    blob = backend.read(key)
+    assert blob is not None
+    assert blob.body == b"written before the envelope existed"
+    assert blob.version_hash == sha256_hex(b"written before the envelope existed")
+    assert list(backend.list("legacy/")) == [key]
+
+
+def test_legacy_pre_envelope_object_is_upgraded_by_first_fenced_write(backend):
+    key = "legacy/upgrade"
+    _plant_legacy_object(backend, key, b"v-legacy")
+    legacy_hash = sha256_hex(b"v-legacy")
+
+    # lock() advances the fence: the object becomes an envelope carrying the
+    # SAME logical value, conditioned on the legacy object's own ETag.
+    lease = backend.lock(key, ttl_s=30.0)
+    backend.unlock(lease)
+    header = _oracle_envelope_header(backend, key)
+    assert header["version_hash"] == legacy_hash and header["owner_token"] == lease.token
+    assert backend.read(key).body == b"v-legacy"
+
+    r1 = gate.persist(backend, key, b"v-new", ctx=overwrite_ctx(legacy_hash, lease), doc_type="system_state")
+    assert isinstance(r1, OK)
+    assert backend.read(key).body == b"v-new"
+    assert backend.read(key).version_hash == r1.new_hash
+
+    # A stale CAS against the pre-upgrade hash is refused like any other.
+    lease2 = backend.lock(key, ttl_s=30.0)
+    backend.unlock(lease2)
+    r2 = gate.persist(backend, key, b"v-stale", ctx=overwrite_ctx(legacy_hash, lease2), doc_type="system_state")
+    assert isinstance(r2, STALE) and r2.current_hash == r1.new_hash
+
+
+def test_legacy_pre_envelope_object_create_only_semantics(backend):
+    key = "legacy/create"
+    _plant_legacy_object(backend, key, b"same")
+    replay = gate.persist(backend, key, b"same", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(replay, OK)  # idempotent create replay (§3)
+    clash = gate.persist(backend, key, b"different", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(clash, EXISTS) and clash.current_hash == sha256_hex(b"same")
+    assert backend.read(key).body == b"same"
+
+
+def test_foreign_object_without_metadata_is_still_corruption_not_data(backend):
+    """A non-envelope object WITHOUT the adapter's sha256 metadata is not a
+    legacy value: it is foreign litter, so read() raises and list() hides it."""
+    key = "foreign/litter"
+    oracle_client().put_object(Bucket=backend._client.bucket_name, Key=key, Body=b"not ours")
+    with pytest.raises(ObjectStoreBackendError):
+        backend.read(key)
+    assert list(backend.list("foreign/")) == []
+
+
+def test_envelope_hash_is_verified_against_body_on_read_and_cas(backend):
+    from store.objectstore import _encode_envelope
+
+    key = "integrity/mismatch"
+    r0 = gate.persist(backend, key, b"honest", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    ctx = fenced_ctx(backend, key, r0.new_hash)
+    header = _oracle_envelope_header(backend, key)
+
+    # Out-of-band: the body changes but the header still claims the old hash.
+    tampered = _encode_envelope(
+        header["owner_token"], header["owner_expiry"], header["owner_fence"],
+        header["last_accepted_fence"], r0.new_hash, b"tampered body",
+    )
+    oracle_client().put_object(
+        Bucket=backend._client.bucket_name, Key=key, Body=tampered,
+        Metadata={"knokeep-sha256": r0.new_hash},
+    )
+
+    with pytest.raises(ObjectStoreBackendError, match="does not match"):
+        backend.read(key)
+    r1 = gate.persist(backend, key, b"on top of a lie", ctx=ctx, doc_type="system_state")
+    assert isinstance(r1, ERROR) and r1.kind is ErrorKind.CORRUPTION
+    r2 = gate.persist(backend, key, b"honest", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r2, ERROR) and r2.kind is ErrorKind.CORRUPTION
+    # Nothing was written over the corrupted object.
+    obj = oracle_client().get_object(Bucket=backend._client.bucket_name, Key=key)
+    assert obj["Body"].read() == tampered
+
+
+def test_list_returns_only_real_keys_never_phantoms(backend):
+    r = gate.persist(backend, "real/one", b"data", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r, OK)
+    backend.lock("phantom/only", ttl_s=30.0)  # lock()'d, never written
+    lease = backend.lock("real/one", ttl_s=30.0)  # a lock on a REAL key keeps it listed
+    backend.unlock(lease)
+
+    assert list(backend.list("")) == ["real/one"]
+    assert list(backend.list("phantom/")) == []
+    assert backend.read("phantom/only") is None
+
+    # Once the phantom is filled by a create-only write it is a real key.
+    r2 = gate.persist(backend, "phantom/only", b"filled", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r2, OK)
+    assert list(backend.list("")) == ["phantom/only", "real/one"]
+
+
+def test_lock_on_real_key_preserves_logical_hash_metadata(backend):
+    key = "meta/keep"
+    r0 = gate.persist(backend, key, b"value", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    lease = backend.lock(key, ttl_s=30.0)
+    backend.unlock(lease)
+    head = oracle_client().head_object(Bucket=backend._client.bucket_name, Key=key)
+    assert head["Metadata"].get("knokeep-sha256") == r0.new_hash
+    phantom_head = None
+    backend.lock("meta/phantom", ttl_s=30.0)
+    phantom_head = oracle_client().head_object(Bucket=backend._client.bucket_name, Key="meta/phantom")
+    assert phantom_head["Metadata"].get("knokeep-sha256") == ""

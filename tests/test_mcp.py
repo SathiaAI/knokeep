@@ -697,3 +697,120 @@ def test_mcp_over_postgres_smoke():
             conn.close()
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# knokeep_write with expected_hash: the advisory lease is HELD through
+# persist() (D-006 on the MCP side) and a key already leased elsewhere is an
+# ordinary ERROR{BUSY} write outcome, never a generic tool exception.
+# ---------------------------------------------------------------------------
+
+
+def test_overwrite_returns_busy_while_another_holder_leases_the_key(tmp_path):
+    """Local backend only: a second LocalBackend over the SAME root (the
+    cross-process case, e.g. the skill holding its per-key lease) leases the
+    key; the server's CAS-update must report ERROR/BUSY (isError) instead of
+    TOOL_EXCEPTION, and succeed once the lease is released."""
+    from store.local import LocalBackend
+
+    root = tmp_path / "store-root"
+    client = MCPClient(["--backend", "local", "--root", str(root)])
+    try:
+        client.initialize()
+        first = client.call_tool_payload(
+            "knokeep_write", {"key": "docs/leased.txt", "body": "v1", "doc_type": "system_state"}
+        )
+        assert first["status"] == "OK"
+
+        other = LocalBackend(root)
+        held = other.lock("docs/leased.txt", ttl_s=30)
+        try:
+            result = client.call_tool(
+                "knokeep_write",
+                {"key": "docs/leased.txt", "body": "v2", "doc_type": "system_state",
+                 "expected_hash": first["new_hash"]},
+            )
+        finally:
+            other.unlock(held)
+        assert result["isError"] is True
+        payload = json.loads(result["content"][0]["text"])
+        assert payload == {"status": "ERROR", "kind": "BUSY", "commit_class": "definitely_not_committed"}
+        assert client.call_tool_payload("knokeep_read", {"key": "docs/leased.txt"})["text"] == "v1"
+
+        retry = client.call_tool_payload(
+            "knokeep_write",
+            {"key": "docs/leased.txt", "body": "v2", "doc_type": "system_state",
+             "expected_hash": first["new_hash"]},
+        )
+        assert retry["status"] == "OK"
+        other.close()
+    finally:
+        client.close()
+
+
+def test_overwrite_lease_is_held_across_persist_and_released_after():
+    """Unit-level: lock() -> write() -> unlock(), in that order, with the write
+    carrying the held lease -- and unlock() still runs when persist raises."""
+    from mcp.server import _tool_knokeep_write
+    from store.context import Overwrite
+    from store.fake import FakeBackend
+
+    class _Recording(FakeBackend):
+        def __init__(self):
+            super().__init__()
+            self.events = []
+
+        def lock(self, key, ttl_s):
+            lease = super().lock(key, ttl_s)
+            self.events.append(("lock", lease.token))
+            return lease
+
+        def write(self, key, body, *, ctx):
+            lease = ctx.precondition.lease if isinstance(ctx.precondition, Overwrite) else None
+            # The lease must still be HELD (advisory side) at write time.
+            self.events.append(("write", lease.token if lease else None, (lease.key in self._locks) if lease else None))
+            return super().write(key, body, ctx=ctx)
+
+        def unlock(self, lock):
+            self.events.append(("unlock", lock.token))
+            return super().unlock(lock)
+
+    backend = _Recording()
+    first = _tool_knokeep_write(backend, {"key": "k", "body": "v1", "doc_type": "system_state"})
+    assert first["status"] == "OK"
+    assert backend.events == [("write", None, None)]  # create-only takes no lease
+    backend.events.clear()
+
+    second = _tool_knokeep_write(
+        backend, {"key": "k", "body": "v2", "doc_type": "system_state", "expected_hash": first["new_hash"]}
+    )
+    assert second["status"] == "OK"
+    kinds = [e[0] for e in backend.events]
+    assert kinds == ["lock", "write", "unlock"]
+    token = backend.events[0][1]
+    assert backend.events[1] == ("write", token, True)  # held at write time, same lease
+    assert backend.events[2] == ("unlock", token)
+
+    # Busy: another holder -> ERROR/BUSY, and no write/unlock is attempted.
+    held = backend.lock("k", ttl_s=30)
+    backend.events.clear()
+    busy = _tool_knokeep_write(
+        backend, {"key": "k", "body": "v3", "doc_type": "system_state", "expected_hash": second["new_hash"]}
+    )
+    assert busy["status"] == "ERROR" and busy["kind"] == "BUSY"
+    assert backend.events == []
+    backend.unlock(held)
+
+    # persist raising still releases the lease.
+    backend.events.clear()
+
+    def _boom(*a, **kw):
+        raise RuntimeError("simulated persist failure")
+
+    backend.write = _boom
+    with pytest.raises(RuntimeError):
+        _tool_knokeep_write(
+            backend, {"key": "k", "body": "v4", "doc_type": "system_state", "expected_hash": second["new_hash"]}
+        )
+    assert [e[0] for e in backend.events] == ["lock", "unlock"]
+    assert "k" not in backend._locks

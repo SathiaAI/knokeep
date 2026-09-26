@@ -431,14 +431,23 @@ class GitBackend:
     # -- H1 Increment 2, Phase 2: durable fence-ownership sidecar -----------
     # Per-key owner_token/owner_expiry/owner_fence/last_accepted_fence,
     # committed into the repo itself (git has no side-channel storage), at a
-    # reserved path never reachable by a real, gate-validated key (contract
-    # keys are charset-restricted; this path uses a literal '.' segment,
-    # which the gate's key validator forbids -- see store/gate.py -- so no
-    # real key can ever collide with it).
+    # RESERVED path under `_FENCE_NAMESPACE`. The reservation is real, not
+    # incidental: the gate refuses any logical key whose first segment is
+    # `.knokeep-fence` (store/gate.py `_RESERVED_TOP_SEGMENTS`), `list()`
+    # never yields tree paths under it and `read()` reports them absent, so
+    # sidecars are invisible to callers (incl. a migration using this
+    # backend as its source) and no logical key can collide with one. A
+    # pre-reservation blob that already sits at a sidecar path but is not a
+    # sidecar is detected by `_advance_durable_fence` and never overwritten.
+
+    _FENCE_NAMESPACE = ".knokeep-fence/"
 
     def _fence_sidecar_path(self, key: str) -> str:
         name = hashlib.sha256(key.encode("utf-8")).hexdigest()
-        return f".knokeep-fence/{name}.fence"
+        return f"{self._FENCE_NAMESPACE}{name}.fence"
+
+    def _is_internal_path(self, key: str) -> bool:
+        return key.startswith(self._FENCE_NAMESPACE)
 
     def _encode_fence_sidecar(
         self, owner_token: Optional[str], owner_expiry: float, owner_fence: int,
@@ -482,6 +491,20 @@ class GitBackend:
             except GitBackendError as e:
                 raise BackendBusyError(f"lock({key!r}): fetch failed: {e}") from e
             existing = self._read_fence_sidecar(head, key)
+            if existing is None:
+                # Never commit fence state over a blob that is not a sidecar:
+                # a value written to this reserved path before the namespace
+                # was reserved (or by another tool) is user data, and
+                # silently replacing it would destroy it.
+                try:
+                    foreign = self._read_blob_at(head, path)
+                except GitBackendError as e:
+                    raise BackendBusyError(f"lock({key!r}): sidecar read failed: {e}") from e
+                if foreign is not None:
+                    raise BackendBusyError(
+                        f"lock({key!r}): reserved fence path {path!r} holds a non-sidecar blob; "
+                        "refusing to overwrite it"
+                    )
             owner_fence = existing[2] if existing else 0
             last_accepted_fence = existing[3] if existing else 0
             new_fence = max(owner_fence, last_accepted_fence) + 1
@@ -662,6 +685,8 @@ class GitBackend:
         # PERMISSION/NETWORK/CORRUPTION raise (contract §2); GitBackendError
         # covers all three here (no finer classification is derivable from
         # a git subprocess's stderr in general).
+        if self._is_internal_path(key):
+            return None  # fence sidecars are not logical keys (see _FENCE_NAMESPACE)
         head = self._fetch_head()
         raw = self._read_blob_at(head, key)
         if raw is None:
@@ -674,7 +699,9 @@ class GitBackend:
             return iter([])
         proc = self._run(["ls-tree", "-r", "--name-only", head], check=True)
         names = [n for n in proc.stdout.decode("utf-8", "replace").splitlines() if n]
-        return iter(sorted(n for n in names if n.startswith(prefix)))
+        return iter(sorted(
+            n for n in names if n.startswith(prefix) and not self._is_internal_path(n)
+        ))
 
     def write(
         self,

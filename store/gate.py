@@ -22,13 +22,10 @@ import math
 import re
 import secrets
 import unicodedata
-from typing import TYPE_CHECKING, Callable, List, Optional, Sequence
+from typing import Callable, List, Optional, Sequence
 
-from .context import Overwrite
+from .context import CreateOnly, OperationContext, Overwrite
 from .types import ERROR, OK, ErrorKind, STALE, EXISTS, WriteResult, sha256_hex
-
-if TYPE_CHECKING:  # pragma: no cover - typing only, no runtime import
-    from .context import OperationContext
 
 # --------------------------------------------------------------------------
 # Runtime-opaque, immutable gate-typed values
@@ -140,6 +137,11 @@ def verify_pair(scanned_key: object, scanned_body: object) -> bool:
 KEY_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 _MAX_KEY_LEN = 1024
 _MAX_SEGMENT_LEN = 255
+# Internal namespaces an adapter keeps INSIDE its logical keyspace (git has
+# no side-channel storage, so its per-key fence sidecars are committed tree
+# paths under `.knokeep-fence/`). Reserved at the one write door so no
+# logical key can ever alias an adapter's own bookkeeping.
+_RESERVED_TOP_SEGMENTS = frozenset({".knokeep-fence"})
 
 _NTFS_RESERVED = (
     {"CON", "PRN", "AUX", "NUL"}
@@ -158,6 +160,8 @@ def _valid_key_shape(key: str) -> bool:
     if not KEY_RE.match(key):
         return False
     if "//" in key or key.startswith("/") or key.endswith("/"):
+        return False
+    if key.split("/", 1)[0] in _RESERVED_TOP_SEGMENTS:
         return False
     for segment in key.split("/"):
         if segment == "" or len(segment) > _MAX_SEGMENT_LEN:
@@ -494,6 +498,15 @@ def persist(
     CAS-update's `expected_hash` (plus a lease, not yet enforced — fence
     enforcement is a later phase). This function derives `expected_hash`
     from `ctx.precondition` and otherwise behaves exactly as before."""
+    # 0. ctx shape: the precondition MUST be exactly one of the two closed
+    # variants. OperationContext is a plain dataclass and Python does not
+    # enforce its annotated union at runtime, so anything else (None, a
+    # look-alike object, a future variant this gate does not know) is
+    # refused before any I/O rather than silently treated as create-only.
+    if not isinstance(ctx, OperationContext) or not isinstance(
+        ctx.precondition, (CreateOnly, Overwrite)
+    ):
+        return ERROR(ErrorKind.INVALID_ARGUMENT)
     expected_hash = ctx.precondition.expected_hash if isinstance(ctx.precondition, Overwrite) else None
 
     # 1. expected_hash shape

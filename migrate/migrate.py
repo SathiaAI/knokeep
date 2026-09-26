@@ -181,72 +181,229 @@ from store.types import (
 _MIGRATION_DOC_TYPE = "system_state"
 
 # H1 Increment 2, checklist #18 / D-008 (frontier-gated 2026-09-24, panel 4/4):
-# migration takes a SESSION-SCOPED LEASE at startup — realized as a per-key
-# advisory mutex on a reserved control key + an auditable control DOC written
-# through the one write door. It is a MUTEX BETWEEN MIGRATIONS only; it grants
-# NO authority to overwrite any DATA key (data writes stay CreateOnly +
-# abort-on-divergence — #18's literal "Overwrite when target exists" was
-# overruled by the gate as it would discard a diverging target = break the
-# never-lose promise). The advisory lock's TTL is the backstop: a crashed
-# migration's lease expires and a later run takes it over (stale-owner
-# takeover), recording the prior owner in the control doc for audit.
+# migration takes a SESSION-SCOPED LEASE at startup. The PRIMARY mutex is a
+# DURABLE control doc on the target at a reserved control key, written through
+# the one write door: created create-only (the backend's native precondition
+# is the linearization point, so two processes cannot both create it), and
+# taken over from an expired/released holder only via a fenced CAS-update
+# carrying a freshly acquired advisory lease on the same key (so two takeover
+# attempts cannot both succeed either). The advisory lock() is the SECONDARY,
+# in-process guard: on git/object-store/postgres its registry is per process,
+# which is exactly why it cannot be the mutex on its own.
+#
+# It is a MUTEX BETWEEN MIGRATIONS only; it grants NO authority to overwrite
+# any DATA key (data writes stay CreateOnly + abort-on-divergence -- #18's
+# literal "Overwrite when target exists" was overruled by the gate as it would
+# discard a diverging target = break the never-lose promise). The control
+# doc's `expires_at` (TTL, renewed by an ELAPSED-TIME heartbeat during both
+# passes) is the backstop: a crashed migration's lease expires and a later run
+# takes it over (stale-owner takeover), recording the prior owner for audit.
 _MIGRATION_LEASE_KEY = "knokeep-migration-control/lease"
+_MIGRATION_LEASE_DOC_KIND = "knokeep-migration-lease"
 _MIGRATION_LEASE_TTL_S = 120.0            # > worst-case per-key copy latency; renewed via heartbeat
-_MIGRATION_HEARTBEAT_EVERY = 25           # renew the lease every N keys during PASS 2
+# Heartbeat by ELAPSED TIME (not by key count): the lease is renewed whenever
+# this much wall-clock has passed since the last renewal, checked before every
+# per-key step of both passes, so it cannot lapse mid-run however slow the
+# source/target are. TTL/3 leaves two further chances before expiry.
+_MIGRATION_HEARTBEAT_INTERVAL_S = _MIGRATION_LEASE_TTL_S / 3.0
 # In STATE_DOC_TYPES, so the control doc needs no #knokeep-gen header (gate §6).
 _MIGRATION_LEASE_DOC_TYPE = "system_state"
+
+# Clock seams (module attributes so tests can drive time deterministically).
+_monotonic = time.monotonic
+_wall = time.time
+
+
+def _parse_lease_doc(blob: Optional[Blob]) -> Optional[dict]:
+    """The control doc as a dict if `blob` IS a migration-lease control doc
+    (this tool's own bookkeeping), else None -- meaning the control key holds
+    a REAL data value that must never be repurposed or silently dropped."""
+    if blob is None:
+        return None
+    try:
+        doc = json.loads(blob.body.decode("utf-8"))
+    except Exception:
+        return None
+    if not isinstance(doc, dict) or doc.get("kind") != _MIGRATION_LEASE_DOC_KIND:
+        return None
+    return doc
+
+
+def _lease_doc_body(*, owner_id, write_id, started_at, status, expires_at,
+                    heartbeat_at, prior_owner, took_over_from, released_at=None) -> bytes:
+    return json.dumps(
+        {
+            "kind": _MIGRATION_LEASE_DOC_KIND,
+            "owner_id": owner_id,
+            "write_id": write_id,
+            "started_at": started_at,
+            "status": status,                 # "held" | "released"
+            "expires_at": expires_at,         # wall-clock TTL; a "held" doc past this is a crashed owner
+            "heartbeat_at": heartbeat_at,
+            "prior_owner": prior_owner,       # previous holder, whatever how it ended (audit)
+            "took_over_from": took_over_from, # set ONLY on a stale-owner takeover (prior doc still "held")
+            "released_at": released_at,
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+class _MigrationLease:
+    """The held session lease: the durable control doc (tracked by its
+    current hash for fenced CAS-updates) plus the advisory lock on the same
+    key. `heartbeat_if_due()` renews by elapsed time; `release()` marks the
+    doc released before dropping the advisory lock."""
+
+    __slots__ = ("target", "lock", "doc_hash", "owner_id", "write_id", "started_at",
+                 "prior_owner", "took_over_from", "last_heartbeat")
+
+    def __init__(self, target, lock, doc_hash, owner_id, write_id, started_at,
+                 prior_owner, took_over_from):
+        self.target = target
+        self.lock = lock
+        self.doc_hash = doc_hash
+        self.owner_id = owner_id
+        self.write_id = write_id
+        self.started_at = started_at
+        self.prior_owner = prior_owner
+        self.took_over_from = took_over_from
+        self.last_heartbeat = _monotonic()
+
+    def _write_doc(self, *, status, released_at=None) -> Optional[str]:
+        """Fenced CAS-update of the control doc against the hash WE last
+        wrote, under the advisory lease we hold. Returns None on success,
+        else the reason the lease must be considered lost."""
+        now = _wall()
+        body = _lease_doc_body(
+            owner_id=self.owner_id, write_id=self.write_id, started_at=self.started_at,
+            status=status, expires_at=now + _MIGRATION_LEASE_TTL_S, heartbeat_at=now,
+            prior_owner=self.prior_owner, took_over_from=self.took_over_from,
+            released_at=released_at,
+        )
+        try:
+            res = gate.persist(self.target, _MIGRATION_LEASE_KEY, body,
+                               ctx=overwrite_ctx(self.doc_hash, self.lock),
+                               doc_type=_MIGRATION_LEASE_DOC_TYPE)
+        except Exception as exc:  # noqa: BLE001 - fail closed: treat as lost
+            return f"control doc write raised: {exc!r}"
+        if isinstance(res, OK):
+            self.doc_hash = res.new_hash
+            return None
+        if isinstance(res, STALE):
+            return ("control doc moved underneath this run (another migration took "
+                    f"the lease; got {res!r})")
+        return f"control doc write failed ({res!r})"
+
+    def heartbeat_if_due(self) -> Optional[str]:
+        """Renew when `_MIGRATION_HEARTBEAT_INTERVAL_S` has elapsed since the
+        last renewal: the advisory lock (in-process guard + durable fence
+        expiry) AND the control doc's expires_at. Returns None if nothing
+        was due or the renewal succeeded, else why ownership was lost."""
+        if _monotonic() - self.last_heartbeat < _MIGRATION_HEARTBEAT_INTERVAL_S:
+            return None
+        try:
+            renewed = self.target.renew(self.lock, _MIGRATION_LEASE_TTL_S)
+        except Exception as exc:  # noqa: BLE001
+            return f"heartbeat renew raised: {exc!r}"
+        if not renewed:
+            return "heartbeat renew failed"
+        err = self._write_doc(status="held")
+        if err is not None:
+            return err
+        self.last_heartbeat = _monotonic()
+        return None
+
+    def release(self) -> None:
+        """Best-effort: mark the control doc released (so a later run records
+        a clean handoff, not a takeover), then drop the advisory lock. The TTL
+        is the backstop if either step fails (#18 item 9)."""
+        try:
+            self._write_doc(status="released", released_at=_wall())
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.target.unlock(self.lock)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _acquire_migration_lease(target, owner_id, write_id, started_at):
     """Acquire the session-scoped migration mutex (D-008). Returns
-    (lock, error): on success (Lock, None); if another LIVE migration holds
-    the lease, (None, <reason>). An EXPIRED prior lease is re-acquirable
-    (target.lock only refuses an UNEXPIRED holder), which IS the stale-owner
-    takeover — the prior owner id is read from the old control doc and recorded
-    in the new one for audit. The control doc goes through gate.persist (the one
-    write door): CreateOnly the first time, else a fenced Overwrite carrying the
-    freshly-held lease. It carries owner/write_id/start only; it authorizes no
-    data-key overwrite."""
+    (lease, error): on success (_MigrationLease, None); otherwise
+    (None, <reason>) and nothing on the target was changed.
+
+    Order matters for cross-process safety on backends whose advisory lock
+    is per process (git/object-store/postgres):
+      1. READ the durable control doc first. A "held" doc whose expires_at is
+         in the future is another LIVE migration -> refuse WITHOUT touching
+         the key (so this probe never advances the holder's fence).
+         A value under the control key that is NOT a lease doc is real data
+         -> refuse (never repurpose it as lease metadata).
+      2. Then take the advisory lock (BUSY -> refuse).
+      3. Then CREATE the doc create-only (absent), or TAKE IT OVER with a
+         fenced CAS-update against the hash read in step 1 (expired/
+         released). The backend's native precondition/fence makes exactly one
+         of any concurrent contenders win; the rest see EXISTS/STALE and
+         refuse. An expired-but-still-"held" prior doc is a crashed owner:
+         its owner_id is recorded in `took_over_from` for audit."""
+    try:
+        prior_blob = target.read(_MIGRATION_LEASE_KEY)
+    except Exception as exc:  # noqa: BLE001
+        return None, f"could not read the migration control doc: {exc!r}"
+    prior_owner = None
+    took_over_from = None
+    if prior_blob is not None:
+        prior_doc = _parse_lease_doc(prior_blob)
+        if prior_doc is None:
+            return None, (f"target key {_MIGRATION_LEASE_KEY!r} holds real data, not a migration "
+                          "control doc -- refusing to repurpose it as the migration lease")
+        prior_owner = prior_doc.get("owner_id")
+        try:
+            prior_expires_at = float(prior_doc.get("expires_at") or 0.0)
+        except (TypeError, ValueError):
+            prior_expires_at = 0.0
+        if prior_doc.get("status") == "held":
+            if prior_expires_at > _wall():
+                return None, ("another migration holds a live lease on "
+                              f"{_MIGRATION_LEASE_KEY!r} (owner {prior_owner!r}, expires in "
+                              f"{prior_expires_at - _wall():.0f}s) -- refusing to run two "
+                              "migrations at once")
+            took_over_from = prior_owner  # crashed/lapsed owner: stale-owner takeover
+
     try:
         lock = target.lock(_MIGRATION_LEASE_KEY, _MIGRATION_LEASE_TTL_S)
     except BackendBusyError:
         return None, ("another migration holds a live lease on "
                       f"{_MIGRATION_LEASE_KEY!r} -- refusing to run two migrations at once")
-    prior_owner = None
+
+    now = _wall()
+    body = _lease_doc_body(
+        owner_id=owner_id, write_id=write_id, started_at=started_at, status="held",
+        expires_at=now + _MIGRATION_LEASE_TTL_S, heartbeat_at=now,
+        prior_owner=prior_owner, took_over_from=took_over_from,
+    )
     try:
-        prior_blob = target.read(_MIGRATION_LEASE_KEY)
-    except Exception:
-        prior_blob = None
-    if prior_blob is not None:
-        try:
-            prior_owner = json.loads(prior_blob.body.decode("utf-8")).get("owner_id")
-        except Exception:
-            prior_owner = "unparseable"
-    body = json.dumps(
-        {
-            "kind": "knokeep-migration-lease",
-            "owner_id": owner_id,
-            "write_id": write_id,
-            "started_at": started_at,
-            "status": "held",
-            "took_over_from": prior_owner,   # audit trail for stale-owner takeover (#18 item 8)
-        },
-        sort_keys=True,
-    ).encode("utf-8")
-    if prior_blob is None:
-        res = gate.persist(target, _MIGRATION_LEASE_KEY, body,
-                           ctx=create_ctx(), doc_type=_MIGRATION_LEASE_DOC_TYPE)
-    else:
-        res = gate.persist(target, _MIGRATION_LEASE_KEY, body,
-                           ctx=overwrite_ctx(prior_blob.version_hash, lock),
-                           doc_type=_MIGRATION_LEASE_DOC_TYPE)
+        if prior_blob is None:
+            res = gate.persist(target, _MIGRATION_LEASE_KEY, body,
+                               ctx=create_ctx(), doc_type=_MIGRATION_LEASE_DOC_TYPE)
+        else:
+            res = gate.persist(target, _MIGRATION_LEASE_KEY, body,
+                               ctx=overwrite_ctx(prior_blob.version_hash, lock),
+                               doc_type=_MIGRATION_LEASE_DOC_TYPE)
+    except Exception as exc:  # noqa: BLE001
+        res = exc
     if not isinstance(res, OK):
         try:
             target.unlock(lock)
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
-        return None, f"could not record the migration lease control doc (got {type(res).__name__})"
-    return lock, None
+        if isinstance(res, (EXISTS, STALE)):
+            return None, ("another migration took the lease on "
+                          f"{_MIGRATION_LEASE_KEY!r} first (control doc {type(res).__name__})")
+        return None, f"could not record the migration lease control doc (got {res!r})"
+    return _MigrationLease(target, lock, res.new_hash, owner_id, write_id, started_at,
+                           prior_owner, took_over_from), None
+
 
 _ROLLBACK_NOTE_SUCCESS = (
     "Cutover signaled: source was frozen read-only and left fully intact "
@@ -426,11 +583,14 @@ def migrate(
     (frozen for the duration); never overwrites a diverging key on `target`;
     never deletes anything on `target`.
 
-    H1 Increment 2 / D-008: acquires a session-scoped migration lease (a mutex
-    on a reserved control key) BEFORE any work and releases it in a finally, so
-    two migrations cannot run at once. The lease is NEVER authority to overwrite
-    a data key. If another LIVE migration holds the lease, this returns an
-    aborted report without touching source or target.
+    H1 Increment 2 / D-008: acquires a session-scoped migration lease (a
+    DURABLE create-only control doc on the target at a reserved control key,
+    plus the advisory lock on that key) BEFORE any work and releases it in a
+    finally, so two migrations cannot run at once -- including from separate
+    processes against the same git/object-store/postgres target. The lease is
+    NEVER authority to overwrite a data key. If another LIVE migration holds
+    the lease, or the control key holds real data, this returns an aborted
+    report without touching source or target.
     """
     started_at = time.time()
     owner_id = uuid.uuid4().hex
@@ -448,8 +608,8 @@ def migrate(
             keys_already_present=0, keys_verified=0, aborted_key=None,
             started_at=started_at,
         )
-    lock, lease_error = _acquire_migration_lease(target, owner_id, write_id, started_at)
-    if lock is None:
+    lease, lease_error = _acquire_migration_lease(target, owner_id, write_id, started_at)
+    if lease is None:
         return _abort(
             reason=f"migration lease unavailable: {lease_error}",
             source_key_count=0, keys_scanned=0, keys_copied=0,
@@ -458,15 +618,13 @@ def migrate(
         )
     try:
         return _migrate_body(source, target, scanner=scanner,
-                             started_at=started_at, lock=lock,
+                             started_at=started_at, lease=lease,
                              target_keys_before=target_keys_before)
     finally:
-        # Release the lease (ownership-conditional; the TTL is the backstop if
-        # this fails or the process crashed before here -- #18 item 9).
-        try:
-            target.unlock(lock)
-        except Exception:
-            pass
+        # Release: mark the control doc released, then drop the advisory lock
+        # (ownership-conditional; the TTL is the backstop if this fails or
+        # the process crashed before here -- #18 item 9).
+        lease.release()
 
 
 def _migrate_body(
@@ -475,16 +633,14 @@ def _migrate_body(
     *,
     scanner: Callable[[bytes], Sequence[str]] = gate.secret_scan,
     started_at: float,
-    lock: Lock,
+    lease: _MigrationLease,
     target_keys_before: set,
 ) -> MigrationReport:
     frozen_source = FrozenBackend(source)
 
     # -- full manifest of both sides, before any copying -------------------
     try:
-        source_keys: List[str] = [
-            k for k in sorted(frozen_source.list("")) if k != _MIGRATION_LEASE_KEY
-        ]  # never treat the reserved control key as migratable data (#18 item 2)
+        listed_source_keys = sorted(frozen_source.list(""))
     except Exception as exc:  # noqa: BLE001 - fail closed, report, never raise
         return _abort(
             reason=f"failed to list source keys: {exc!r}",
@@ -496,6 +652,31 @@ def _migrate_body(
             aborted_key=None,
             started_at=started_at,
         )
+    # The reserved control key is never migratable data (#18 item 2) -- but
+    # only when what sits there IS a migration control doc (bookkeeping left
+    # by an earlier migration INTO this store). A real data value under that
+    # key would otherwise be silently omitted from the target while the run
+    # reports success, so it is a hard abort instead (nothing written yet).
+    source_keys: List[str] = [k for k in listed_source_keys if k != _MIGRATION_LEASE_KEY]
+    if _MIGRATION_LEASE_KEY in listed_source_keys:
+        try:
+            control_blob = frozen_source.read(_MIGRATION_LEASE_KEY)
+        except Exception as exc:  # noqa: BLE001
+            return _abort(
+                reason=f"failed reading source key {_MIGRATION_LEASE_KEY!r}: {exc!r}",
+                source_key_count=len(source_keys), keys_scanned=0, keys_copied=0,
+                keys_already_present=0, keys_verified=0, aborted_key=_MIGRATION_LEASE_KEY,
+                started_at=started_at,
+            )
+        if control_blob is not None and _parse_lease_doc(control_blob) is None:
+            return _abort(
+                reason=(f"source key {_MIGRATION_LEASE_KEY!r} collides with the migration "
+                        "control key and holds real data (not a migration control doc) -- "
+                        "refusing rather than silently omitting it; rename that key first"),
+                source_key_count=len(source_keys), keys_scanned=0, keys_copied=0,
+                keys_already_present=0, keys_verified=0, aborted_key=_MIGRATION_LEASE_KEY,
+                started_at=started_at,
+            )
 
     # `target_keys_before` was snapshotted by migrate() BEFORE the lease was
     # acquired, so the lease control doc + any backend fence sidecar THIS run
@@ -511,6 +692,22 @@ def _migrate_body(
     source_blobs = {}
     keys_scanned = 0
     for key in source_keys:
+        # Heartbeat the session lease by ELAPSED TIME through the pre-scan as
+        # well: a slow source listing/read must not let the TTL lapse before
+        # the first target write (#18 item 4).
+        lost = lease.heartbeat_if_due()
+        if lost is not None:
+            return _abort(
+                reason=f"migration lease lost during pre-scan ({lost}) -- aborting",
+                source_key_count=len(source_keys),
+                keys_scanned=keys_scanned,
+                keys_copied=0,
+                keys_already_present=0,
+                keys_verified=0,
+                aborted_key=key,
+                unexpected_target_keys=unexpected_target_keys,
+                started_at=started_at,
+            )
         # Scan the KEY NAME itself, not just its body, BEFORE any target
         # write (review finding: gate.persist() also scans the key, but only
         # in PASS 2 -- a secret-shaped key sitting later in the manifest
@@ -618,13 +815,15 @@ def _migrate_body(
     keys_copied = 0
     keys_already_present = 0
     keys_verified = 0
-    for _i, key in enumerate(source_keys):
-        # Heartbeat the session lease during the copy so a long migration never
-        # lets its TTL lapse mid-run; a failed renewal means ownership was lost
-        # (a takeover happened) -> fail closed, never keep writing (#18 item 4).
-        if _i and _i % _MIGRATION_HEARTBEAT_EVERY == 0 and not target.renew(lock, _MIGRATION_LEASE_TTL_S):
+    for key in source_keys:
+        # Heartbeat the session lease by ELAPSED TIME before every write so a
+        # long or slow migration never lets its TTL lapse mid-run; a failed
+        # renewal means ownership was lost (a takeover happened) -> fail
+        # closed BEFORE this key is written, never keep writing (#18 item 4).
+        lost = lease.heartbeat_if_due()
+        if lost is not None:
             return _abort(
-                reason="migration lease lost during copy (heartbeat renew failed) -- aborting",
+                reason=f"migration lease lost during copy ({lost}) -- aborting",
                 source_key_count=len(source_keys),
                 keys_scanned=keys_scanned,
                 keys_copied=keys_copied,

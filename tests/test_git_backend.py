@@ -569,3 +569,73 @@ def test_renew_extends_durable_sidecar_expiry_with_same_fence(tmp_path):
     assert backend.unlock(lease) is True
     lease2 = backend.lock(key, ttl_s=1.0)
     assert lease2.fence == lease.fence + 1
+
+
+# ---------------------------------------------------------------------------
+# The fence sidecar namespace (`.knokeep-fence/`) is INTERNAL: reserved at the
+# gate, hidden from list(), absent to read(), and never overwritten when a
+# non-sidecar blob already sits at a sidecar path.
+# ---------------------------------------------------------------------------
+
+
+def _tree_paths(backend: GitBackend):
+    head = backend._fetch_head()
+    proc = backend._run(["ls-tree", "-r", "--name-only", head], check=True)
+    return sorted(n for n in proc.stdout.decode("utf-8").splitlines() if n)
+
+
+def test_fence_sidecars_are_hidden_from_list_and_read(tmp_path):
+    backend = _make_backend(tmp_path, "hide-sidecars")
+    r0 = gate.persist(backend, "docs/a", b"a", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    r1 = gate.persist(backend, "docs/a", b"a2", ctx=fenced_ctx(backend, "docs/a", r0.new_hash), doc_type="system_state")
+    assert isinstance(r1, OK)
+    backend.lock("docs/only-locked", ttl_s=30)  # sidecar with no data key
+
+    sidecar_a = backend._fence_sidecar_path("docs/a")
+    sidecar_locked = backend._fence_sidecar_path("docs/only-locked")
+    # The sidecars really are committed tree paths...
+    assert sidecar_a in _tree_paths(backend) and sidecar_locked in _tree_paths(backend)
+    # ...but never logical keys.
+    assert list(backend.list("")) == ["docs/a"]
+    assert list(backend.list(".knokeep-fence/")) == []
+    assert list(backend.list(".")) == []
+    assert backend.read(sidecar_a) is None
+    assert backend.read(sidecar_locked) is None
+    assert backend.read("docs/only-locked") is None
+
+
+@pytest.mark.parametrize("key", [".knokeep-fence/x", ".knokeep-fence/deadbeef.fence", ".knokeep-fence"])
+def test_fence_namespace_is_rejected_by_the_gate(tmp_path, key):
+    backend = _make_backend(tmp_path, "reserved")
+    r = gate.persist(backend, key, b"user data", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r, ERROR) and r.kind is ErrorKind.INVALID_ARGUMENT
+    assert list(backend.list("")) == []
+    # Look-alikes that are NOT the reserved segment are still ordinary keys.
+    ok = gate.persist(backend, "knokeep-fence/x", b"fine", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(ok, OK)
+
+
+def test_lock_refuses_to_overwrite_foreign_blob_at_sidecar_path(tmp_path):
+    """A blob that already occupies a sidecar path but is not a sidecar
+    (written before the namespace was reserved, or by another tool) is user
+    data: lock() must refuse rather than commit fence state over it."""
+    backend = _make_backend(tmp_path, "foreign-sidecar")
+    r0 = gate.persist(backend, "docs/k", b"k", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    path = backend._fence_sidecar_path("docs/k")
+    # Plant the foreign blob through the private commit helpers (the public
+    # door now refuses this path), exactly as the secret-in-history test does.
+    head = backend._fetch_head()
+    commit = backend._build_commit(head, path, b"legacy user data at a reserved path")
+    ok, rejected, _ = backend._push(commit)
+    assert ok and not rejected
+
+    from store.backend import BackendBusyError
+
+    with pytest.raises(BackendBusyError, match="non-sidecar"):
+        backend.lock("docs/k", ttl_s=30)
+    assert backend._read_blob_at(backend._fetch_head(), path) == b"legacy user data at a reserved path"
+    # Other keys are unaffected.
+    lease = backend.lock("docs/other", ttl_s=30)
+    backend.unlock(lease)

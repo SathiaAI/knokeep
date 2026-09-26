@@ -75,7 +75,7 @@ from typing import Any, Callable, Dict, IO, List, Mapping, Optional, Sequence
 from reconciler.reconcile import DEFAULT_FACT_SPECS, FactSpec, reconcile as run_reconcile
 from reconciler.sources import StoreSource
 from store import gate
-from store.backend import StoreBackend
+from store.backend import BackendBusyError, StoreBackend
 from store.context import create_ctx, overwrite_ctx
 from store.fake import FakeBackend
 from store.local import LocalBackend
@@ -260,26 +260,39 @@ def _tool_knokeep_write(backend: StoreBackend, args: Mapping[str, Any]) -> Dict[
     else:
         raise ToolInputError("provide one of 'body' (utf-8 text) or 'body_b64' (base64 bytes)")
 
-    # H1 Increment 2, Phase 0: build the now-required OperationContext.
-    # create-only when expected_hash is omitted/null; otherwise a CAS-update
-    # carrying a real (but not yet fence-enforced) advisory lease, acquired
-    # and released immediately around this call.
-    if expected_hash is None:
-        ctx = create_ctx()
-    else:
-        lease = backend.lock(key, ttl_s=30)
-        backend.unlock(lease)
-        ctx = overwrite_ctx(expected_hash, lease)
-
+    # H1 Increment 2: build the required OperationContext. create-only when
+    # expected_hash is omitted/null; otherwise a CAS-update carrying a real,
+    # fence-enforced advisory lease that is HELD across persist() (D-006 on
+    # the MCP side, same as the skill's read->compute->persist section):
+    # releasing it before the write would open a window in which another
+    # writer could take the key and advance the fence, turning this request
+    # into a spurious fence-STALE even though its content hash is current.
     # The ONE write door (contract §1/§5): never backend.write() directly,
     # never a hand-built ScannedKey/ScannedBody.
-    result = gate.persist(
-        backend,
-        key,
-        raw_bytes,
-        ctx=ctx,
-        doc_type=doc_type,
-    )
+    if expected_hash is None:
+        result = gate.persist(backend, key, raw_bytes, ctx=create_ctx(), doc_type=doc_type)
+        return _write_result_to_dict(result)
+
+    try:
+        lease = backend.lock(key, ttl_s=30)
+    except BackendBusyError:
+        # Another holder has a live lease on this key (e.g. the skill's
+        # per-key lease across its read-modify-write). An ordinary, retryable
+        # write outcome -- not a tool fault.
+        return _write_result_to_dict(ERROR(ErrorKind.BUSY))
+    try:
+        result = gate.persist(
+            backend,
+            key,
+            raw_bytes,
+            ctx=overwrite_ctx(expected_hash, lease),
+            doc_type=doc_type,
+        )
+    finally:
+        try:
+            backend.unlock(lease)  # ownership-conditional; never releases a successor's lease
+        except Exception:  # noqa: BLE001 - the write outcome is already decided
+            pass
     return _write_result_to_dict(result)
 
 

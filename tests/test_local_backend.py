@@ -737,3 +737,137 @@ def test_windows_replace_sharing_violation_retries_then_busy(tmp_path):  # pragm
     assert LocalBackend retries a bounded number of times before returning
     ERROR{BUSY} — never falling back to a non-atomic copy/move."""
     ...
+
+
+# ---------------------------------------------------------------------------
+# Backward compatibility: journals written BEFORE the fence trailer existed
+# (legacy record shape, no last_accepted_fence) must still replay in full,
+# including when new-shape records are appended after them in the same file.
+# ---------------------------------------------------------------------------
+
+
+def _legacy_journal_record(key: str, body: bytes) -> bytes:
+    """The pre-H1-Increment-2 record shape, byte for byte: no magic, no
+    fence trailer (key_len, key, body_len, body, sha256 digest)."""
+    import hashlib
+    import struct
+
+    key_bytes = key.encode("utf-8")
+    return (
+        struct.pack(">I", len(key_bytes))
+        + key_bytes
+        + struct.pack(">Q", len(body))
+        + body
+        + hashlib.sha256(body).digest()
+    )
+
+
+def test_legacy_journal_without_fence_trailer_replays_every_record(tmp_path):
+    root = tmp_path / "store-root"
+    backend = LocalBackend(root)
+    backend.close()
+
+    records = [("legacy/a", b"alpha"), ("legacy/b", b"beta"), ("legacy/a", b"alpha-v2"), ("legacy/c", b"")]
+    with open(root / "journal" / "journal.log", "ab") as f:
+        for key, body in records:
+            f.write(_legacy_journal_record(key, body))
+
+    resumed = LocalBackend(root)  # replays the legacy-only journal
+    replayed = list(resumed._iter_journal_records())
+    assert [(k, b) for k, b, _fence in replayed] == records, "every legacy record must be preserved, in order"
+    assert all(fence == 0 for _k, _b, fence in replayed), "a legacy record replays with fence 0"
+    assert resumed.read("legacy/a").body == b"alpha-v2"  # last record per key wins
+    assert resumed.read("legacy/b").body == b"beta"
+    assert resumed.read("legacy/c").body == b""
+    resumed.close()
+
+
+def test_new_records_appended_after_legacy_journal_replay_together(tmp_path):
+    """The upgrade path: an existing (legacy) journal is appended to in place
+    by the new adapter. Both shapes must replay from the same file, and the
+    fence trailer must survive for the new records."""
+    root = tmp_path / "store-root"
+    backend = LocalBackend(root)
+    backend.close()
+    with open(root / "journal" / "journal.log", "ab") as f:
+        f.write(_legacy_journal_record("mixed/old", b"old-value"))
+        f.write(_legacy_journal_record("mixed/upgraded", b"v1"))
+
+    upgraded = LocalBackend(root)
+    assert upgraded.read("mixed/old").body == b"old-value"
+    r1 = upgraded.read("mixed/upgraded")
+    assert r1.body == b"v1"
+    lease = upgraded.lock("mixed/upgraded", ttl_s=30)
+    upgraded.unlock(lease)
+    r2 = gate.persist(
+        upgraded, "mixed/upgraded", b"v2", ctx=overwrite_ctx(r1.version_hash, lease), doc_type="system_state"
+    )
+    assert isinstance(r2, OK)
+    r3 = gate.persist(upgraded, "mixed/new", b"brand-new", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r3, OK)
+    upgraded.close()
+
+    resumed = LocalBackend(root)
+    replayed = list(resumed._iter_journal_records())
+    assert [(k, b) for k, b, _f in replayed] == [
+        ("mixed/old", b"old-value"),
+        ("mixed/upgraded", b"v1"),
+        ("mixed/upgraded", b"v2"),
+        ("mixed/new", b"brand-new"),
+    ]
+    assert [f for _k, _b, f in replayed] == [0, 0, lease.fence, 0]
+    assert resumed.read("mixed/old").body == b"old-value"
+    assert resumed.read("mixed/upgraded").body == b"v2"
+    assert resumed.read("mixed/new").body == b"brand-new"
+    # The fence floor replayed from the v2 record (not reset to 0 by the
+    # legacy records that precede it in the same file).
+    assert resumed._last_accepted_fence["mixed/upgraded"] == lease.fence
+    assert resumed._last_accepted_fence["mixed/old"] == 0
+    resumed.close()
+
+
+def test_torn_trailer_on_v2_record_drops_only_that_record(tmp_path):
+    """A crash mid-append of the 8-byte fence trailer must drop exactly the
+    torn record and keep everything before it (same rule as a torn body)."""
+    root = tmp_path / "store-root"
+    backend = LocalBackend(root)
+    backend._journal_append("torn/keep", b"kept", 7)
+    from store.local import _JOURNAL_V2_MAGIC
+
+    full = _JOURNAL_V2_MAGIC + _legacy_journal_record("torn/tail", b"lost") + b"\x00\x00\x00"  # 3 of 8 trailer bytes
+    backend._journal_fh.write(full)
+    backend._journal_fh.flush()
+    backend.close()
+
+    resumed = LocalBackend(root)
+    assert list(resumed._iter_journal_records()) == [("torn/keep", b"kept", 7)]
+    assert resumed.read("torn/tail") is None
+    resumed.close()
+
+
+# ---------------------------------------------------------------------------
+# Durability of the fence-owner file: the directory entry is fsync'd after the
+# atomic replace, so lock()'s new owner cannot revert on power loss.
+# ---------------------------------------------------------------------------
+
+
+def test_lock_fsyncs_fence_owner_directory_after_replace(tmp_path, monkeypatch):
+    import store.local as local_module
+
+    backend = LocalBackend(tmp_path / "store-root")
+    synced = []
+    real_fsync_dir = local_module._fsync_dir
+
+    def _recording_fsync_dir(path):
+        synced.append(path)
+        return real_fsync_dir(path)
+
+    monkeypatch.setattr(local_module, "_fsync_dir", _recording_fsync_dir)
+    synced.clear()
+    lease = backend.lock("durable/owner", ttl_s=30)
+    assert backend._fence_alloc_dir in synced, "lock() must fsync the fence-alloc directory after replacing the owner file"
+    synced.clear()
+    assert backend.renew(lease, ttl_s=30) is True
+    assert backend._fence_alloc_dir in synced, "renew() rewrites the owner file and must fsync its directory too"
+    backend.unlock(lease)
+    backend.close()

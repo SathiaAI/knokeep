@@ -359,3 +359,58 @@ def test_added_secret_prefixes_are_blocked(planted, label_substr):
     assert result.kind is ErrorKind.SECRET_BLOCKED
     assert any(label_substr.lower() in lbl.lower() for lbl in result.labels)
     assert rec.write_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# OperationContext precondition is a CLOSED union: anything that is not
+# exactly CreateOnly or Overwrite is INVALID_ARGUMENT before any I/O, never
+# silently treated as create-only.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "precondition",
+    [None, "create", 0, object(), types.SimpleNamespace(expected_hash="a" * 64, lease=None)],
+    ids=["None", "str", "int", "object", "overwrite-lookalike"],
+)
+def test_unknown_precondition_type_is_invalid_argument_before_io(precondition):
+    from store.context import AuthContext, OperationContext
+
+    backend = RecordingBackend()
+    ctx = OperationContext(auth=AuthContext(), precondition=precondition)
+    result = gate.persist(backend, "absent/key", b"body", ctx=ctx, doc_type="system_state")
+    assert isinstance(result, ERROR)
+    assert result.kind is ErrorKind.INVALID_ARGUMENT
+    assert backend.write_calls == 0, "must be refused before the adapter is called"
+    assert backend.read("absent/key") is None
+
+
+def test_non_operation_context_ctx_is_invalid_argument_before_io():
+    from store.context import CreateOnly
+
+    backend = RecordingBackend()
+    lookalike = types.SimpleNamespace(auth=None, precondition=CreateOnly(), operation_id="x")
+    result = gate.persist(backend, "absent/key", b"body", ctx=lookalike, doc_type="system_state")
+    assert isinstance(result, ERROR) and result.kind is ErrorKind.INVALID_ARGUMENT
+    assert backend.write_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# Reserved internal namespace: no logical key may alias an adapter's own
+# bookkeeping (git's `.knokeep-fence/` sidecars).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("key", [".knokeep-fence", ".knokeep-fence/abc.fence", ".knokeep-fence/x/y"])
+def test_reserved_fence_namespace_key_is_invalid_argument_before_io(key):
+    backend = RecordingBackend()
+    result = gate.persist(backend, key, b"body", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(result, ERROR) and result.kind is ErrorKind.INVALID_ARGUMENT
+    assert backend.write_calls == 0
+
+
+@pytest.mark.parametrize("key", ["knokeep-fence/abc", "x/.knokeep-fence/abc", ".knokeep-fence2/abc", ".knokeep/probe/abc"])
+def test_non_reserved_lookalike_keys_still_accepted(key):
+    backend = RecordingBackend()
+    result = gate.persist(backend, key, b"body", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(result, OK), result

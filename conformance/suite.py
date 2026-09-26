@@ -234,6 +234,68 @@ def test_c1_stale_write_reject_race(backend):
         assert s.current_hash in allowed
 
 
+def test_c1_fence_loss_stale_settles_to_winner_hash(backend):
+    """The exact interleaving behind test_c1_stale_write_reject_race's
+    strong guarantee, made deterministic: writer A acquires (and releases)
+    its lease, writer B then acquires a NEWER lease (superseding A's fence),
+    and A's CAS-update reaches the backend BEFORE B's write lands. A must be
+    refused on FENCE -- and its STALE.current_hash must be B's committed
+    hash, not A's own pre-race snapshot: the backend settles (bounded) on
+    the owner's pending write rather than reporting the momentary state.
+    Git stays best-effort (winner|base), per the owner-approved D-008
+    single-re-read simplification."""
+    r0 = gate.persist(backend, "settle1", b"base", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    base_hash = r0.new_hash
+
+    ctx_a = fenced_ctx(backend, "settle1", base_hash)  # older fence
+    ctx_b = fenced_ctx(backend, "settle1", base_hash)  # newer fence -> B is the owner
+    assert ctx_b.precondition.lease.fence > ctx_a.precondition.lease.fence
+
+    started = threading.Event()
+    outcome = {}
+
+    def loser():
+        started.set()
+        outcome["a"] = gate.persist(backend, "settle1", b"a-late", ctx=ctx_a, doc_type="system_state")
+
+    t = threading.Thread(target=loser)
+    t.start()
+    started.wait()
+    time.sleep(0.25)  # A is inside write(), already refused on fence, settling
+    rb = gate.persist(backend, "settle1", b"b-wins", ctx=ctx_b, doc_type="system_state")
+    assert isinstance(rb, OK), rb
+    t.join(timeout=15)
+    assert not t.is_alive(), "a fence-losing write must never hang"
+
+    ra = outcome["a"]
+    assert isinstance(ra, STALE), ra
+    assert ra.reason == "FENCE"
+    from store.git_backend import GitBackend
+    allowed = {rb.new_hash, base_hash} if isinstance(backend, GitBackend) else {rb.new_hash}
+    assert ra.current_hash in allowed, (ra, rb)
+    assert backend.read("settle1").body == b"b-wins"
+
+
+def test_c1_fence_loss_settle_is_bounded_when_owner_never_writes(backend, monkeypatch):
+    """The settle wait is BOUNDED (contract: never block indefinitely): when
+    the superseding owner never writes, the loser still returns within the
+    backend's settle cap, carrying the (unchanged) current hash."""
+    r0 = gate.persist(backend, "settle2", b"base", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    ctx_a = fenced_ctx(backend, "settle2", r0.new_hash)
+    fenced_ctx(backend, "settle2", r0.new_hash)  # supersede A; this owner never writes
+    monkeypatch.setattr(type(backend), "_FENCE_LOSS_SETTLE_MAX_S", 0.3, raising=False)
+
+    t0 = time.monotonic()
+    ra = gate.persist(backend, "settle2", b"a-late", ctx=ctx_a, doc_type="system_state")
+    elapsed = time.monotonic() - t0
+    assert isinstance(ra, STALE) and ra.reason == "FENCE", ra
+    assert ra.current_hash == r0.new_hash
+    assert elapsed < 5.0, f"fence-loss settle must be bounded, took {elapsed:.2f}s"
+    assert backend.read("settle2").body == b"base"
+
+
 # ---------------------------------------------------------------------------
 # C2 — create-only collision (incl. a threaded race)
 # ---------------------------------------------------------------------------

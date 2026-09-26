@@ -37,7 +37,7 @@ from store import gate
 from store.backend import BackendBusyError
 from store.postgres import PostgresBackend, _extract_generation
 from store.types import ERROR, EXISTS, OK, STALE, ErrorKind, sha256_hex
-from tests.ctx_helpers import create_ctx, fenced_ctx
+from tests.ctx_helpers import create_ctx, fenced_ctx, overwrite_ctx
 
 _PG_CONNECT_KWARGS = {
     "host": "127.0.0.1",
@@ -553,5 +553,82 @@ def test_capability_probe_refuses_to_start_on_broken_cas_mapping(monkeypatch):
 
         with pytest.raises(RuntimeError, match="REFUSING TO START"):
             backend._run_capability_probe()
+    finally:
+        backend._conformance_teardown()
+
+
+# ---------------------------------------------------------------------------
+# A failed fence advance/renew must roll its transaction back: pg8000 raises
+# DatabaseError (e.g. lock_timeout while a concurrent write() holds the fence
+# row) and leaves the thread-local connection in an ABORTED transaction until
+# something rolls back -- every later statement on it would fail with "current
+# transaction is aborted". lock() surfaces the failure as BackendBusyError and
+# the connection stays usable.
+# ---------------------------------------------------------------------------
+
+
+class _FailingFenceUpdateCursor:
+    """Wraps a real pg8000 cursor; the UPDATE against the fence table raises
+    DatabaseError (after the transaction has already done real work, so the
+    server-side transaction really is aborted), everything else passes
+    through untouched."""
+
+    def __init__(self, real_cursor, fence_table: str):
+        self._real = real_cursor
+        self._fence_table = fence_table
+
+    def execute(self, sql, params=None):
+        if sql.strip().upper().startswith("UPDATE") and self._fence_table in sql:
+            # Force a REAL server-side error inside the open transaction so
+            # it is genuinely aborted, exactly like a lock_timeout would.
+            self._real.execute("SELECT 1/0")
+        return self._real.execute(sql, params) if params is not None else self._real.execute(sql)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_failed_fence_advance_rolls_back_and_leaves_connection_usable(monkeypatch):
+    schema = "knokeep_rollback_" + uuid.uuid4().hex[:20]
+    backend = PostgresBackend(dict(_PG_CONNECT_KWARGS), schema=schema)
+    try:
+        r0 = gate.persist(backend, "rollback/k", b"v0", ctx=create_ctx(), doc_type="system_state")
+        assert isinstance(r0, OK)
+
+        real_conn = backend._get_conn()
+        real_cursor_factory = real_conn.cursor
+        fence_table = backend._fence_table
+        broken = {"on": True}
+
+        def patched_cursor():
+            cur = real_cursor_factory()
+            return _FailingFenceUpdateCursor(cur, fence_table) if broken["on"] else cur
+
+        monkeypatch.setattr(real_conn, "cursor", patched_cursor)
+
+        with pytest.raises(BackendBusyError):
+            backend.lock("rollback/k", ttl_s=30)
+
+        # Same thread, same thread-local connection: the aborted transaction
+        # must have been rolled back, so ordinary work proceeds.
+        broken["on"] = False
+        assert backend.read("rollback/k").body == b"v0"
+        lease = backend.lock("rollback/k", ttl_s=30)
+        backend.unlock(lease)
+        r1 = gate.persist(
+            backend, "rollback/k", b"v1", ctx=overwrite_ctx(r0.new_hash, lease), doc_type="system_state"
+        )
+        assert isinstance(r1, OK), r1
+        assert backend.read("rollback/k").body == b"v1"
+
+        # renew(): same protection -- a failed durable extension rolls back,
+        # reports False, and the connection is still usable afterwards.
+        lease2 = backend.lock("rollback/k", ttl_s=30)
+        broken["on"] = True
+        assert backend.renew(lease2, ttl_s=30) is False
+        broken["on"] = False
+        assert backend.read("rollback/k").body == b"v1"
+        assert backend.renew(lease2, ttl_s=30) is True
+        backend.unlock(lease2)
     finally:
         backend._conformance_teardown()

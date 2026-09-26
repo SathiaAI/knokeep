@@ -64,13 +64,26 @@ otherwise unchanged):
   — not only by a conflicting data write. A single immediate re-read right
   after such a rejection can therefore still show this caller's own
   pre-race snapshot if the actual new owner's data write has not landed yet.
-  `_settle_current_hash_after_fence_loss` closes that gap (same technique as
-  `store/git_backend.py`'s Phase 2 fix, and the same root cause): it polls,
-  bounded, for as long as the envelope shows a fence has been allocated
-  (`owner_fence`) that no write has yet consumed (`last_accepted_fence`),
-  and returns the moment either the logical hash changes or nothing is left
-  pending — so a genuinely non-racing fence rejection (an old lease replayed
-  with nobody else contending) returns on its very first check.
+  `_settle_current_hash_after_fence_loss` closes that gap: it polls, bounded
+  (`_FENCE_LOSS_SETTLE_MAX_S`, and never past the owner's lease expiry), for
+  as long as the envelope shows a fence has been allocated (`owner_fence`)
+  that no write has yet consumed (`last_accepted_fence`), and returns the
+  moment either the logical hash changes or nothing is left pending — so a
+  genuinely non-racing fence rejection (an old lease replayed with nobody
+  else contending) returns on its very first check, while every loser of a
+  real race reports the true winner's hash.
+
+  LISTING: a phantom is not a logical key, so `list()` HEADs each physical
+  object and yields only those whose `x-amz-meta-knokeep-sha256` metadata is
+  non-empty (every real value: envelope or legacy) — one HEAD per listed
+  object, the price of keeping fence state inside the one object a key has.
+
+  LEGACY (pre-envelope) OBJECTS: a bucket written by the previous adapter
+  holds raw bodies with that same metadata set to sha256(body). They read
+  back transparently (`_read_envelope` synthesizes an unowned envelope) and
+  are upgraded to envelope form by the first `lock()`/`write()` on the key,
+  conditioned on the legacy object's own ETag. Envelope `version_hash` is
+  verified against the body on every read (`_EnvelopeCorruptionError`).
 
   CAS DECISION COST: Phase 0/1's JUDGMENT CALL 4 ("a single HEAD reads the
   metadata hash AND captures the native token from the same object version")
@@ -284,6 +297,14 @@ def _encode_envelope(
     }
     header_bytes = json.dumps(header, separators=(",", ":")).encode("utf-8")
     return _ENVELOPE_MAGIC + struct.pack(">I", len(header_bytes)) + header_bytes + body
+
+
+class _EnvelopeCorruptionError(ValueError):
+    """An object that IS a KnoKeep envelope (magic + parseable header) but
+    whose header `version_hash` does not describe its logical body — a
+    truncated, corrupted or out-of-band-modified object. Distinguished from
+    a plain "not an envelope" ValueError so write paths can report
+    ERROR{CORRUPTION} rather than treat it as a foreign object."""
 
 
 def _decode_envelope(raw: bytes) -> Tuple[dict, bytes]:
@@ -588,19 +609,24 @@ class SigV4Client:
             return body
         raise _ObjectStoreTransportError(f"GET {key}: unexpected status {status}")
 
-    def get_with_etag(self, key: str) -> Optional[Tuple[bytes, Optional[str]]]:
+    def get_with_etag(self, key: str) -> Optional[Tuple[bytes, Optional[str], Optional[str]]]:
         """H1 Increment 2, Phase 2: like `get()`, but also returns the
         object's ETag from the SAME response — needed because fence/owner
         state now lives in the body, so every CAS decision must read the
         full object (not just HEAD), and the CAS-update PUT that follows
-        must condition on the ETag of the EXACT version just read."""
+        must condition on the ETag of the EXACT version just read. The
+        third element is the `x-amz-meta-knokeep-sha256` metadata (None if
+        absent): it is what tells a LEGACY pre-envelope value (written by the
+        previous adapter as the raw body + this metadata) apart from foreign
+        litter -- see `ObjectStoreBackend._read_envelope`."""
         self.get_count += 1
         status, headers, body = self._request("GET", key)
         if status == 404:
             return None
         if status == 200:
             etag = headers.get("ETag") or headers.get("etag")
-            return body, etag
+            meta_hash = headers.get("x-amz-meta-knokeep-sha256")
+            return body, etag, meta_hash
         raise _ObjectStoreTransportError(f"GET {key}: unexpected status {status}")
 
     def put(
@@ -675,7 +701,11 @@ class ObjectStoreBackend:
 
     _FENCE_RETRY_ATTEMPTS = 50
     _FENCE_LOSS_SETTLE_POLL_S = 0.01
-    _FENCE_LOSS_SETTLE_MAX_S = 20.0
+    # Upper bound on how long a fence-losing write() waits for the current
+    # fence owner's pending write to land before reporting STALE (see
+    # _settle_current_hash_after_fence_loss); the wait also ends as soon as
+    # the owner's lease expires, since no fenced write can land after that.
+    _FENCE_LOSS_SETTLE_MAX_S = 5.0
 
     def __init__(
         self,
@@ -792,15 +822,43 @@ class ObjectStoreBackend:
     def _read_envelope(self, key: str) -> Optional[_Envelope]:
         """Read+parse the canonical envelope for `key`. Returns None only
         when the object truly does not exist (never created, or a phantom
-        that was somehow removed out-of-band). Raises ValueError if an
-        object exists but is not a KnoKeep envelope (foreign/probe object —
-        callers decide how to handle that; `read()` treats it as corruption,
-        `_resolve_create_conflict` falls back to a raw content hash)."""
+        that was somehow removed out-of-band).
+
+        BACKWARD COMPATIBILITY: an object written by the pre-envelope
+        adapter is the raw logical body with `x-amz-meta-knokeep-sha256 ==
+        sha256(body)` (that adapter set the metadata on every PUT). Such a
+        LEGACY object is returned as an envelope with empty owner/fence
+        fields and `version_hash = sha256(raw)`; the first fenced mutation
+        (`lock()`/`write()`) then rewrites it in envelope form, conditioned
+        on the legacy object's own ETag. A non-envelope object WITHOUT that
+        matching metadata is foreign/probe litter -> ValueError (callers
+        decide: `read()` treats it as corruption, `_resolve_create_conflict`
+        falls back to a raw content hash).
+
+        INTEGRITY: an envelope's header `version_hash` is verified against
+        its logical body on every read; a mismatch raises
+        `_EnvelopeCorruptionError` (a ValueError) so a torn/corrupted/
+        out-of-band-modified object is never reported as a valid Blob whose
+        hash a later CAS could accept."""
         got = self._client.get_with_etag(key)
         if got is None:
             return None
-        raw, etag = got
-        header, body = _decode_envelope(raw)
+        raw, etag, meta_hash = got
+        try:
+            header, body = _decode_envelope(raw)
+        except ValueError:
+            raw_hash = sha256_hex(raw)
+            if meta_hash is not None and meta_hash == raw_hash:
+                return _Envelope(
+                    owner_token=None, owner_expiry=0.0, owner_fence=0,
+                    last_accepted_fence=0, version_hash=raw_hash, body=raw, etag=etag,
+                )
+            raise
+        version_hash = header.get("version_hash")
+        if version_hash is not None and version_hash != sha256_hex(body):
+            raise _EnvelopeCorruptionError(
+                f"envelope version_hash does not match its body at {key!r}"
+            )
         return _Envelope(
             owner_token=header.get("owner_token"),
             owner_expiry=float(header.get("owner_expiry") or 0.0),
@@ -813,23 +871,30 @@ class ObjectStoreBackend:
 
     def read(self, key: str) -> Optional[Blob]:
         try:
-            got = self._client.get_with_etag(key)
+            env = self._read_envelope(key)
         except (_PreSendNetworkError, _PostSendAckLostError, _ObjectStoreTransportError) as e:
             raise ObjectStoreBackendError(str(e)) from e
-        if got is None:
-            return None
-        raw, _etag = got
-        try:
-            header, body = _decode_envelope(raw)
         except ValueError as e:
+            # Foreign/probe litter, or an envelope whose hash does not
+            # describe its body: CORRUPTION raises (contract §2), never a
+            # Blob with a hash a later CAS could accept.
             raise ObjectStoreBackendError(f"corrupt/non-envelope object at {key!r}: {e}") from e
-        version_hash = header.get("version_hash")
-        if version_hash is None:
-            # Phantom: lock()'d but never written — logically absent.
+        if env is None or env.version_hash is None:
+            # Absent, or a phantom: lock()'d but never written — logically
+            # absent either way.
             return None
-        return Blob(body=body, version_hash=version_hash)
+        return Blob(body=env.body, version_hash=env.version_hash)
 
     def list(self, prefix: str) -> Iterator[str]:
+        """Logical keys only. A key that has only ever been `lock()`'d holds
+        a PHANTOM envelope (fence state, no data) that `read()` reports as
+        absent, and foreign/probe litter is not KnoKeep data at all; neither
+        may be listed as a key (a caller -- e.g. a migration using this
+        backend as its source -- would otherwise be handed keys that then
+        read back as None). ListObjectsV2 carries no metadata, so each
+        physical object costs one HEAD: the `x-amz-meta-knokeep-sha256`
+        metadata is the logical hash for every real value (envelope or
+        legacy pre-envelope object) and empty for a fence-only PUT."""
         def _iter() -> Iterator[str]:
             token: Optional[str] = None
             while True:
@@ -838,6 +903,12 @@ class ObjectStoreBackend:
                 except (_PreSendNetworkError, _PostSendAckLostError, _ObjectStoreTransportError) as e:
                     raise ObjectStoreBackendError(str(e)) from e
                 for k in keys:
+                    try:
+                        head = self._client.head(k)
+                    except (_PreSendNetworkError, _PostSendAckLostError, _ObjectStoreTransportError) as e:
+                        raise ObjectStoreBackendError(str(e)) from e
+                    if head is None or not head.meta_hash:
+                        continue  # vanished, phantom (fence-only), or foreign litter
                     yield k
                 if not token:
                     return
@@ -920,6 +991,8 @@ class ObjectStoreBackend:
         for _attempt in range(self._FENCE_RETRY_ATTEMPTS):
             try:
                 env = self._read_envelope(key)
+            except _EnvelopeCorruptionError:
+                return ERROR(ErrorKind.CORRUPTION)
             except ValueError:
                 # Existing object is not a KnoKeep envelope at all (foreign/
                 # probe litter). JUDGMENT CALL 5: fall back to a raw content
@@ -999,6 +1072,10 @@ class ObjectStoreBackend:
         # DECISION COST" note: HEAD alone can no longer answer this).
         try:
             env = self._read_envelope(key)
+        except _EnvelopeCorruptionError:
+            # An envelope whose header hash does not describe its body:
+            # never CAS against (or report) a hash that lies about the data.
+            return ERROR(ErrorKind.CORRUPTION)
         except ValueError:
             # Not a KnoKeep envelope at all — treat as no usable current
             # version to CAS against.
@@ -1070,17 +1147,36 @@ class ObjectStoreBackend:
         return ERROR(ErrorKind.CONFLICT_UNKNOWN)
 
     def _settle_current_hash_after_fence_loss(self, key: str, expected_hash: str) -> Optional[str]:
-        """A SINGLE re-read of the canonical envelope's current logical hash
-        after a fence-loss STALE. Owner-approved simplification 2026-09-24
-        (was a bounded poll ~<=_FENCE_LOSS_SETTLE_MAX_S): the caller re-reads on
-        STALE anyway, so the poll only added a latency ceiling + complexity for a
-        momentary race window. Returns the current hash, or `expected_hash` if
-        the re-read itself fails (never a value worse than the pre-read one)."""
-        try:
-            env = self._read_envelope(key)
-        except (ValueError, _PreSendNetworkError, _PostSendAckLostError, _ObjectStoreTransportError):
-            return expected_hash
-        return env.version_hash if env is not None else None
+        """See the module docstring's "SETTLING A LOST FENCE RACE". Returns
+        the key's current logical hash once the race that superseded this
+        caller's fence has SETTLED: either the hash moved away from
+        `expected_hash` (the winner landed), or no fenced write is pending
+        any more (the envelope's `owner_fence` has been consumed by a
+        committed write -- `last_accepted_fence` caught up -- or the owner's
+        lease expired), or the bounded wait (`_FENCE_LOSS_SETTLE_MAX_S`) ran
+        out. So a genuinely non-racing fence rejection (an old lease replayed
+        with nobody else contending) returns on its very first check, while
+        the C1 race's losers report the true winner's hash. Returns the last
+        successfully observed hash (initially `expected_hash`) if a re-read
+        fails -- never a value worse than the pre-read one."""
+        deadline = time.monotonic() + self._FENCE_LOSS_SETTLE_MAX_S
+        current_hash: Optional[str] = expected_hash
+        while True:
+            try:
+                env = self._read_envelope(key)
+            except (ValueError, _PreSendNetworkError, _PostSendAckLostError, _ObjectStoreTransportError):
+                return current_hash
+            current_hash = env.version_hash if env is not None else None
+            if current_hash != expected_hash:
+                return current_hash
+            pending = (
+                env is not None
+                and env.owner_fence > env.last_accepted_fence
+                and env.owner_expiry > time.time()
+            )
+            if not pending or time.monotonic() >= deadline:
+                return current_hash
+            time.sleep(self._FENCE_LOSS_SETTLE_POLL_S)
 
     # -- advisory lock() API (JUDGMENT CALL 6 — NOT the CAS mechanism) --------
 
@@ -1114,15 +1210,21 @@ class ObjectStoreBackend:
                 new_fence = 1
                 envelope = _encode_envelope(token, expiry, new_fence, 0, None, b"")
                 precondition: Dict[str, str] = {"If-None-Match": "*"}
+                meta_hash = ""  # phantom: fence state only, no logical value
             else:
                 new_fence = max(env.owner_fence, env.last_accepted_fence) + 1
                 envelope = _encode_envelope(
                     token, expiry, new_fence, env.last_accepted_fence, env.version_hash, env.body,
                 )
                 precondition = {"If-Match": env.etag}
+                # Keep the logical-hash metadata in step with the value this
+                # envelope still carries (list() relies on it to tell a real
+                # key from a phantom); a legacy object is upgraded to envelope
+                # form here, conditioned on its own ETag.
+                meta_hash = env.version_hash or ""
 
             try:
-                status, _ = self._client.put(key, envelope, precondition=precondition, meta_hash="")
+                status, _ = self._client.put(key, envelope, precondition=precondition, meta_hash=meta_hash)
             except (_PreSendNetworkError, _PostSendAckLostError) as e:
                 raise BackendBusyError(f"lock({key!r}): fence PUT failed: {e}") from e
             if status in (200, 201):

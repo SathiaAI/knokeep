@@ -393,7 +393,7 @@ def session_append(store, project, session_id, client, entry):
         die(reason="invalid client", value=client)
     backend = _backend(store)
     jkey = _key(project, "journal", session_id)
-    for _ in range(50):                                       # bounded CAS retry: same-session concurrent appends
+    for attempt in range(1, 51):                              # bounded CAS retry: same-session concurrent appends
         # D-006 / checklist #16: read the journal and append UNDER a held lease
         # (a fresh lease per iteration = the re-acquire-on-retry path) so the
         # fence rejects a stale appender whose content-hash still matches.
@@ -422,7 +422,14 @@ def session_append(store, project, session_id, client, entry):
                 res = _persist(backend, jkey, "journal", _bytes(fm, body),
                                expect, lease=(lease if expect is not None else None))
         except BackendBusyError:
-            continue                                          # another writer holds the journal lease — bounded retry
+            # Another writer holds the journal lease across ITS read->append
+            # critical section. lock() refuses immediately (never waits), so
+            # back off briefly before retrying -- otherwise all 50 attempts
+            # can burn through in a few milliseconds while the holder is
+            # still inside its section, exhausting the budget spuriously.
+            # Bounded (capped multiplier), same shape as _flush_doc's retry.
+            time.sleep(random.uniform(0.01, 0.05) * min(attempt, 10))
+            continue                                          # bounded retry
         if isinstance(res, OK):
             return {"ok": True, "log": jkey}
         if isinstance(res, ERROR) and res.kind == ErrorKind.SECRET_BLOCKED:

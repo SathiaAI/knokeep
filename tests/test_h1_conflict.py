@@ -690,3 +690,36 @@ def test_secret_in_losing_body_is_refused_not_parked(tmp_path):
     assert list(backend.list(project + "/conflicts/")) == []
     assert backend.read(ks._key(project, "journal", "conflicts")) is None
     assert _park_events(store) == []
+
+
+def test_session_append_waits_out_a_briefly_held_journal_lease(tmp_path):
+    """A concurrent appender (or a parking write) holds the journal lease
+    across its read->append section. lock() refuses immediately, so without
+    a backoff the 50-attempt budget burns through in milliseconds and the
+    append is falsely reported exhausted; with backoff it lands once the
+    holder releases."""
+    import time as _time
+
+    store = str(tmp_path)
+    project = "proj-journal-backoff"
+    sid = "sess-backoff-1"
+    jkey = ks._key(project, "journal", sid)
+    holder = ks._backend(store)
+    lease = holder.lock(jkey, ttl_s=30)
+
+    def _release_later():
+        _time.sleep(0.4)
+        holder.unlock(lease)
+
+    t = threading.Thread(target=_release_later)
+    t.start()
+    try:
+        t0 = _time.monotonic()
+        res = ks.session_append(store, project, sid, "cowork", "entry landed after the holder released")
+        elapsed = _time.monotonic() - t0
+    finally:
+        t.join()
+    assert res == {"ok": True, "log": jkey}
+    assert elapsed >= 0.3, "must have waited for the holder rather than exhausting instantly"
+    body = ks._backend(store).read(jkey).body.decode("utf-8")
+    assert "entry landed after the holder released" in body

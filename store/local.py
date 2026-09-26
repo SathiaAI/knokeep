@@ -198,6 +198,13 @@ class _ReservationRace(Exception):
     directly). Treated as BUSY rather than corrupting/overwriting."""
 
 
+# Per-record marker for the fence-trailer journal shape (H1 Increment 2).
+# As a big-endian uint32 this is 0x4B4B4A32 (> 1.2e9), so it can never be
+# mistaken for a legacy record's `key_len` (capped at store.gate._MAX_KEY_LEN,
+# 1024) -- see `LocalBackend._iter_journal_records`.
+_JOURNAL_V2_MAGIC = b"KKJ2"
+
+
 # ---------------------------------------------------------------------------
 # Cross-process, non-blocking, dedicated-file lock (contract §4.1)
 # ---------------------------------------------------------------------------
@@ -405,6 +412,19 @@ class LocalBackend:
                 lower.unlink()
 
     def _iter_journal_records(self) -> Iterator[Tuple[str, bytes, int]]:
+        """Replays journal.log, accepting BOTH record shapes that can appear
+        in one file (a store created before H1 Increment 2 keeps its legacy
+        records, and `_journal_append` appends new-shape records after
+        them -- the file is never rewritten):
+
+          legacy (pre-fence):  key_len(4) key body_len(8) body digest(32)
+          v2 (fence trailer):  MAGIC(4) key_len(4) key body_len(8) body
+                               digest(32) last_accepted_fence(8)
+
+        Each v2 record is self-describing via `_JOURNAL_V2_MAGIC` in the
+        first 4 bytes, where a legacy record carries `key_len`; the magic's
+        integer value is far above the gate's key-length cap, so the two can
+        never be confused. A legacy record replays with fence 0."""
         try:
             f = open(self._journal_path, "rb")
         except FileNotFoundError:
@@ -414,6 +434,11 @@ class LocalBackend:
                 header = f.read(4)
                 if len(header) < 4:
                     return  # clean EOF or torn tail — stop, ignore the rest
+                is_v2 = header == _JOURNAL_V2_MAGIC
+                if is_v2:
+                    header = f.read(4)
+                    if len(header) < 4:
+                        return
                 (key_len,) = struct.unpack(">I", header)
                 key_bytes = f.read(key_len)
                 if len(key_bytes) < key_len:
@@ -430,15 +455,17 @@ class LocalBackend:
                     return
                 if hashlib.sha256(body).digest() != digest:
                     return  # torn/corrupt record — stop before it
-                # H1 Increment 2, Phase 1: last_accepted_fence trailer, added
-                # after `digest` so every pre-Phase-1 record shape above is
-                # unchanged; a torn trailer (crash mid-append of this last
-                # field) is handled exactly like a torn body/digest above —
-                # stop before this record, keep everything already yielded.
-                fence_bytes = f.read(8)
-                if len(fence_bytes) < 8:
-                    return
-                (last_accepted_fence,) = struct.unpack(">Q", fence_bytes)
+                # H1 Increment 2, Phase 1: last_accepted_fence trailer (v2
+                # records only); a torn trailer (crash mid-append of this
+                # last field) is handled exactly like a torn body/digest
+                # above — stop before this record, keep everything already
+                # yielded.
+                last_accepted_fence = 0
+                if is_v2:
+                    fence_bytes = f.read(8)
+                    if len(fence_bytes) < 8:
+                        return
+                    (last_accepted_fence,) = struct.unpack(">Q", fence_bytes)
                 try:
                     key = key_bytes.decode("utf-8")
                 except UnicodeDecodeError:
@@ -529,7 +556,8 @@ class LocalBackend:
         key_bytes = key.encode("utf-8")
         digest = hashlib.sha256(raw).digest()
         record = (
-            struct.pack(">I", len(key_bytes))
+            _JOURNAL_V2_MAGIC  # self-describing v2 record (see _iter_journal_records)
+            + struct.pack(">I", len(key_bytes))
             + key_bytes
             + struct.pack(">Q", len(raw))
             + raw
@@ -646,50 +674,78 @@ class LocalBackend:
         if not lock.acquire(self._lock_timeout_s):
             return ERROR(ErrorKind.BUSY)
         try:
-            if self._check_case_collision(rel_path):
-                return ERROR(ErrorKind.INVALID_ARGUMENT)
-
-            current_raw: Optional[bytes]
-            try:
-                current_raw = data_path.read_bytes()
-            except FileNotFoundError:
-                current_raw = None
-            current_hash = sha256_hex(current_raw) if current_raw is not None else None
-
-            if expected_hash is None:
-                # Create-only.
-                if current_raw is None:
-                    self._commit(k, rel_path, data_path, raw, create=True, last_accepted_fence=0)
-                    return OK(new_hash)
-                if current_hash == new_hash:
-                    return OK(new_hash)  # idempotent create replay (§3)
-                return EXISTS(current_hash)
-
-            # CAS-update. Ownership/fence FIRST, then the existing hash CAS
-            # check (H1 Increment 2, Phase 1 (C)) — unchanged otherwise.
-            if not self._fence_ok(k, precondition_lease):
-                return STALE(current_hash, reason="FENCE")
-
-            if current_raw is None:
-                return STALE(None)
-            if current_hash != expected_hash:
-                return STALE(current_hash)
-
-            # JUDGMENT CALL #1: generation monotonicity, residual from T1.
-            if new_generation is not None:
-                stored_generation = _extract_generation(current_raw)
-                if stored_generation is not None and new_generation <= stored_generation:
-                    return STALE(current_hash)
-
-            self._commit(
-                k, rel_path, data_path, raw, create=False,
-                last_accepted_fence=precondition_lease.fence,
+            result = self._write_under_cas_lock(
+                k, rel_path, data_path, raw, new_hash, new_generation,
+                expected_hash, precondition_lease,
             )
-            return OK(new_hash)
         except (_ReplaceBusy, _ReservationRace):
             return ERROR(ErrorKind.BUSY)
         finally:
             lock.release()
+
+        if isinstance(result, STALE) and result.reason == "FENCE" and expected_hash is not None:
+            # A fence loss is PERMANENT for this lease, but the racer that
+            # holds the current fence may not have written yet. Settle
+            # (bounded) OUTSIDE cas.lock -- the owner needs that lock to
+            # land its write -- so STALE carries the true winner's hash
+            # rather than this caller's own pre-race snapshot.
+            settled_hash = self._settle_current_hash_after_fence_loss(k, expected_hash)
+            return STALE(settled_hash, reason="FENCE")
+        return result
+
+    def _write_under_cas_lock(
+        self,
+        k: str,
+        rel_path: Path,
+        data_path: Path,
+        raw: bytes,
+        new_hash: str,
+        new_generation: Optional[int],
+        expected_hash: Optional[str],
+        precondition_lease: Optional[Lock],
+    ) -> WriteResult:
+        """The read-compare-replace critical section of write(). Caller
+        holds cas.lock and maps _ReplaceBusy/_ReservationRace to BUSY."""
+        if self._check_case_collision(rel_path):
+            return ERROR(ErrorKind.INVALID_ARGUMENT)
+
+        current_raw: Optional[bytes]
+        try:
+            current_raw = data_path.read_bytes()
+        except FileNotFoundError:
+            current_raw = None
+        current_hash = sha256_hex(current_raw) if current_raw is not None else None
+
+        if expected_hash is None:
+            # Create-only.
+            if current_raw is None:
+                self._commit(k, rel_path, data_path, raw, create=True, last_accepted_fence=0)
+                return OK(new_hash)
+            if current_hash == new_hash:
+                return OK(new_hash)  # idempotent create replay (§3)
+            return EXISTS(current_hash)
+
+        # CAS-update. Ownership/fence FIRST, then the existing hash CAS
+        # check (H1 Increment 2, Phase 1 (C)) — unchanged otherwise.
+        if not self._fence_ok(k, precondition_lease):
+            return STALE(current_hash, reason="FENCE")
+
+        if current_raw is None:
+            return STALE(None)
+        if current_hash != expected_hash:
+            return STALE(current_hash)
+
+        # JUDGMENT CALL #1: generation monotonicity, residual from T1.
+        if new_generation is not None:
+            stored_generation = _extract_generation(current_raw)
+            if stored_generation is not None and new_generation <= stored_generation:
+                return STALE(current_hash)
+
+        self._commit(
+            k, rel_path, data_path, raw, create=False,
+            last_accepted_fence=precondition_lease.fence,
+        )
+        return OK(new_hash)
 
     def _fence_ok(self, key: str, lease: Optional[Lock]) -> bool:
         """H1 Increment 2, Phase 1b: the Overwrite lease must be the current
@@ -714,6 +770,51 @@ class LocalBackend:
         if lease.fence < last_accepted:
             return False
         return True
+
+    # Upper bound on how long a fence-losing write() waits for the current
+    # fence owner's pending write to land before reporting STALE. Only ever
+    # reached when the owner never writes (it lost interest, or is slow
+    # beyond this bound); the wait also ends as soon as the owner's lease
+    # expires, since no fenced write can land after that.
+    _FENCE_LOSS_SETTLE_MAX_S = 5.0
+    _FENCE_LOSS_SETTLE_POLL_S = 0.01
+
+    def _settle_current_hash_after_fence_loss(self, key: str, expected_hash: str) -> Optional[str]:
+        """Called WITHOUT cas.lock held. Returns the key's current hash once
+        the race that superseded this caller's fence has SETTLED: either the
+        published hash moved away from `expected_hash` (the winner landed),
+        or no fenced write is pending any more (the durable fence-owner
+        file's fence has been consumed by a committed write, or the owner's
+        lease expired), or the bounded wait ran out. Never returns a value
+        worse than the pre-read one: if the re-read itself fails, the last
+        successfully observed hash is returned."""
+        deadline = time.monotonic() + self._FENCE_LOSS_SETTLE_MAX_S
+        rel_path = self._key_to_relpath(key)
+        data_path = self._safe_join(self._data_dir, rel_path)
+        owner_path = self._fence_owner_path(key)
+        current_hash: Optional[str] = expected_hash
+        while True:
+            try:
+                current_hash = sha256_hex(data_path.read_bytes())
+            except FileNotFoundError:
+                current_hash = None
+            except OSError:
+                # A concurrent publish (os.replace) can momentarily refuse the
+                # read on some platforms; treat it like "unchanged so far".
+                pass
+            if current_hash != expected_hash:
+                return current_hash
+            owner = self._read_fence_owner(owner_path)
+            with self._fence_lock:
+                last_accepted = self._last_accepted_fence.get(key, 0)
+            pending = (
+                owner is not None
+                and owner[2] > last_accepted
+                and owner[1] > time.time()
+            )
+            if not pending or time.monotonic() >= deadline:
+                return current_hash
+            time.sleep(self._FENCE_LOSS_SETTLE_POLL_S)
 
     def _commit(
         self,
@@ -795,6 +896,12 @@ class LocalBackend:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(str(tmp_path), str(path))
+            # The rename itself is only durable once the directory entry is:
+            # without this, a power loss after lock() returned could revert
+            # the owner file to the previous (possibly unexpired) owner,
+            # letting a superseded writer pass _fence_ok() -- the same
+            # reason _publish() fsyncs the data directory.
+            _fsync_dir(path.parent)
         finally:
             with contextlib.suppress(FileNotFoundError):
                 tmp_path.unlink()

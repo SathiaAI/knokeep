@@ -50,6 +50,11 @@ class FakeBackend:
         # wall-clock).
         self._fence: Dict[str, Dict[str, object]] = {}
         self._mutex = threading.RLock()
+        # Signalled (notify_all) whenever a key's committed state changes, so
+        # a fence-losing writer parked in
+        # `_settle_current_hash_after_fence_loss` wakes the moment the true
+        # owner's write lands instead of polling.
+        self._changed = threading.Condition(self._mutex)
         # Fault injection: each is a one-shot counter consumed by the next
         # matching write() call(s).
         self._fault_counts: Dict[str, int] = {
@@ -157,6 +162,7 @@ class FakeBackend:
                 # This variant DOES land — exercises the §7 "current ==
                 # intended_new_hash" reconciliation branch.
                 self._store[k] = (raw, new_hash)
+                self._changed.notify_all()
                 return ERROR(ErrorKind.TIMEOUT_AFTER_COMMIT)
             if self._consume_fault("conflict_unknown"):
                 # This variant does NOT land — exercises the §7 "otherwise"
@@ -172,6 +178,7 @@ class FakeBackend:
                     # H1 Increment 2, Phase 1 (C): a fresh create starts the
                     # key's fence floor at 0.
                     self._fence.setdefault(k, {})["last_accepted_fence"] = 0
+                    self._changed.notify_all()
                     return OK(new_hash)
                 _, current_hash = current
                 if current_hash == new_hash:
@@ -183,7 +190,12 @@ class FakeBackend:
             # (H1 Increment 2, Phase 1 (C)).
             current_hash = current[1] if current is not None else None
             if not self._fence_ok(k, precondition_lease):
-                return STALE(current_hash, reason="FENCE")
+                # A fence loss is PERMANENT for this lease, but the racer
+                # holding the current fence may not have written yet:
+                # settle (bounded) so STALE carries the true winner's hash
+                # rather than this caller's own pre-race snapshot.
+                settled_hash = self._settle_current_hash_after_fence_loss(k, expected_hash)
+                return STALE(settled_hash, reason="FENCE")
 
             if current is None:
                 return STALE(None)
@@ -194,7 +206,43 @@ class FakeBackend:
             # updated inside this same critical section, under self._mutex,
             # before the write() call returns.
             self._fence.setdefault(k, {})["last_accepted_fence"] = precondition_lease.fence
+            self._changed.notify_all()
             return OK(new_hash)
+
+    # Upper bound on how long a fence-losing write() waits for the current
+    # fence owner's pending write to land before reporting STALE. Only ever
+    # reached when the owner never writes (it lost interest, or is slow
+    # beyond this bound); the wait also ends as soon as the owner's lease
+    # expires, since no fenced write can land after that.
+    _FENCE_LOSS_SETTLE_MAX_S = 5.0
+
+    def _settle_current_hash_after_fence_loss(self, key: str, expected_hash: str) -> Optional[str]:
+        """Caller holds self._mutex (released while waiting). Returns the
+        key's current hash once the race that superseded this caller's fence
+        has SETTLED: either the hash moved away from `expected_hash` (the
+        winner landed), or no fenced write is pending any more (the current
+        owner's fence has been consumed by a committed write, or its lease
+        expired), or the bounded wait ran out."""
+        deadline = time.monotonic() + self._FENCE_LOSS_SETTLE_MAX_S
+        while True:
+            entry = self._store.get(key)
+            current_hash = entry[1] if entry is not None else None
+            if current_hash != expected_hash:
+                return current_hash
+            fs = self._fence.get(key) or {}
+            owner_fence = int(fs.get("owner_fence", 0))
+            last_accepted = int(fs.get("last_accepted_fence", 0))
+            owner_expiry = float(fs.get("owner_expiry", 0.0))
+            now = time.time()
+            pending = owner_fence > last_accepted and owner_expiry > now
+            if not pending:
+                return current_hash
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return current_hash
+            # Wake on the next committed change, at the owner's expiry, or at
+            # the deadline -- whichever comes first.
+            self._changed.wait(timeout=min(remaining, owner_expiry - now))
 
     def _fence_ok(self, key: str, lease: Optional[Lock]) -> bool:
         """H1 Increment 2, Phase 1 (C): the Overwrite lease must be the

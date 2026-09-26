@@ -18,6 +18,8 @@ from __future__ import annotations
 import ast
 import inspect
 import threading
+import time
+from dataclasses import replace as dc_replace
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -25,16 +27,22 @@ import os
 import pytest
 
 from store import gate
+from store.backend import Lock
 from store.gate import make_generation_header
 from store.objectstore import (
     ObjectStoreBackend,
     ObjectStoreBackendError,
     PROBE_PREFIX,
     SigV4Client,
+    _ObjectStoreTransportError,
+    _PostSendAckLostError,
+    _PreSendNetworkError,
+    _decode_envelope,
     _extract_generation,
 )
 from store.types import ERROR, EXISTS, OK, STALE, ErrorKind, sha256_hex
 
+from tests.ctx_helpers import create_ctx, fenced_ctx, overwrite_ctx
 from tests.moto_support import (
     DUMMY_ACCESS_KEY_ID,
     DUMMY_REGION,
@@ -75,7 +83,7 @@ def backend() -> ObjectStoreBackend:
 
 
 def test_c1_stale_reject_real_412(backend):
-    r0 = gate.persist(backend, "k1", b"hello", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "k1", b"hello", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
 
     # Confirm this really is a live If-Match precondition failure at the
@@ -84,15 +92,23 @@ def test_c1_stale_reject_real_412(backend):
     # unconditioned client call that we independently know must currently
     # collide (bucket already has an object at this key with a different
     # ETag than a wrong If-Match value).
-    r1 = gate.persist(backend, "k1", b"goodbye", expected_hash="0" * 64, doc_type="system_state")
+    r1 = gate.persist(backend, "k1", b"goodbye", ctx=fenced_ctx(backend, "k1", "0" * 64), doc_type="system_state")
     assert isinstance(r1, STALE)
     assert r1.current_hash == r0.new_hash
     assert backend.read("k1").body == b"hello"
 
-    # Independent oracle: the object in the bucket is untouched.
+    # Independent oracle: the object in the bucket is untouched. H1
+    # Increment 2, Phase 2: the stored object is now a KnoKeep fence
+    # envelope (owner/fence state + logical hash live in the body, not S3
+    # metadata — see store/objectstore.py's module docstring), so the raw
+    # oracle body is decoded the same way before comparing the logical
+    # content.
+    from store.objectstore import _decode_envelope
+
     oc = oracle_client()
     obj = oc.get_object(Bucket=backend._client.bucket_name, Key="k1")
-    assert obj["Body"].read() == b"hello"
+    _header, oracle_body = _decode_envelope(obj["Body"].read())
+    assert oracle_body == b"hello"
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +117,7 @@ def test_c1_stale_reject_real_412(backend):
 
 
 def test_c2_create_collision_real_412(backend):
-    r0 = gate.persist(backend, "k2", b"first", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "k2", b"first", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
 
     # Direct, low-level confirmation that moto itself returns 412 for a
@@ -112,32 +128,35 @@ def test_c2_create_collision_real_412(backend):
     )
     assert status == 412
 
-    r1 = gate.persist(backend, "k2", b"second", expected_hash=None, doc_type="system_state")
+    r1 = gate.persist(backend, "k2", b"second", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r1, EXISTS)
     assert r1.current_hash == r0.new_hash
     assert backend.read("k2").body == b"first"
 
 
 # ---------------------------------------------------------------------------
-# Single HEAD captures both metadata-hash AND ETag (contract §4.2)
+# Exactly one GET per non-racing CAS-update (H1 Increment 2, Phase 2:
+# ownership/fence state now lives in the envelope body, so the CAS decision
+# reads the object via GET, not HEAD — see store/objectstore.py's module
+# docstring, "CAS DECISION COST"). fenced_ctx() itself also issues one GET
+# (inside lock()'s fence advance), so the assertion counts from AFTER that.
 # ---------------------------------------------------------------------------
 
 
-def test_cas_update_issues_exactly_one_head(backend):
-    r0 = gate.persist(backend, "single-head", b"v0", expected_hash=None, doc_type="system_state")
+def test_cas_update_issues_exactly_one_get(backend):
+    r0 = gate.persist(backend, "single-get", b"v0", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
 
-    before = backend._client.head_count
-    r1 = gate.persist(
-        backend, "single-head", b"v1", expected_hash=r0.new_hash, doc_type="system_state"
-    )
+    ctx = fenced_ctx(backend, "single-get", r0.new_hash)
+    before = backend._client.get_count
+    r1 = gate.persist(backend, "single-get", b"v1", ctx=ctx, doc_type="system_state")
     assert isinstance(r1, OK)
-    after = backend._client.head_count
-    assert after - before == 1, "a CAS-update must issue exactly one HEAD (contract §4.2)"
+    after = backend._client.get_count
+    assert after - before == 1, "a non-racing CAS-update must issue exactly one GET (contract §4.2)"
 
 
 def test_head_result_carries_both_meta_hash_and_etag(backend):
-    r0 = gate.persist(backend, "head-fields", b"body", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "head-fields", b"body", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
     head = backend._client.head("head-fields")
     assert head is not None
@@ -207,18 +226,18 @@ def test_every_put_call_site_in_objectstore_passes_precondition_ast():
 
 
 def test_412_maps_to_exists_for_create_only_and_stale_for_cas_update(backend):
-    r0 = gate.persist(backend, "map-by-op", b"v0", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "map-by-op", b"v0", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
 
     # Same underlying HTTP status (412) from moto, different WriteResult
     # class depending on which CAS operation triggered it.
     create_conflict = gate.persist(
-        backend, "map-by-op", b"different-body", expected_hash=None, doc_type="system_state"
+        backend, "map-by-op", b"different-body", ctx=create_ctx(), doc_type="system_state"
     )
     assert isinstance(create_conflict, EXISTS)
 
     cas_conflict = gate.persist(
-        backend, "map-by-op", b"v2", expected_hash="f" * 64, doc_type="system_state"
+        backend, "map-by-op", b"v2", ctx=fenced_ctx(backend, "map-by-op", "f" * 64), doc_type="system_state"
     )
     assert isinstance(cas_conflict, STALE)
 
@@ -239,7 +258,7 @@ def test_5xx_after_send_maps_to_timeout_after_commit(backend, monkeypatch):
         return real_request(method, key, **kwargs)
 
     monkeypatch.setattr(backend._client, "_request", _fake_request)
-    result = gate.persist(backend, "fivexx", b"body", expected_hash=None, doc_type="system_state")
+    result = gate.persist(backend, "fivexx", b"body", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.TIMEOUT_AFTER_COMMIT
 
@@ -253,7 +272,7 @@ def test_unclassifiable_status_fails_closed_to_conflict_unknown(backend, monkeyp
         return real_request(method, key, **kwargs)
 
     monkeypatch.setattr(backend._client, "_request", _fake_request)
-    result = gate.persist(backend, "teapot", b"body", expected_hash=None, doc_type="system_state")
+    result = gate.persist(backend, "teapot", b"body", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.CONFLICT_UNKNOWN
     # Fail-closed: nothing was actually written.
@@ -272,7 +291,7 @@ def test_pre_send_connection_failure_is_network_not_timeout(backend, monkeypatch
         raise _PreSendNetworkError("simulated: connect() never succeeded")
 
     monkeypatch.setattr(backend._client, "_request", _boom)
-    result = gate.persist(backend, "presend", b"body", expected_hash=None, doc_type="system_state")
+    result = gate.persist(backend, "presend", b"body", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.NETWORK
 
@@ -284,7 +303,7 @@ def test_post_send_ack_lost_is_timeout_after_commit(backend, monkeypatch):
         raise _PostSendAckLostError("simulated: sent, ack never arrived")
 
     monkeypatch.setattr(backend._client, "_request", _boom)
-    result = gate.persist(backend, "postsend", b"body", expected_hash=None, doc_type="system_state")
+    result = gate.persist(backend, "postsend", b"body", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.TIMEOUT_AFTER_COMMIT
 
@@ -377,14 +396,14 @@ def test_capability_probe_passes_and_cleans_up_against_real_moto():
 def test_generation_monotonicity_rejects_non_increasing_update(backend):
     r0 = gate.persist(
         backend, "lease/x", make_generation_header(5) + b"holder=alice",
-        expected_hash=None, doc_type="lease",
+        ctx=create_ctx(), doc_type="lease",
     )
     assert isinstance(r0, OK)
 
     # Same generation again -> rejected (not strictly greater).
     r1 = gate.persist(
         backend, "lease/x", make_generation_header(5) + b"holder=bob",
-        expected_hash=r0.new_hash, doc_type="lease",
+        ctx=fenced_ctx(backend, "lease/x", r0.new_hash), doc_type="lease",
     )
     assert isinstance(r1, STALE)
     assert backend.read("lease/x").body == make_generation_header(5) + b"holder=alice"
@@ -392,31 +411,40 @@ def test_generation_monotonicity_rejects_non_increasing_update(backend):
     # Lower generation -> also rejected.
     r2 = gate.persist(
         backend, "lease/x", make_generation_header(3) + b"holder=carol",
-        expected_hash=r0.new_hash, doc_type="lease",
+        ctx=fenced_ctx(backend, "lease/x", r0.new_hash), doc_type="lease",
     )
     assert isinstance(r2, STALE)
 
     # Strictly greater generation -> accepted.
     r3 = gate.persist(
         backend, "lease/x", make_generation_header(6) + b"holder=dave",
-        expected_hash=r0.new_hash, doc_type="lease",
+        ctx=fenced_ctx(backend, "lease/x", r0.new_hash), doc_type="lease",
     )
     assert isinstance(r3, OK)
     assert backend.read("lease/x").body == make_generation_header(6) + b"holder=dave"
 
 
-def test_generation_check_only_reads_when_generation_present(backend):
-    """The extra GET for generation monotonicity (JUDGMENT CALL 4) must NOT
-    fire for STATE doc types (no generation header, no monotonicity rule)."""
-    r0 = gate.persist(backend, "state/x", b"plain content", expected_hash=None, doc_type="system_state")
+def test_generation_check_costs_no_extra_get(backend):
+    """H1 Increment 2, Phase 2: generation monotonicity (residual JUDGMENT
+    CALL 4) now reads the CURRENT envelope's own logical body, already in
+    hand from the one GET the CAS decision itself requires — so a
+    generation-BEARING write (doc_type="lease") costs exactly the same one
+    GET as a STATE (no-generation) write, never a second one (unlike Phase
+    0/1, where the generation check was a deliberate extra GET)."""
+    r0 = gate.persist(
+        backend, "lease/gen-get-count", make_generation_header(1) + b"holder=alice",
+        ctx=create_ctx(), doc_type="lease",
+    )
     assert isinstance(r0, OK)
 
+    ctx = fenced_ctx(backend, "lease/gen-get-count", r0.new_hash)
     before = backend._client.get_count
     r1 = gate.persist(
-        backend, "state/x", b"plain content v2", expected_hash=r0.new_hash, doc_type="system_state"
+        backend, "lease/gen-get-count", make_generation_header(2) + b"holder=bob",
+        ctx=ctx, doc_type="lease",
     )
     assert isinstance(r1, OK)
-    assert backend._client.get_count == before, "no generation header -> no extra GET"
+    assert backend._client.get_count - before == 1, "generation check must not cost an extra GET"
 
 
 # ---------------------------------------------------------------------------
@@ -426,10 +454,10 @@ def test_generation_check_only_reads_when_generation_present(backend):
 
 def test_write_rejects_raw_bytes_and_str_before_any_io(backend):
     with pytest.raises(TypeError):
-        backend.write("plain-str-key", b"raw bytes body", expected_hash=None)  # type: ignore[arg-type]
+        backend.write("plain-str-key", b"raw bytes body", ctx=create_ctx())  # type: ignore[arg-type]
 
     with pytest.raises(TypeError):
-        backend.write(object(), object(), expected_hash=None)  # type: ignore[arg-type]
+        backend.write(object(), object(), ctx=create_ctx())  # type: ignore[arg-type]
 
     # Nothing was written to the real bucket by either rejected call.
     assert backend.read("plain-str-key") is None
@@ -518,13 +546,462 @@ def test_read_raises_on_transport_failure(backend, monkeypatch):
     def _boom(*a, **kw):
         raise _PreSendNetworkError("simulated")
 
-    monkeypatch.setattr(backend._client, "get", _boom)
+    # H1 Increment 2, Phase 2: read() now goes through get_with_etag() (it
+    # needs the envelope body AND could in principle need the ETag), not
+    # get() — patch the method read() actually calls.
+    monkeypatch.setattr(backend._client, "get_with_etag", _boom)
     with pytest.raises(ObjectStoreBackendError):
         backend.read("anything")
 
 
 def test_read_returns_none_only_for_not_found(backend):
     assert backend.read("definitely/does/not/exist") is None
+
+
+# ---------------------------------------------------------------------------
+# H1 Increment 2, Phase 3: lease renew() — advisory bookkeeping AND the
+# durable envelope's owner_expiry (fence unchanged). The write() fence check
+# reads owner_expiry from the ENVELOPE, so "renew actually extends the TTL"
+# is observable end-to-end: a CAS-update under a renewed lease succeeds at a
+# wall-clock time past the lease's ORIGINAL expiry, while the same write under
+# an un-renewed lease is fence-rejected.
+# ---------------------------------------------------------------------------
+
+
+def _oracle_envelope_header(backend: ObjectStoreBackend, key: str) -> dict:
+    """Independent oracle: decode the canonical envelope straight from the
+    bucket via boto3 (never through the adapter under test)."""
+    obj = oracle_client().get_object(Bucket=backend._client.bucket_name, Key=key)
+    header, _body = _decode_envelope(obj["Body"].read())
+    return header
+
+
+def _wait_past(epoch: float) -> None:
+    time.sleep(max(0.0, epoch - time.time()) + 0.15)
+    assert time.time() > epoch
+
+
+def test_renew_extends_durable_expiry_with_same_fence(backend):
+    key = "renew/durable"
+    r0 = gate.persist(backend, key, b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+
+    lease = backend.lock(key, ttl_s=2.0)
+    before = _oracle_envelope_header(backend, key)
+    assert before["owner_token"] == lease.token
+    assert before["owner_fence"] == lease.fence
+    assert before["owner_expiry"] == pytest.approx(lease.expiry_epoch)
+
+    assert backend.renew(lease, ttl_s=30.0) is True
+
+    after = _oracle_envelope_header(backend, key)
+    assert after["owner_token"] == lease.token
+    assert after["owner_fence"] == lease.fence, "renew() must never advance the fence"
+    assert after["last_accepted_fence"] == before["last_accepted_fence"]
+    assert after["version_hash"] == r0.new_hash, "renew() must not touch the data"
+    assert after["owner_expiry"] > lease.expiry_epoch + 20.0
+    assert after["owner_expiry"] == pytest.approx(time.time() + 30.0, abs=5.0)
+    # The advisory side moved with it: the lease is still releasable well
+    # after its original 0.5s TTL would have lapsed.
+    _wait_past(lease.expiry_epoch)
+    assert backend.unlock(lease) is True
+
+
+def test_renewed_lease_still_writes_past_original_expiry(backend):
+    key = "renew/write-after"
+    r0 = gate.persist(backend, key, b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+
+    lease = backend.lock(key, ttl_s=2.0)
+    assert backend.renew(lease, ttl_s=30.0) is True
+    _wait_past(lease.expiry_epoch)
+
+    r1 = gate.persist(backend, key, b"v1", ctx=overwrite_ctx(r0.new_hash, lease), doc_type="system_state")
+    assert isinstance(r1, OK), r1
+    assert backend.read(key).body == b"v1"
+    header = _oracle_envelope_header(backend, key)
+    assert header["last_accepted_fence"] == lease.fence
+    assert header["owner_fence"] == lease.fence
+
+
+def test_unrenewed_lease_is_fence_rejected_past_original_expiry(backend):
+    """Control for the test above: identical timeline, no renew() -> the
+    envelope's owner_expiry has lapsed and write() rejects on FENCE."""
+    key = "renew/no-renew"
+    r0 = gate.persist(backend, key, b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+
+    lease = backend.lock(key, ttl_s=0.4)
+    _wait_past(lease.expiry_epoch)
+
+    r1 = gate.persist(backend, key, b"v1", ctx=overwrite_ctx(r0.new_hash, lease), doc_type="system_state")
+    assert isinstance(r1, STALE), r1
+    assert r1.reason == "FENCE"
+    assert r1.current_hash == r0.new_hash
+    assert backend.read(key).body == b"v0"
+
+
+def test_renew_returns_false_for_wrong_released_expired_and_unknown_tokens(backend):
+    key = "renew/reject"
+    r0 = gate.persist(backend, key, b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+
+    lease = backend.lock(key, ttl_s=30.0)
+    header0 = _oracle_envelope_header(backend, key)
+    puts0 = backend._client.put_count
+
+    # Wrong token (right key, right fence): refused, durable record untouched.
+    forged = dc_replace(lease, token="0" * 32)
+    assert backend.renew(forged, ttl_s=60.0) is False
+    assert _oracle_envelope_header(backend, key) == header0
+
+    # Released token: refused after unlock().
+    assert backend.unlock(lease) is True
+    assert backend.renew(lease, ttl_s=60.0) is False
+    assert _oracle_envelope_header(backend, key) == header0
+    assert backend._client.put_count == puts0, "a refused renew() must issue no PUT"
+
+    # Expired token: refused once the advisory TTL has lapsed, and the
+    # un-renewed lease is then fence-rejected by write().
+    lease2 = backend.lock(key, ttl_s=0.3)
+    header2 = _oracle_envelope_header(backend, key)
+    _wait_past(lease2.expiry_epoch)
+    assert backend.renew(lease2, ttl_s=60.0) is False
+    assert _oracle_envelope_header(backend, key) == header2
+    r = gate.persist(backend, key, b"late", ctx=overwrite_ctx(r0.new_hash, lease2), doc_type="system_state")
+    assert isinstance(r, STALE) and r.reason == "FENCE"
+
+    # A key this backend never locked at all.
+    unknown = Lock(key="renew/never-locked", token="f" * 32, expiry_epoch=time.time() + 60, fence=1)
+    assert backend.renew(unknown, ttl_s=60.0) is False
+
+
+def test_renew_leaves_durable_record_alone_when_superseded_by_another_owner(backend):
+    """The durable envelope is the truth and the extension is owner-scoped:
+    if another process (a second adapter instance on the same bucket) has
+    already advanced the fence, our renew() must report False (contract:
+    succeeds ONLY if this token still owns), must NOT rewrite the envelope
+    now owned by someone else, and must leave our in-memory expiry
+    unchanged — our lease is then fence-rejected by write()."""
+    key = "renew/superseded"
+    r0 = gate.persist(backend, key, b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    other = ObjectStoreBackend(
+        endpoint=get_moto_endpoint(),
+        bucket=backend._client.bucket_name,
+        region=DUMMY_REGION,
+        access_key_id=DUMMY_ACCESS_KEY_ID,
+        secret_access_key=DUMMY_SECRET_ACCESS_KEY,
+    )
+
+    mine = backend.lock(key, ttl_s=30.0)
+    theirs = other.lock(key, ttl_s=30.0)
+    assert theirs.fence > mine.fence
+    header_theirs = _oracle_envelope_header(backend, key)
+    assert header_theirs["owner_token"] == theirs.token
+
+    puts0 = backend._client.put_count
+    local_before = backend._locks[key]
+    assert backend.renew(mine, ttl_s=300.0) is False
+    assert backend._locks[key] == local_before, "a failed durable renew must not extend the in-memory lease"
+    assert backend._client.put_count == puts0, "superseded owner must not PUT over the new owner's envelope"
+    assert _oracle_envelope_header(backend, key) == header_theirs
+
+    r = gate.persist(backend, key, b"mine", ctx=overwrite_ctx(r0.new_hash, mine), doc_type="system_state")
+    assert isinstance(r, STALE) and r.reason == "FENCE"
+    r2 = gate.persist(other, key, b"theirs", ctx=overwrite_ctx(r0.new_hash, theirs), doc_type="system_state")
+    assert isinstance(r2, OK)
+
+
+def test_renew_durable_extension_retries_once_on_412_then_lands(backend, monkeypatch):
+    key = "renew/retry-412"
+    r0 = gate.persist(backend, key, b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    lease = backend.lock(key, ttl_s=30.0)
+    before = _oracle_envelope_header(backend, key)
+
+    real_put = backend._client.put
+    if_match_calls = []
+
+    def _put(key_, body, *, precondition, meta_hash):
+        if "If-Match" in precondition:
+            if_match_calls.append(precondition["If-Match"])
+            if len(if_match_calls) == 1:
+                return 412, {}  # a concurrent ETag move raced us; adapter must re-read + retry
+        return real_put(key_, body, precondition=precondition, meta_hash=meta_hash)
+
+    monkeypatch.setattr(backend._client, "put", _put)
+    assert backend.renew(lease, ttl_s=300.0) is True
+    assert len(if_match_calls) == 2
+    after = _oracle_envelope_header(backend, key)
+    assert after["owner_expiry"] > before["owner_expiry"] + 200.0
+    assert after["owner_fence"] == before["owner_fence"] == lease.fence
+    assert after["version_hash"] == r0.new_hash
+
+
+def test_renew_survives_transport_failure_on_durable_reread(backend, monkeypatch):
+    key = "renew/reread-fails"
+    r0 = gate.persist(backend, key, b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    lease = backend.lock(key, ttl_s=30.0)
+    before = _oracle_envelope_header(backend, key)
+
+    def _boom(*a, **kw):
+        raise _ObjectStoreTransportError("simulated GET failure during renew")
+
+    monkeypatch.setattr(backend._client, "get_with_etag", _boom)
+    local_before = backend._locks[key]
+    assert backend.renew(lease, ttl_s=300.0) is False  # durable half did not land -> not renewed, never raised
+    assert backend._locks[key] == local_before
+    monkeypatch.undo()
+    assert _oracle_envelope_header(backend, key) == before  # durable record untouched
+    assert backend.renew(lease, ttl_s=300.0) is True  # transport back -> the same lease renews
+
+
+# ---------------------------------------------------------------------------
+# H1 Increment 2: _settle_current_hash_after_fence_loss is a BOUNDED settle
+# (poll while a newer fence is pending and the hash is unchanged, never past
+# the owner's expiry or _FENCE_LOSS_SETTLE_MAX_S): the winner's current hash
+# after a fence-loss STALE; None for an absent/phantom key; expected_hash if
+# the re-read fails. The C1 race guarantee itself is exercised by
+# conformance/suite.py::test_c1_fence_loss_stale_settles_to_winner_hash.
+# ---------------------------------------------------------------------------
+
+
+def test_fence_loss_stale_reports_winners_current_hash(backend):
+    key = "settle/winner"
+    r0 = gate.persist(backend, key, b"base", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+
+    ctx_a = fenced_ctx(backend, key, r0.new_hash)  # older fence
+    ctx_b = fenced_ctx(backend, key, r0.new_hash)  # newer fence supersedes A
+    assert ctx_b.precondition.lease.fence > ctx_a.precondition.lease.fence
+
+    rb = gate.persist(backend, key, b"b-wins", ctx=ctx_b, doc_type="system_state")
+    assert isinstance(rb, OK)
+    ra = gate.persist(backend, key, b"a-late", ctx=ctx_a, doc_type="system_state")
+    assert isinstance(ra, STALE), ra
+    assert ra.reason == "FENCE"
+    assert ra.current_hash == rb.new_hash, "STALE must carry the winner's CURRENT hash, not the pre-race one"
+    assert backend.read(key).body == b"b-wins"
+
+    assert backend._settle_current_hash_after_fence_loss(key, r0.new_hash) == rb.new_hash
+
+
+def test_settle_returns_none_for_absent_or_phantom_key(backend):
+    assert backend._settle_current_hash_after_fence_loss("settle/absent", "0" * 64) is None
+    backend.lock("settle/phantom", ttl_s=30.0)  # lock()'d, never written -> version_hash null
+    assert backend._settle_current_hash_after_fence_loss("settle/phantom", "0" * 64) is None
+
+
+@pytest.mark.parametrize("exc", [_PreSendNetworkError, _PostSendAckLostError, _ObjectStoreTransportError])
+def test_settle_returns_expected_hash_when_reread_fails(backend, monkeypatch, exc):
+    key = "settle/reread-fails"
+    r0 = gate.persist(backend, key, b"base", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    expected = "e" * 64  # deliberately NOT the stored hash: proves the fallback is the argument
+
+    def _boom(*a, **kw):
+        raise exc("simulated")
+
+    monkeypatch.setattr(backend._client, "get_with_etag", _boom)
+    assert backend._settle_current_hash_after_fence_loss(key, expected) == expected
+
+
+def test_settle_returns_expected_hash_for_foreign_non_envelope_object(backend):
+    key = "settle/foreign"
+    oracle_client().put_object(Bucket=backend._client.bucket_name, Key=key, Body=b"probe-litter")
+    expected = "e" * 64
+    assert backend._settle_current_hash_after_fence_loss(key, expected) == expected
+
+
+def test_fence_loss_stale_falls_back_to_expected_hash_when_settle_reread_fails(backend, monkeypatch):
+    """End-to-end: the CAS decision GET succeeds (so the fence loss is
+    detected), the settle re-read fails -> STALE carries expected_hash, never
+    None (which would falsely mean 'key absent')."""
+    key = "settle/e2e-fallback"
+    r0 = gate.persist(backend, key, b"base", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    ctx_old = fenced_ctx(backend, key, r0.new_hash)
+    fenced_ctx(backend, key, r0.new_hash)  # supersede the fence
+
+    real_get = backend._client.get_with_etag
+    gets = []
+
+    def _get(key_):
+        gets.append(key_)
+        if len(gets) == 1:
+            return real_get(key_)
+        raise _PostSendAckLostError("simulated settle re-read failure")
+
+    monkeypatch.setattr(backend._client, "get_with_etag", _get)
+    r = gate.persist(backend, key, b"late", ctx=ctx_old, doc_type="system_state")
+    assert isinstance(r, STALE) and r.reason == "FENCE"
+    assert r.current_hash == r0.new_hash
+    assert len(gets) == 2
+
+
+# ---------------------------------------------------------------------------
+# H1 Increment 2, Phase 2/3: _resolve_create_conflict — every branch behind a
+# create-only 412: phantom fill-in (owner/fence preserved), idempotent replay,
+# foreign object, vanished object, bounded retry, transport failure, N-way race.
+# ---------------------------------------------------------------------------
+
+
+def test_create_only_fills_phantom_preserving_owner_and_fence(backend):
+    key = "create/phantom"
+    lease = backend.lock(key, ttl_s=30.0)  # phantom envelope: owner/fence set, no data
+    assert backend.read(key) is None
+    assert _oracle_envelope_header(backend, key)["version_hash"] is None
+
+    r = gate.persist(backend, key, b"first", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r, OK), r
+    assert r.new_hash == sha256_hex(b"first")
+    assert backend.read(key).body == b"first"
+
+    header = _oracle_envelope_header(backend, key)
+    assert header["version_hash"] == r.new_hash
+    assert header["owner_token"] == lease.token, "fill-in must preserve the phantom's owner"
+    assert header["owner_fence"] == lease.fence, "fill-in must preserve the phantom's fence"
+    assert header["last_accepted_fence"] == 0
+
+    # The preserved lease is still good for the next CAS-update.
+    r2 = gate.persist(backend, key, b"second", ctx=overwrite_ctx(r.new_hash, lease), doc_type="system_state")
+    assert isinstance(r2, OK), r2
+    assert backend.read(key).body == b"second"
+
+
+def test_create_only_idempotent_replay_returns_ok_with_same_hash(backend):
+    key = "create/replay"
+    r0 = gate.persist(backend, key, b"same-bytes", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    header0 = _oracle_envelope_header(backend, key)
+
+    r1 = gate.persist(backend, key, b"same-bytes", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r1, OK), "retried create-only with identical bytes is an idempotent replay (§3)"
+    assert r1.new_hash == r0.new_hash
+    assert _oracle_envelope_header(backend, key) == header0  # nothing rewritten
+
+    r2 = gate.persist(backend, key, b"other-bytes", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r2, EXISTS)
+    assert r2.current_hash == r0.new_hash
+
+
+def test_create_only_against_foreign_object_reports_raw_content_hash(backend):
+    key = "create/foreign"
+    oracle_client().put_object(Bucket=backend._client.bucket_name, Key=key, Body=b"probe-litter")
+
+    r = gate.persist(backend, key, b"mine", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r, EXISTS), r
+    assert r.current_hash == sha256_hex(b"probe-litter")  # JUDGMENT CALL 5: raw content hash
+
+    r_same = gate.persist(backend, key, b"probe-litter", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r_same, OK)
+    assert r_same.new_hash == sha256_hex(b"probe-litter")
+
+    obj = oracle_client().get_object(Bucket=backend._client.bucket_name, Key=key)
+    assert obj["Body"].read() == b"probe-litter", "foreign object must never be overwritten"
+
+
+def test_create_only_retries_plain_create_when_object_vanished_after_412(backend, monkeypatch):
+    key = "create/vanished"
+    real_put = backend._client.put
+    preconditions = []
+
+    def _put(key_, body, *, precondition, meta_hash):
+        preconditions.append(dict(precondition))
+        if len(preconditions) == 1:
+            return 412, {}  # stale 412: by the time we re-read, nothing is there
+        return real_put(key_, body, precondition=precondition, meta_hash=meta_hash)
+
+    monkeypatch.setattr(backend._client, "put", _put)
+    r = gate.persist(backend, key, b"body", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r, OK), r
+    assert preconditions == [{"If-None-Match": "*"}, {"If-None-Match": "*"}]
+    assert backend.read(key).body == b"body"
+
+
+def test_phantom_fill_in_retries_on_412_then_lands(backend, monkeypatch):
+    key = "create/phantom-race"
+    lease = backend.lock(key, ttl_s=30.0)
+    real_put = backend._client.put
+    if_match = []
+
+    def _put(key_, body, *, precondition, meta_hash):
+        if "If-Match" in precondition:
+            if_match.append(precondition["If-Match"])
+            if len(if_match) == 1:
+                return 412, {}  # another fill-in / lock() moved the ETag first
+        return real_put(key_, body, precondition=precondition, meta_hash=meta_hash)
+
+    monkeypatch.setattr(backend._client, "put", _put)
+    r = gate.persist(backend, key, b"filled", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r, OK), r
+    assert len(if_match) == 2
+    assert backend.read(key).body == b"filled"
+    assert _oracle_envelope_header(backend, key)["owner_token"] == lease.token
+
+
+def test_create_conflict_gives_up_after_bounded_retries(backend, monkeypatch):
+    key = "create/never-converges"
+    backend.lock(key, ttl_s=30.0)
+    monkeypatch.setattr(backend, "_FENCE_RETRY_ATTEMPTS", 3)
+    real_put = backend._client.put
+    if_match = []
+
+    def _put(key_, body, *, precondition, meta_hash):
+        if "If-Match" in precondition:
+            if_match.append(1)
+            return 412, {}
+        return real_put(key_, body, precondition=precondition, meta_hash=meta_hash)
+
+    monkeypatch.setattr(backend._client, "put", _put)
+    r = gate.persist(backend, key, b"body", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r, ERROR) and r.kind is ErrorKind.CONFLICT_UNKNOWN
+    assert len(if_match) == 3, "exactly _FENCE_RETRY_ATTEMPTS fill-in attempts, then fail closed"
+    assert backend.read(key) is None  # still a phantom: nothing was written
+
+
+def test_create_conflict_reread_transport_failure_is_conflict_unknown(backend, monkeypatch):
+    key = "create/reread-fails"
+    r0 = gate.persist(backend, key, b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+
+    def _boom(*a, **kw):
+        raise _PreSendNetworkError("simulated")
+
+    monkeypatch.setattr(backend._client, "get_with_etag", _boom)
+    r = gate.persist(backend, key, b"v1", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r, ERROR) and r.kind is ErrorKind.CONFLICT_UNKNOWN
+    monkeypatch.undo()
+    assert backend.read(key).body == b"v0"
+
+
+def test_create_only_race_exactly_one_creator_wins(backend):
+    key = "create/race"
+    n = 6
+    barrier = threading.Barrier(n)
+    results = [None] * n
+
+    def worker(i):
+        barrier.wait()
+        results[i] = gate.persist(backend, key, f"creator-{i}".encode(), ctx=create_ctx(), doc_type="system_state")
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    oks = [r for r in results if isinstance(r, OK)]
+    exists = [r for r in results if isinstance(r, EXISTS)]
+    assert len(oks) == 1, results
+    assert len(exists) == n - 1, results
+    for e in exists:
+        assert e.current_hash == oks[0].new_hash
+    final = backend.read(key)
+    assert final.version_hash == oks[0].new_hash
+    assert final.body == f"creator-{results.index(oks[0])}".encode()
 
 
 # ---------------------------------------------------------------------------
@@ -565,11 +1042,195 @@ def test_real_provider_acceptance_deferred():
         secret_access_key=_REAL_SECRET_KEY,
     )
     key = f"knokeep-real-provider-acceptance/{threading.get_ident()}"
-    r0 = gate.persist(b, key, b"real-provider-smoke-test", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(b, key, b"real-provider-smoke-test", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
     r1 = gate.persist(
-        b, key, b"real-provider-smoke-test-v2", expected_hash=r0.new_hash, doc_type="system_state"
+        b, key, b"real-provider-smoke-test-v2", ctx=fenced_ctx(b, key, r0.new_hash), doc_type="system_state"
     )
     assert isinstance(r1, OK)
-    r2 = gate.persist(b, key, b"stale-attempt", expected_hash=r0.new_hash, doc_type="system_state")
+    r2 = gate.persist(b, key, b"stale-attempt", ctx=fenced_ctx(b, key, r0.new_hash), doc_type="system_state")
     assert isinstance(r2, STALE)
+
+
+# ---------------------------------------------------------------------------
+# Backward compatibility with PRE-ENVELOPE objects (written by the previous
+# adapter as the raw body + x-amz-meta-knokeep-sha256), envelope integrity
+# (header hash verified against the body), and phantom-free listing.
+# ---------------------------------------------------------------------------
+
+
+def _plant_legacy_object(backend: ObjectStoreBackend, key: str, body: bytes) -> None:
+    """Exactly what the pre-envelope adapter wrote: the raw logical body and
+    the sha256 metadata -- via the boto3 oracle, never the adapter."""
+    oracle_client().put_object(
+        Bucket=backend._client.bucket_name, Key=key, Body=body,
+        Metadata={"knokeep-sha256": sha256_hex(body)},
+    )
+
+
+def test_legacy_pre_envelope_object_reads_back_with_its_logical_body(backend):
+    key = "legacy/plain"
+    _plant_legacy_object(backend, key, b"written before the envelope existed")
+    blob = backend.read(key)
+    assert blob is not None
+    assert blob.body == b"written before the envelope existed"
+    assert blob.version_hash == sha256_hex(b"written before the envelope existed")
+    assert list(backend.list("legacy/")) == [key]
+
+
+def test_legacy_pre_envelope_object_is_upgraded_by_first_fenced_write(backend):
+    key = "legacy/upgrade"
+    _plant_legacy_object(backend, key, b"v-legacy")
+    legacy_hash = sha256_hex(b"v-legacy")
+
+    # lock() advances the fence: the object becomes an envelope carrying the
+    # SAME logical value, conditioned on the legacy object's own ETag.
+    lease = backend.lock(key, ttl_s=30.0)
+    backend.unlock(lease)
+    header = _oracle_envelope_header(backend, key)
+    assert header["version_hash"] == legacy_hash and header["owner_token"] == lease.token
+    assert backend.read(key).body == b"v-legacy"
+
+    r1 = gate.persist(backend, key, b"v-new", ctx=overwrite_ctx(legacy_hash, lease), doc_type="system_state")
+    assert isinstance(r1, OK)
+    assert backend.read(key).body == b"v-new"
+    assert backend.read(key).version_hash == r1.new_hash
+
+    # A stale CAS against the pre-upgrade hash is refused like any other.
+    lease2 = backend.lock(key, ttl_s=30.0)
+    backend.unlock(lease2)
+    r2 = gate.persist(backend, key, b"v-stale", ctx=overwrite_ctx(legacy_hash, lease2), doc_type="system_state")
+    assert isinstance(r2, STALE) and r2.current_hash == r1.new_hash
+
+
+def test_legacy_pre_envelope_object_create_only_semantics(backend):
+    key = "legacy/create"
+    _plant_legacy_object(backend, key, b"same")
+    replay = gate.persist(backend, key, b"same", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(replay, OK)  # idempotent create replay (§3)
+    clash = gate.persist(backend, key, b"different", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(clash, EXISTS) and clash.current_hash == sha256_hex(b"same")
+    assert backend.read(key).body == b"same"
+
+
+def test_foreign_object_without_metadata_is_still_corruption_not_data(backend):
+    """A non-envelope object WITHOUT the adapter's sha256 metadata is not a
+    legacy value: it is foreign litter, so read() raises and list() hides it."""
+    key = "foreign/litter"
+    oracle_client().put_object(Bucket=backend._client.bucket_name, Key=key, Body=b"not ours")
+    with pytest.raises(ObjectStoreBackendError):
+        backend.read(key)
+    assert list(backend.list("foreign/")) == []
+
+
+def test_envelope_hash_is_verified_against_body_on_read_and_cas(backend):
+    from store.objectstore import _encode_envelope
+
+    key = "integrity/mismatch"
+    r0 = gate.persist(backend, key, b"honest", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    ctx = fenced_ctx(backend, key, r0.new_hash)
+    header = _oracle_envelope_header(backend, key)
+
+    # Out-of-band: the body changes but the header still claims the old hash.
+    tampered = _encode_envelope(
+        header["owner_token"], header["owner_expiry"], header["owner_fence"],
+        header["last_accepted_fence"], r0.new_hash, b"tampered body",
+    )
+    oracle_client().put_object(
+        Bucket=backend._client.bucket_name, Key=key, Body=tampered,
+        Metadata={"knokeep-sha256": r0.new_hash},
+    )
+
+    with pytest.raises(ObjectStoreBackendError, match="does not match"):
+        backend.read(key)
+    r1 = gate.persist(backend, key, b"on top of a lie", ctx=ctx, doc_type="system_state")
+    assert isinstance(r1, ERROR) and r1.kind is ErrorKind.CORRUPTION
+    r2 = gate.persist(backend, key, b"honest", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r2, ERROR) and r2.kind is ErrorKind.CORRUPTION
+    # Nothing was written over the corrupted object.
+    obj = oracle_client().get_object(Bucket=backend._client.bucket_name, Key=key)
+    assert obj["Body"].read() == tampered
+
+
+def test_list_returns_only_real_keys_never_phantoms(backend):
+    r = gate.persist(backend, "real/one", b"data", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r, OK)
+    backend.lock("phantom/only", ttl_s=30.0)  # lock()'d, never written
+    lease = backend.lock("real/one", ttl_s=30.0)  # a lock on a REAL key keeps it listed
+    backend.unlock(lease)
+
+    assert list(backend.list("")) == ["real/one"]
+    assert list(backend.list("phantom/")) == []
+    assert backend.read("phantom/only") is None
+
+    # Once the phantom is filled by a create-only write it is a real key.
+    r2 = gate.persist(backend, "phantom/only", b"filled", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r2, OK)
+    assert list(backend.list("")) == ["phantom/only", "real/one"]
+
+
+def test_lock_on_real_key_preserves_logical_hash_metadata(backend):
+    key = "meta/keep"
+    r0 = gate.persist(backend, key, b"value", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    lease = backend.lock(key, ttl_s=30.0)
+    backend.unlock(lease)
+    head = oracle_client().head_object(Bucket=backend._client.bucket_name, Key=key)
+    assert head["Metadata"].get("knokeep-sha256") == r0.new_hash
+    phantom_head = None
+    backend.lock("meta/phantom", ttl_s=30.0)
+    phantom_head = oracle_client().head_object(Bucket=backend._client.bucket_name, Key="meta/phantom")
+    assert phantom_head["Metadata"].get("knokeep-sha256") == ""
+
+
+@pytest.mark.parametrize("header", [
+    b"{}",
+    b'{"schema_version": 1, "owner_token": null, "owner_expiry": 0.0, "owner_fence": 0, "last_accepted_fence": 0, "version_hash": null}',
+    b'{"schema_version": 2, "owner_token": null, "owner_expiry": 0.0, "owner_fence": 0, "last_accepted_fence": 0, "version_hash": "%s"}',
+    b'{"schema_version": 1, "owner_token": null, "owner_expiry": "never", "owner_fence": 0, "last_accepted_fence": 0, "version_hash": "%s"}',
+    b'{"schema_version": 1, "owner_token": null, "owner_expiry": 0.0, "owner_fence": -1, "last_accepted_fence": 0, "version_hash": "%s"}',
+    b'{"schema_version": 1, "owner_token": null, "owner_expiry": 0.0, "owner_fence": 0, "last_accepted_fence": 0, "version_hash": "nothex"}',
+], ids=["empty-header", "null-hash-nonempty-body", "schema-v2", "str-expiry", "negative-fence", "bad-hash"])
+def test_malformed_envelope_header_is_corruption_never_a_phantom(backend, header):
+    """A header that merely parses is not a valid envelope: in particular
+    `{}` (or a null version_hash) over a non-empty body must not read as a
+    phantom, or read() would report stored data absent and a create-only
+    write would overwrite it."""
+    import struct
+
+    from store.backend import BackendBusyError
+
+    body = b"stored user data"
+    header = header.replace(b"%s", sha256_hex(body).encode())
+    raw = b"KFE1" + struct.pack(">I", len(header)) + header + body
+    key = "envelope/malformed"
+    oracle_client().put_object(Bucket=backend._client.bucket_name, Key=key, Body=raw,
+                               Metadata={"knokeep-sha256": sha256_hex(body)})
+    with pytest.raises(ObjectStoreBackendError, match="corrupt envelope"):
+        backend.read(key)
+    r = gate.persist(backend, key, b"overwrite attempt", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r, ERROR) and r.kind is ErrorKind.CORRUPTION
+    obj = oracle_client().get_object(Bucket=backend._client.bucket_name, Key=key)
+    assert obj["Body"].read() == raw, "a malformed envelope must never be overwritten"
+    with pytest.raises(BackendBusyError):
+        backend.lock(key, ttl_s=30.0)
+
+
+def test_legacy_object_whose_bytes_look_like_an_envelope_reads_back_verbatim(backend):
+    """The legacy rule (metadata == sha256(raw)) is checked before the KFE1
+    magic: a pre-envelope value whose body happens to be a well-formed
+    envelope byte string is returned exactly as stored, not re-parsed."""
+    from store.objectstore import _encode_envelope
+
+    inner = _encode_envelope(None, 0.0, 0, 0, sha256_hex(b"inner"), b"inner")   # valid KFE1 bytes
+    key = "legacy/looks-like-envelope"
+    _plant_legacy_object(backend, key, inner)
+    blob = backend.read(key)
+    assert blob.body == inner and blob.version_hash == sha256_hex(inner)
+    assert list(backend.list("legacy/")) == [key]
+    lease = backend.lock(key, ttl_s=30.0)                     # upgrade keeps the bytes
+    backend.unlock(lease)
+    assert backend.read(key).body == inner
+    r = gate.persist(backend, key, b"next", ctx=overwrite_ctx(sha256_hex(inner), lease), doc_type="system_state")
+    assert isinstance(r, OK)

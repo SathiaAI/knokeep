@@ -36,6 +36,7 @@ from store.types import (
     ErrorKind,
     sha256_hex,
 )
+from tests.ctx_helpers import create_ctx, fenced_ctx
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +51,7 @@ class RecordingBackend:
         self.write_calls = 0
         self.captured = []  # list of (ScannedKey, ScannedBody) ever passed in
         self._store: dict = {}
+        self._locks: dict = {}
 
     def read(self, key):
         return self._store.get(key)
@@ -57,7 +59,10 @@ class RecordingBackend:
     def list(self, prefix):
         return iter(k for k in self._store if k.startswith(prefix))
 
-    def write(self, key, body, *, expected_hash):
+    def write(self, key, body, *, ctx):
+        from store.context import Overwrite
+
+        expected_hash = ctx.precondition.expected_hash if isinstance(ctx.precondition, Overwrite) else None
         self.write_calls += 1
         self.captured.append((key, body))
         if not isinstance(key, gate.ScannedKey) or not isinstance(body, gate.ScannedBody):
@@ -79,11 +84,35 @@ class RecordingBackend:
         self._store[key.key] = Blob(body=body.body, version_hash=new_hash)
         return OK(new_hash)
 
-    def lock(self, key, ttl_s):  # pragma: no cover - unused by these tests
-        raise NotImplementedError
+    def lock(self, key, ttl_s):
+        # Minimal in-memory advisory lock (same shape as store/fake.py),
+        # needed by tests.ctx_helpers.fenced_ctx() to build a real lease for
+        # this stub's CAS-update calls. Never the CAS mechanism itself.
+        import secrets as _secrets
+        import time as _time
 
-    def unlock(self, lock):  # pragma: no cover - unused
-        raise NotImplementedError
+        from store.backend import BackendBusyError, Lock
+
+        now = _time.time()
+        existing = self._locks.get(key)
+        if existing is not None and existing[1] > now:
+            raise BackendBusyError(f"key {key!r} is locked")
+        token = _secrets.token_hex(16)
+        expiry = now + ttl_s
+        self._locks[key] = (token, expiry)
+        return Lock(key=key, token=token, expiry_epoch=expiry)
+
+    def unlock(self, lock):
+        import time as _time
+
+        existing = self._locks.get(lock.key)
+        if existing is None:
+            return False
+        token, expiry = existing
+        if token != lock.token or expiry <= _time.time():
+            return False
+        del self._locks[lock.key]
+        return True
 
     def renew(self, lock, ttl_s):  # pragma: no cover - unused
         raise NotImplementedError
@@ -106,7 +135,7 @@ def test_key_scan_blocks_secret_shaped_key_name():
         rec,
         "sk-abcdefghijklmnopqrstuvwxyz1234567890",
         b"hello",
-        expected_hash=None,
+        ctx=create_ctx(),
         doc_type="journal",
     )
     assert isinstance(result, ERROR)
@@ -125,7 +154,7 @@ def test_plain_hex_hashes_are_not_blocked(doc_type):
     sha256_like = hashlib.sha256(b"some content").hexdigest()  # 64 hex chars
     git_sha_like = hashlib.sha1(b"some other content").hexdigest()  # 40 hex chars
     body = f"version_hash={sha256_like}\ncommit={git_sha_like}\n".encode()
-    result = gate.persist(rec, "state/doc", body, expected_hash=None, doc_type=doc_type)
+    result = gate.persist(rec, "state/doc", body, ctx=create_ctx(), doc_type=doc_type)
     assert isinstance(result, OK)
     assert rec.write_calls == 1
     assert rec.read("state/doc").body == body
@@ -134,7 +163,7 @@ def test_plain_hex_hashes_are_not_blocked(doc_type):
 def test_mixed_case_high_entropy_token_is_blocked():
     rec = RecordingBackend()
     body = b"secret=" + secrets.token_urlsafe(40).encode()
-    result = gate.persist(rec, "journal/entry", body, expected_hash=None, doc_type="journal")
+    result = gate.persist(rec, "journal/entry", body, ctx=create_ctx(), doc_type="journal")
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.SECRET_BLOCKED
     assert rec.write_calls == 0
@@ -163,14 +192,14 @@ def test_reconcile_malformed_intended_hash_is_invalid_argument():
 
 def test_reconcile_current_equals_expected_returns_retrys_real_ok():
     rec = RecordingBackend()
-    r0 = gate.persist(rec, "k", b"v0", expected_hash=None, doc_type="journal")
+    r0 = gate.persist(rec, "k", b"v0", ctx=create_ctx(), doc_type="journal")
     assert isinstance(r0, OK)
 
     intended = b"v1"
     intended_hash = sha256_hex(intended)
 
     def retry():
-        return gate.persist(rec, "k", intended, expected_hash=r0.new_hash, doc_type="journal")
+        return gate.persist(rec, "k", intended, ctx=fenced_ctx(rec, "k", r0.new_hash), doc_type="journal")
 
     result = gate.reconcile(
         rec, "k", intended_new_hash=intended_hash, expected_hash=r0.new_hash, retry=retry
@@ -182,7 +211,7 @@ def test_reconcile_current_equals_expected_returns_retrys_real_ok():
 
 def test_reconcile_current_equals_expected_returns_retrys_real_stale_unchanged():
     rec = RecordingBackend()
-    r0 = gate.persist(rec, "k", b"v0", expected_hash=None, doc_type="journal")
+    r0 = gate.persist(rec, "k", b"v0", ctx=create_ctx(), doc_type="journal")
     assert isinstance(r0, OK)
 
     intended = b"v1"
@@ -190,7 +219,7 @@ def test_reconcile_current_equals_expected_returns_retrys_real_stale_unchanged()
 
     def retry():
         # The retry itself races against a stale expected_hash -> STALE.
-        return gate.persist(rec, "k", intended, expected_hash="f" * 64, doc_type="journal")
+        return gate.persist(rec, "k", intended, ctx=fenced_ctx(rec, "k", "f" * 64), doc_type="journal")
 
     result = gate.reconcile(
         rec, "k", intended_new_hash=intended_hash, expected_hash=r0.new_hash, retry=retry
@@ -206,7 +235,7 @@ def test_reconcile_current_equals_expected_returns_retrys_real_stale_unchanged()
 
 def test_scanned_key_and_body_reject_attribute_mutation():
     rec = RecordingBackend()
-    r = gate.persist(rec, "k", b"hello", expected_hash=None, doc_type="journal")
+    r = gate.persist(rec, "k", b"hello", ctx=create_ctx(), doc_type="journal")
     assert isinstance(r, OK)
     key_obj, body_obj = rec.captured[0]
 
@@ -228,7 +257,7 @@ def test_scanned_key_and_body_reject_attribute_mutation():
 def test_generation_header_with_21_digit_run_is_invalid_argument():
     rec = RecordingBackend()
     bad_header = b"#knokeep-gen:" + b"1" * 21 + b"\n" + b"leaseholder=alice"
-    result = gate.persist(rec, "lease/x", bad_header, expected_hash=None, doc_type="lease")
+    result = gate.persist(rec, "lease/x", bad_header, ctx=create_ctx(), doc_type="lease")
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.INVALID_ARGUMENT
     assert rec.write_calls == 0
@@ -236,7 +265,7 @@ def test_generation_header_with_21_digit_run_is_invalid_argument():
 
 def test_key_segment_ending_in_dot_is_invalid_argument():
     rec = RecordingBackend()
-    result = gate.persist(rec, "foo./bar", b"body", expected_hash=None, doc_type="journal")
+    result = gate.persist(rec, "foo./bar", b"body", ctx=create_ctx(), doc_type="journal")
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.INVALID_ARGUMENT
     assert rec.write_calls == 0
@@ -246,7 +275,7 @@ def test_key_segment_over_255_chars_is_invalid_argument():
     rec = RecordingBackend()
     long_segment = "a" * 256
     result = gate.persist(
-        rec, f"dir/{long_segment}", b"body", expected_hash=None, doc_type="journal"
+        rec, f"dir/{long_segment}", b"body", ctx=create_ctx(), doc_type="journal"
     )
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.INVALID_ARGUMENT
@@ -260,7 +289,7 @@ def test_key_over_1024_chars_total_is_invalid_argument():
     # per-segment cap.
     long_key = "/".join(["ab"] * 400)  # 400*2 + 399 separators = 1199 chars
     assert len(long_key) > 1024
-    result = gate.persist(rec, long_key, b"body", expected_hash=None, doc_type="journal")
+    result = gate.persist(rec, long_key, b"body", ctx=create_ctx(), doc_type="journal")
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.INVALID_ARGUMENT
     assert rec.write_calls == 0
@@ -280,11 +309,11 @@ def test_make_generation_header_accepts_int():
 
 def test_verify_pair_true_for_same_persist_call_false_otherwise():
     rec = RecordingBackend()
-    r1 = gate.persist(rec, "pair/a", b"body-a", expected_hash=None, doc_type="journal")
+    r1 = gate.persist(rec, "pair/a", b"body-a", ctx=create_ctx(), doc_type="journal")
     assert isinstance(r1, OK)
     key_a, body_a = rec.captured[0]
 
-    r2 = gate.persist(rec, "pair/b", b"body-b", expected_hash=None, doc_type="journal")
+    r2 = gate.persist(rec, "pair/b", b"body-b", ctx=create_ctx(), doc_type="journal")
     assert isinstance(r2, OK)
     key_b, body_b = rec.captured[1]
 
@@ -309,7 +338,7 @@ def test_verify_pair_true_for_same_persist_call_false_otherwise():
 def test_oversized_body_is_invalid_argument():
     rec = RecordingBackend()
     oversized = b"a" * (8 * 1024 * 1024 + 1)
-    result = gate.persist(rec, "big/doc", oversized, expected_hash=None, doc_type="journal")
+    result = gate.persist(rec, "big/doc", oversized, ctx=create_ctx(), doc_type="journal")
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.INVALID_ARGUMENT
     assert rec.write_calls == 0
@@ -325,8 +354,152 @@ def test_oversized_body_is_invalid_argument():
 )
 def test_added_secret_prefixes_are_blocked(planted, label_substr):
     rec = RecordingBackend()
-    result = gate.persist(rec, "secrets/x", planted, expected_hash=None, doc_type="journal")
+    result = gate.persist(rec, "secrets/x", planted, ctx=create_ctx(), doc_type="journal")
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.SECRET_BLOCKED
     assert any(label_substr.lower() in lbl.lower() for lbl in result.labels)
     assert rec.write_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# OperationContext precondition is a CLOSED union: anything that is not
+# exactly CreateOnly or Overwrite is INVALID_ARGUMENT before any I/O, never
+# silently treated as create-only.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "precondition",
+    [None, "create", 0, object(), types.SimpleNamespace(expected_hash="a" * 64, lease=None)],
+    ids=["None", "str", "int", "object", "overwrite-lookalike"],
+)
+def test_unknown_precondition_type_is_invalid_argument_before_io(precondition):
+    from store.context import AuthContext, OperationContext
+
+    backend = RecordingBackend()
+    ctx = OperationContext(auth=AuthContext(), precondition=precondition)
+    result = gate.persist(backend, "absent/key", b"body", ctx=ctx, doc_type="system_state")
+    assert isinstance(result, ERROR)
+    assert result.kind is ErrorKind.INVALID_ARGUMENT
+    assert backend.write_calls == 0, "must be refused before the adapter is called"
+    assert backend.read("absent/key") is None
+
+
+def test_non_operation_context_ctx_is_invalid_argument_before_io():
+    from store.context import CreateOnly
+
+    backend = RecordingBackend()
+    lookalike = types.SimpleNamespace(auth=None, precondition=CreateOnly(), operation_id="x")
+    result = gate.persist(backend, "absent/key", b"body", ctx=lookalike, doc_type="system_state")
+    assert isinstance(result, ERROR) and result.kind is ErrorKind.INVALID_ARGUMENT
+    assert backend.write_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# Reserved internal namespace: no logical key may alias an adapter's own
+# bookkeeping (git's `.knokeep-fence/` sidecars).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("key", [".knokeep-fence/" + "0" * 64 + ".fence", ".knokeep-fence/" + "ab" * 32 + ".fence"])
+def test_reserved_fence_sidecar_key_is_invalid_argument_before_io(key):
+    backend = RecordingBackend()
+    result = gate.persist(backend, key, b"body", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(result, ERROR) and result.kind is ErrorKind.INVALID_ARGUMENT
+    assert backend.write_calls == 0
+
+
+@pytest.mark.parametrize("key", [
+    "knokeep-fence/abc", "x/.knokeep-fence/abc", ".knokeep-fence2/abc", ".knokeep/probe/abc",
+    ".knokeep-fence/notes", ".knokeep-fence/abc.fence", ".knokeep-fence/x/y",       # legal pre-upgrade keys stay legal
+    ".knokeep-fence/" + "0" * 63 + ".fence", ".knokeep-fence/" + "0" * 64 + ".fenc",  # not the canonical shape
+])
+def test_non_reserved_lookalike_keys_still_accepted(key):
+    backend = RecordingBackend()
+    result = gate.persist(backend, key, b"body", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(result, OK), result
+
+
+# ---------------------------------------------------------------------------
+# An Overwrite must carry a real, well-formed Lock for THIS key; anything else
+# is INVALID_ARGUMENT before any I/O (never a backend-side fence STALE / raise).
+# ---------------------------------------------------------------------------
+
+
+def _bad_leases(key):
+    from store.backend import Lock
+
+    good = Lock(key=key, token="t" * 32, expiry_epoch=4102444800.0, fence=1)
+    return [
+        pytest.param(None, id="None"),
+        pytest.param("lease", id="str"),
+        pytest.param(types.SimpleNamespace(key=key, token="t", expiry_epoch=1.0, fence=1), id="lookalike"),
+        pytest.param(Lock(key="other/key", token="t" * 32, expiry_epoch=4102444800.0, fence=1), id="other-key"),
+        pytest.param(Lock(key=key, token="", expiry_epoch=4102444800.0, fence=1), id="empty-token"),
+        pytest.param(Lock(key=key, token="t" * 32, expiry_epoch=4102444800.0, fence=-1), id="negative-fence"),
+        pytest.param(Lock(key=key, token="t" * 32, expiry_epoch=4102444800.0, fence="1"), id="str-fence"),
+        pytest.param(Lock(key=key, token="t" * 32, expiry_epoch="soon", fence=1), id="str-expiry"),
+        pytest.param(good, id="well-formed"),
+    ]
+
+
+@pytest.mark.parametrize("lease", _bad_leases("docs/k"))
+def test_overwrite_with_malformed_lease_is_invalid_argument_before_io(lease):
+    from store.backend import Lock
+    from store.context import AuthContext, OperationContext, Overwrite
+
+    backend = RecordingBackend()
+    r0 = gate.persist(backend, "docs/k", b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    backend.write_calls = 0
+    ctx = OperationContext(auth=AuthContext(), precondition=Overwrite(r0.new_hash, lease))
+    result = gate.persist(backend, "docs/k", b"v1", ctx=ctx, doc_type="system_state")
+    well_formed = (isinstance(lease, Lock) and lease.key == "docs/k" and lease.token
+                   and lease.fence == 1 and isinstance(lease.expiry_epoch, float))
+    if well_formed:
+        assert isinstance(result, OK) and backend.write_calls == 1  # the stub enforces no fence
+    else:
+        assert isinstance(result, ERROR) and result.kind is ErrorKind.INVALID_ARGUMENT
+        assert backend.write_calls == 0, "malformed lease must be refused before the adapter is called"
+        assert backend.read("docs/k").body == b"v0"
+
+
+def test_validate_write_matches_persist_pre_io_checks():
+    """validate_write() is the pure copy of persist()'s argument checks."""
+    assert gate.validate_write("docs/k", b"body", doc_type="system_state") is None
+    cases = [
+        ("docs/k", b"body", "system_state", "nothex"),           # bad hash
+        ("docs/k", b"body", 7, None),                             # doc_type not str
+        ("../k", b"body", "system_state", None),                  # bad key
+        (".knokeep-fence/" + "0" * 64 + ".fence", b"body", "system_state", None),  # reserved sidecar key
+        ("docs/k", "str-body", "system_state", None),             # body not bytes
+        ("docs/k", b"no generation", "lease", None),              # non-STATE without generation
+        ("docs/k", b"\x00nul", "system_state", None),             # text contract
+    ]
+    for key, body, doc_type, h in cases:
+        err = gate.validate_write(key, body, doc_type=doc_type, expected_hash=h)
+        assert isinstance(err, ERROR) and err.kind is ErrorKind.INVALID_ARGUMENT, (key, body, doc_type, h)
+    blocked = gate.validate_write("docs/k", b"AKIAIOSFODNN7EXAMPLE token", doc_type="system_state")
+    assert isinstance(blocked, ERROR) and blocked.kind is ErrorKind.SECRET_BLOCKED
+
+
+@pytest.mark.parametrize("fence,accepted", [((1 << 63) - 1, True), (1 << 63, False), (1 << 64, False), (2 ** 70, False)])
+def test_lease_fence_outside_the_adapters_64_bit_range_is_invalid_argument(fence, accepted):
+    """Every adapter stores the fence in a 64-bit field (Postgres bigint, the
+    local journal trailer); an out-of-range fence is refused pre-I/O instead
+    of failing inside an adapter's encoder."""
+    from store.backend import Lock
+    from store.context import AuthContext, OperationContext, Overwrite
+
+    backend = RecordingBackend()
+    r0 = gate.persist(backend, "docs/k", b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    backend.write_calls = 0
+    lease = Lock(key="docs/k", token="t" * 32, expiry_epoch=4102444800.0, fence=fence)
+    ctx = OperationContext(auth=AuthContext(), precondition=Overwrite(r0.new_hash, lease))
+    result = gate.persist(backend, "docs/k", b"v1", ctx=ctx, doc_type="system_state")
+    if accepted:
+        assert isinstance(result, OK) and backend.write_calls == 1
+    else:
+        assert isinstance(result, ERROR) and result.kind is ErrorKind.INVALID_ARGUMENT
+        assert backend.write_calls == 0

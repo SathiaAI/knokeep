@@ -13,14 +13,26 @@ of duplicating it here.
 """
 from __future__ import annotations
 
+import json
+import time
+
 import pytest
 
-from migrate.migrate import FrozenBackend, MigrationReport, SourceFrozenError, migrate
+from migrate.migrate import (
+    FrozenBackend,
+    MigrationReport,
+    SourceFrozenError,
+    migrate,
+    _MIGRATION_HEARTBEAT_INTERVAL_S,
+    _MIGRATION_LEASE_KEY,
+    _MIGRATION_LEASE_TTL_S,
+)
 from store import gate
 from store.fake import FakeBackend
 from store.local import LocalBackend
 from store.objectstore import ObjectStoreBackend
 from store.types import Blob, ERROR, ErrorKind, OK, sha256_hex
+from tests.ctx_helpers import create_ctx
 from tests.moto_support import (
     DUMMY_ACCESS_KEY_ID,
     DUMMY_REGION,
@@ -31,7 +43,7 @@ from tests.moto_support import (
 
 
 def _put(backend, key: str, body: bytes):
-    r = gate.persist(backend, key, body, expected_hash=None, doc_type="system_state")
+    r = gate.persist(backend, key, body, ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r, OK), f"setup write for {key!r} failed: {r!r}"
     return r
 
@@ -248,7 +260,7 @@ def test_planted_secret_aborts_before_any_upload():
     # the planted one in the manifest (two-pass scan-then-copy).
     assert report.keys_copied == 0
     assert report.keys_already_present == 0
-    assert list(target.list("")) == []
+    assert [k for k in target.list("") if k != _MIGRATION_LEASE_KEY] == []
 
 
 def test_custom_scanner_is_additive_defense_in_depth():
@@ -278,7 +290,7 @@ def test_custom_scanner_is_additive_defense_in_depth():
     assert report.status == "aborted"
     assert report.aborted_key == "notes/word"
     assert report.secret_scan_labels == ("contains-banana",)
-    assert list(target.list("")) == []
+    assert [k for k in target.list("") if k != _MIGRATION_LEASE_KEY] == []
 
     # (2) a permissive pre-scanner does NOT let a real secret through --
     # store.gate.persist()'s own mandatory scan still blocks it at write time.
@@ -293,7 +305,7 @@ def test_custom_scanner_is_additive_defense_in_depth():
     report2 = migrate(source2, target2, scanner=_never_flags)
     assert report2.status == "aborted"
     assert report2.aborted_key == "secrets/planted"
-    assert list(target2.list("")) == []
+    assert [k for k in target2.list("") if k != _MIGRATION_LEASE_KEY] == []
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +339,7 @@ def test_secret_shaped_key_name_aborts_before_any_upload_and_key_is_not_leaked()
     # the secret-shaped key name in the manifest.
     assert report.keys_copied == 0
     assert report.keys_already_present == 0
-    assert list(target.list("")) == []
+    assert [k for k in target.list("") if k != _MIGRATION_LEASE_KEY] == []
 
 
 # ---------------------------------------------------------------------------
@@ -347,8 +359,8 @@ class _TimeoutAfterCommitThenLandedBackend(FakeBackend):
         self._flaky_key = flaky_key
         self._armed = True
 
-    def write(self, key, body, *, expected_hash):
-        result = super().write(key, body, expected_hash=expected_hash)
+    def write(self, key, body, *, ctx):
+        result = super().write(key, body, ctx=ctx)
         if self._armed and key.key == self._flaky_key:
             self._armed = False
             if isinstance(result, OK):
@@ -380,10 +392,10 @@ class _TimeoutAfterCommitNeverLandedBackend(FakeBackend):
         super().__init__()
         self._flaky_key = flaky_key
 
-    def write(self, key, body, *, expected_hash):
+    def write(self, key, body, *, ctx):
         if key.key == self._flaky_key:
             return ERROR(ErrorKind.TIMEOUT_AFTER_COMMIT)
-        return super().write(key, body, expected_hash=expected_hash)
+        return super().write(key, body, ctx=ctx)
 
 
 def test_timeout_after_commit_that_never_landed_aborts():
@@ -463,11 +475,11 @@ class _FlakyOnceBackend(FakeBackend):
         self._fail_key = fail_key
         self._armed = True
 
-    def write(self, key, body, *, expected_hash):
+    def write(self, key, body, *, ctx):
         if self._armed and key.key == self._fail_key:
             self._armed = False
             raise ConnectionError("simulated transient network failure mid-migration")
-        return super().write(key, body, expected_hash=expected_hash)
+        return super().write(key, body, ctx=ctx)
 
 
 def test_interrupted_cutover_then_rerun_completes_idempotently():
@@ -516,7 +528,7 @@ def test_frozen_backend_write_raises():
     assert frozen.frozen is True
 
     with pytest.raises(SourceFrozenError):
-        frozen.write(None, None, expected_hash=None)
+        frozen.write(None, None, ctx=create_ctx())
 
     # Reads still work normally through the wrapper.
     blob = frozen.read("x")
@@ -558,3 +570,768 @@ def test_report_is_a_migration_report_instance():
     assert report.source_key_count == 0
     assert report.unexpected_target_keys == ()
     assert report.finished_at >= report.started_at
+
+
+# ---------------------------------------------------------------------------
+# H1 Increment 2 / D-008: session-scoped migration lease (mutex + takeover).
+# ---------------------------------------------------------------------------
+
+
+def test_concurrent_migration_refused_when_lease_held(tmp_path):
+    """A second migration must NOT run while a live lease is held on the target
+    (the session-scoped mutex). We simulate a live holder by taking the control
+    lease directly, then migrate() must abort cleanly copying nothing."""
+    source = FakeBackend()
+    _put(source, "proj/system_state", b"the one source note")
+    target = FakeBackend()
+
+    held = target.lock(_MIGRATION_LEASE_KEY, 120.0)  # a live migration holds it
+    try:
+        report = migrate(source, target)
+    finally:
+        target.unlock(held)
+
+    assert report.status == "aborted"
+    assert "lease unavailable" in (report.reason or "")
+    assert report.keys_copied == 0 and report.keys_already_present == 0
+    # The blocked migration copied no DATA (the live holder's lease doc may exist).
+    assert [k for k in target.list("") if k != _MIGRATION_LEASE_KEY] == []
+
+
+def test_migration_rerun_after_clean_release_records_prior_owner_not_a_takeover(tmp_path):
+    """After a migration finishes it marks its control doc RELEASED. A later
+    run re-acquires the lease as a clean handoff: it records the previous
+    holder in `prior_owner` (audit) but NOT in `took_over_from`, which is
+    reserved for a stale-owner takeover of a crashed run (#18 item 8). Both
+    runs succeed; the re-run is idempotent (create-only replay skips
+    already-copied keys)."""
+    source = FakeBackend()
+    _put(source, "proj/system_state", b"the one source note")
+
+    target = FakeBackend()
+    r1 = migrate(source, target)
+    assert r1.status == "success" and r1.keys_copied == 1
+
+    doc1 = json.loads(target.read(_MIGRATION_LEASE_KEY).body.decode("utf-8"))
+    assert doc1["kind"] == "knokeep-migration-lease"
+    assert doc1["status"] == "released" and doc1["released_at"] is not None
+    assert doc1["took_over_from"] is None and doc1["prior_owner"] is None
+    owner1 = doc1["owner_id"]
+
+    r2 = migrate(source, target)          # re-run: clean handoff from a released lease
+    assert r2.status == "success"
+    assert r2.keys_copied == 0 and r2.keys_already_present == 1  # idempotent replay
+
+    doc2 = json.loads(target.read(_MIGRATION_LEASE_KEY).body.decode("utf-8"))
+    assert doc2["owner_id"] != owner1
+    assert doc2["prior_owner"] == owner1       # audit trail of the previous holder
+    assert doc2["took_over_from"] is None      # a clean release is NOT a takeover
+    assert doc2["status"] == "released"
+
+
+def _plant_control_doc(target, *, owner_id, status, expires_at, **extra):
+    doc = {"kind": "knokeep-migration-lease", "owner_id": owner_id, "status": status,
+           "expires_at": expires_at, "write_id": "w", "started_at": 0.0,
+           "heartbeat_at": 0.0, "prior_owner": None, "took_over_from": None,
+           "released_at": None}
+    doc.update(extra)
+    body = json.dumps(doc, sort_keys=True).encode("utf-8")
+    blob = target.read(_MIGRATION_LEASE_KEY)
+    if blob is None:
+        _put(target, _MIGRATION_LEASE_KEY, body)
+    else:
+        lease = target.lock(_MIGRATION_LEASE_KEY, 30.0)
+        target.unlock(lease)
+        from tests.ctx_helpers import overwrite_ctx
+        r = gate.persist(target, _MIGRATION_LEASE_KEY, body,
+                         ctx=overwrite_ctx(blob.version_hash, lease), doc_type="system_state")
+        assert isinstance(r, OK), r
+    return body
+
+
+def test_stale_owner_takeover_of_crashed_migration_is_audited(tmp_path):
+    """A control doc still marked "held" whose expires_at has passed is a
+    crashed migration: the next run takes the lease over and records that
+    owner in `took_over_from`."""
+    source = FakeBackend()
+    _put(source, "docs/a", b"alpha")
+    target = FakeBackend()
+    _plant_control_doc(target, owner_id="crashed-owner", status="held",
+                       expires_at=time.time() - 1.0)
+
+    report = migrate(source, target)
+    assert report.status == "success", report.reason
+    doc = json.loads(target.read(_MIGRATION_LEASE_KEY).body.decode("utf-8"))
+    assert doc["took_over_from"] == "crashed-owner"
+    assert doc["prior_owner"] == "crashed-owner"
+    assert doc["status"] == "released"
+    assert target.read("docs/a").body == b"alpha"
+
+
+def test_live_durable_lease_refuses_second_migration_without_touching_target(tmp_path):
+    """The DURABLE control doc is the primary mutex: a "held" doc with a
+    future expires_at refuses a second migration even though nobody holds the
+    in-memory advisory lock (the cross-process case). The refusing run must
+    not write anything -- not even advance the holder's fence via lock()."""
+    source = FakeBackend()
+    _put(source, "docs/a", b"alpha")
+    target = FakeBackend()
+    body = _plant_control_doc(target, owner_id="live-owner", status="held",
+                              expires_at=time.time() + 300.0)
+    lock_calls = []
+    real_lock = target.lock
+
+    def _spy_lock(key, ttl_s):
+        lock_calls.append(key)
+        return real_lock(key, ttl_s)
+
+    target.lock = _spy_lock
+    report = migrate(source, target)
+    assert report.status == "aborted"
+    assert "live lease" in report.reason and "live-owner" in report.reason
+    assert lock_calls == [], "a refused run must not advance the live holder's fence"
+    assert target.read(_MIGRATION_LEASE_KEY).body == body  # untouched
+    assert target.read("docs/a") is None
+
+
+def test_control_key_holding_real_data_on_target_refuses_migration(tmp_path):
+    source = FakeBackend()
+    _put(source, "docs/a", b"alpha")
+    target = FakeBackend()
+    _put(target, _MIGRATION_LEASE_KEY, b"this is somebody's real document")
+
+    report = migrate(source, target)
+    assert report.status == "aborted"
+    assert "holds real data" in report.reason
+    assert target.read(_MIGRATION_LEASE_KEY).body == b"this is somebody's real document"
+    assert target.read("docs/a") is None
+
+
+def test_control_key_holding_real_data_on_source_aborts_instead_of_silently_omitting(tmp_path):
+    source = FakeBackend()
+    _put(source, "docs/a", b"alpha")
+    _put(source, _MIGRATION_LEASE_KEY, b"a real value that happens to live at the control key")
+    target = FakeBackend()
+
+    report = migrate(source, target)
+    assert report.status == "aborted"
+    assert "collides with the migration control key" in report.reason
+    assert report.aborted_key == _MIGRATION_LEASE_KEY
+    assert report.keys_copied == 0
+    assert target.read("docs/a") is None  # nothing was uploaded
+
+
+def test_two_backend_instances_same_objectstore_cannot_both_hold_the_migration_lease():
+    """Two PROCESSES (simulated by two ObjectStoreBackend instances on the
+    same bucket: separate in-memory advisory registries) against one target:
+    the durable control doc keeps the second migration out while the first
+    holds the lease, and lets it in after a clean release."""
+    from migrate.migrate import _acquire_migration_lease
+
+    endpoint, bucket = get_moto_endpoint(), make_bucket()
+
+    def _instance():
+        return ObjectStoreBackend(
+            endpoint=endpoint, bucket=bucket, region=DUMMY_REGION,
+            access_key_id=DUMMY_ACCESS_KEY_ID, secret_access_key=DUMMY_SECRET_ACCESS_KEY,
+        )
+
+    target_a, target_b = _instance(), _instance()
+    source = FakeBackend()
+    _put(source, "docs/a", b"alpha")
+
+    lease_a, err = _acquire_migration_lease(target_a, "proc-a", "w-a", time.time())
+    assert err is None and lease_a is not None
+    try:
+        # Process B: its advisory registry is empty, so ONLY the durable doc
+        # can keep it out.
+        report_b = migrate(source, target_b)
+        assert report_b.status == "aborted", report_b
+        assert "live lease" in report_b.reason and "proc-a" in report_b.reason
+        assert target_b.read("docs/a") is None
+        # A's own lease keeps heartbeating fine meanwhile.
+        assert lease_a.heartbeat_if_due() is None
+    finally:
+        lease_a.release()
+
+    report_b2 = migrate(source, target_b)
+    assert report_b2.status == "success", report_b2.reason
+    assert target_a.read("docs/a").body == b"alpha"
+    doc = json.loads(target_a.read(_MIGRATION_LEASE_KEY).body.decode("utf-8"))
+    assert doc["prior_owner"] == "proc-a" and doc["took_over_from"] is None
+
+
+def test_two_backend_instances_same_git_remote_cannot_both_hold_the_migration_lease(tmp_path):
+    import subprocess
+
+    from migrate.migrate import _acquire_migration_lease
+    from store.git_backend import GitBackend
+
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--quiet", "--bare", "-b", "main", str(remote)],
+                   check=True, capture_output=True)
+    target_a = GitBackend(tmp_path / "work-a", remote)
+    target_b = GitBackend(tmp_path / "work-b", remote)
+    source = FakeBackend()
+    _put(source, "docs/a", b"alpha")
+
+    lease_a, err = _acquire_migration_lease(target_a, "proc-a", "w-a", time.time())
+    assert err is None and lease_a is not None
+    try:
+        report_b = migrate(source, target_b)
+        assert report_b.status == "aborted", report_b
+        assert "live lease" in report_b.reason
+        assert target_b.read("docs/a") is None
+    finally:
+        lease_a.release()
+
+    report_b2 = migrate(source, target_b)
+    assert report_b2.status == "success", report_b2.reason
+    assert target_a.read("docs/a").body == b"alpha"
+    # Fence sidecars created by the lease never leak into the logical keyspace.
+    assert sorted(target_a.list("")) == ["docs/a", _MIGRATION_LEASE_KEY]
+
+
+# ---------------------------------------------------------------------------
+# H1 Increment 2 / D-008: heartbeat by ELAPSED TIME (both passes) + control-key
+# exclusion.
+# ---------------------------------------------------------------------------
+
+
+class _FakeClock:
+    """Drives migrate.migrate._monotonic deterministically. Each DATA-key
+    write on the target advances it by `per_write_s` (a slow copy); control
+    doc writes do not."""
+
+    def __init__(self, per_write_s: float):
+        self.now = 1000.0
+        self.per_write_s = per_write_s
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class _SlowCopyTarget(FakeBackend):
+    """A target whose renew() succeeds for the first `ok_renewals` heartbeat
+    calls and then simulates the migration lease having been TAKEN OVER
+    mid-copy (#18 item 4): another owner holds the durable fence and has
+    rewritten the control doc, exactly what a crash-takeover by a second
+    process leaves behind -- so renew() is False and the run's next fenced
+    control-doc write finds the doc no longer its own. Data-key writes
+    advance the injected clock. Records every renew call so the test can
+    assert the heartbeat cadence and the lock/TTL it was fed."""
+
+    def __init__(self, clock: _FakeClock, ok_renewals: int):
+        super().__init__()
+        self._clock = clock
+        self._ok_renewals = ok_renewals
+        self.renew_calls = []
+
+    def renew(self, lock, ttl_s):
+        self.renew_calls.append((lock, ttl_s))
+        if len(self.renew_calls) > self._ok_renewals:
+            with self._mutex:                                 # the takeover, as another process would leave it
+                fs = self._fence.setdefault(lock.key, {})
+                fs["owner_token"] = "taker-" + lock.token[:8]
+                fs["owner_fence"] = int(fs.get("owner_fence", 0)) + 1
+                fs["owner_expiry"] = time.time() + 300.0
+                taken = json.dumps({"kind": "knokeep-migration-lease", "owner_id": "taker",
+                                    "write_id": "w", "started_at": 0.0, "status": "held",
+                                    "expires_at": time.time() + 300.0}, sort_keys=True).encode("utf-8")
+                self._store[lock.key] = (taken, sha256_hex(taken))
+            return False
+        return super().renew(lock, ttl_s)
+
+    def write(self, key, body, *, ctx):
+        res = super().write(key, body, ctx=ctx)
+        if key.key != _MIGRATION_LEASE_KEY:
+            self._clock.now += self._clock.per_write_s
+        return res
+
+
+def test_heartbeat_renew_failure_mid_copy_aborts_and_writes_no_further_keys(monkeypatch):
+    """With each key copy taking 10s and the heartbeat interval at TTL/3 =
+    40s, the lease is renewed before the 5th write (elapsed 40s) and again
+    before the 9th (elapsed 80s). When that second renewal fails (ownership
+    lost), migrate() must abort BEFORE writing that key: target holds exactly
+    the keys copied before the failed heartbeat, none after."""
+    import migrate.migrate as migrate_module
+
+    per_write = _MIGRATION_HEARTBEAT_INTERVAL_S / 4.0        # 10s per key at the default TTL
+    clock = _FakeClock(per_write)
+    monkeypatch.setattr(migrate_module, "_monotonic", clock)
+
+    n_keys = 12
+    keys = [f"k/{i:03d}" for i in range(n_keys)]              # zero-padded -> sorted == insertion
+    source = FakeBackend()
+    for k in keys:
+        _put(source, k, f"value-{k}".encode())
+
+    target = _SlowCopyTarget(clock, ok_renewals=1)            # 1st heartbeat ok, 2nd fails
+    report = migrate(source, target)
+
+    boundary = 8                                              # keys 0..7 landed; the takeover is seen right after key 7's read-back
+    assert report.status == "aborted"
+    assert report.ok is False
+    assert "lease lost during key" in report.reason and "another migration took the lease" in report.reason
+    assert report.aborted_key == keys[boundary - 1]           # the key whose post-I/O heartbeat found the lease gone
+    assert report.cutover_signaled is False
+    assert report.source_key_count == n_keys
+    assert report.keys_scanned == n_keys                      # PASS 1 completed before any write
+    assert report.keys_copied == boundary
+    assert report.keys_verified == boundary
+    assert report.keys_already_present == 0
+
+    # Exactly the keys before the failed heartbeat landed; nothing at/after it.
+    landed = sorted(k for k in target.list("") if k != _MIGRATION_LEASE_KEY)
+    assert landed == keys[:boundary]
+    for k in keys[boundary:]:
+        assert target.read(k) is None
+    for k in keys[:boundary]:
+        assert target.read(k).body == f"value-{k}".encode()
+
+    # Heartbeat cadence: one renew per elapsed interval (before keys 4 and 8),
+    # each on the migration control lease with the lease TTL.
+    assert len(target.renew_calls) == 2
+    for lock, ttl in target.renew_calls:
+        assert lock.key == _MIGRATION_LEASE_KEY
+        assert ttl == _MIGRATION_LEASE_TTL_S
+
+    # Source untouched (frozen).
+    for k in keys:
+        assert source.read(k).body == f"value-{k}".encode()
+
+
+def test_no_heartbeat_when_no_time_elapses_and_one_renew_per_interval(monkeypatch):
+    """Heartbeats are driven by elapsed time, not key count: a fast copy of
+    many keys issues NO renew; a slow copy renews once per interval, and a
+    single successful renew lets the run complete."""
+    import migrate.migrate as migrate_module
+
+    clock = _FakeClock(per_write_s=0.0)                       # time never moves
+    monkeypatch.setattr(migrate_module, "_monotonic", clock)
+    source = FakeBackend()
+    for i in range(60):
+        _put(source, f"k/{i:03d}", b"v")
+    target = _SlowCopyTarget(clock, ok_renewals=0)            # ANY renew would fail
+    report = migrate(source, target)
+    assert report.status == "success", report.reason
+    assert target.renew_calls == []
+
+    clock2 = _FakeClock(per_write_s=_MIGRATION_HEARTBEAT_INTERVAL_S / 4.0)
+    monkeypatch.setattr(migrate_module, "_monotonic", clock2)
+    source2 = FakeBackend()
+    for i in range(5):                                        # 4 writes elapse one interval -> 1 heartbeat before key 4
+        _put(source2, f"k/{i:03d}", b"v")
+    target2 = _SlowCopyTarget(clock2, ok_renewals=1)
+    report2 = migrate(source2, target2)
+    assert report2.status == "success", report2.reason
+    assert len(target2.renew_calls) == 1
+    assert report2.keys_copied == 5
+    # The heartbeat also pushed the durable control doc's expiry forward.
+    doc = json.loads(target2.read(_MIGRATION_LEASE_KEY).body.decode("utf-8"))
+    assert doc["heartbeat_at"] >= doc["started_at"]
+
+
+def test_heartbeat_during_pre_scan_aborts_before_any_write_when_lease_lost(monkeypatch):
+    """A slow SOURCE (pre-scan reads take long) must heartbeat too; losing
+    the lease there aborts before anything is written to the target."""
+    import migrate.migrate as migrate_module
+
+    clock = _FakeClock(per_write_s=0.0)
+    monkeypatch.setattr(migrate_module, "_monotonic", clock)
+
+    class _SlowSource(FakeBackend):
+        def read(self, key):
+            clock.now += _MIGRATION_HEARTBEAT_INTERVAL_S      # every source read takes a full interval
+            return super().read(key)
+
+    source = _SlowSource()
+    for i in range(3):
+        _put(source, f"k/{i}", b"v")
+    target = _SlowCopyTarget(clock, ok_renewals=0)
+    report = migrate(source, target)
+    assert report.status == "aborted"
+    assert "pre-scan" in report.reason
+    assert report.keys_copied == 0
+    assert [k for k in target.list("") if k != _MIGRATION_LEASE_KEY] == []
+
+
+def test_control_key_on_source_and_target_is_excluded_from_manifest_and_unexpected():
+    """The reserved migration control key is never migratable data (#18 item 2)
+    WHEN what sits there is a migration control doc: on the SOURCE it is
+    dropped from the manifest (not scanned, not copied, not counted), and when
+    a (crashed, expired) one pre-exists on the TARGET it is not reported as an
+    unexpected/foreign key. The target's control doc after the run is THIS
+    run's lease doc, not a copy of the source's."""
+    source = FakeBackend()
+    _put(source, "docs/a", b"alpha")
+    _put(source, "docs/b", b"beta")
+    # Docs in the shape the pre-expiry version of this module wrote (no
+    # expires_at/heartbeat_at/prior_owner/released_at): still recognized.
+    stale_source_doc = json.dumps({"kind": "knokeep-migration-lease",
+                                  "owner_id": "stale-source-owner", "write_id": "w-src",
+                                  "started_at": 1.0, "status": "held",
+                                  "took_over_from": None}, sort_keys=True).encode("utf-8")
+    _put(source, _MIGRATION_LEASE_KEY, stale_source_doc)
+
+    target = FakeBackend()
+    prior_target_doc = json.dumps({"kind": "knokeep-migration-lease",
+                                  "owner_id": "prior-target-owner", "write_id": "w-tgt",
+                                  "started_at": 1.0, "status": "held",
+                                  "took_over_from": None}, sort_keys=True).encode("utf-8")  # no expires_at: lapsed
+    _put(target, _MIGRATION_LEASE_KEY, prior_target_doc)
+
+    report = migrate(source, target)
+
+    assert report.status == "success", report.reason
+    assert report.source_key_count == 2                   # control key not in manifest
+    assert report.keys_scanned == 2
+    assert report.keys_copied == 2
+    assert report.keys_already_present == 0
+    assert report.keys_verified == 2
+    assert report.unexpected_target_keys == ()            # pre-existing control doc not "unexpected"
+    assert report.aborted_key != _MIGRATION_LEASE_KEY
+
+    # Data landed; the control key on target is this run's own lease doc --
+    # not the source's stale doc, and not the prior target doc either.
+    assert target.read("docs/a").body == b"alpha"
+    assert target.read("docs/b").body == b"beta"
+    ctrl = json.loads(target.read(_MIGRATION_LEASE_KEY).body.decode("utf-8"))
+    assert ctrl["owner_id"] not in ("stale-source-owner", "prior-target-owner")
+    assert ctrl["took_over_from"] == "prior-target-owner"  # the target's prior holder had lapsed while "held"
+    assert target.read(_MIGRATION_LEASE_KEY).body != stale_source_doc
+
+    # Source's own control doc is untouched (frozen).
+    assert source.read(_MIGRATION_LEASE_KEY).body == stale_source_doc
+
+
+# ---------------------------------------------------------------------------
+# Backend-internal fence artifacts are never migrated: git sidecars and
+# object-store phantoms are invisible to list(), so a migration from either
+# source copies only real keys.
+# ---------------------------------------------------------------------------
+
+
+def test_migration_from_git_source_ignores_fence_sidecars(tmp_path):
+    import subprocess
+
+    from store.git_backend import GitBackend
+    from tests.ctx_helpers import fenced_ctx
+
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--quiet", "--bare", "-b", "main", str(remote)],
+                   check=True, capture_output=True)
+    source = GitBackend(tmp_path / "work", remote)
+    r0 = _put(source, "docs/a", b"a")
+    r1 = gate.persist(source, "docs/a", b"a2", ctx=fenced_ctx(source, "docs/a", r0.new_hash),
+                      doc_type="system_state")
+    assert isinstance(r1, OK)
+    source.lock("docs/locked-only", ttl_s=30)                 # sidecar, no data
+    _put(source, "docs/b", b"b")
+
+    target = FakeBackend()
+    report = migrate(source, target)
+    assert report.status == "success", report.reason
+    assert report.source_key_count == 2 and report.keys_copied == 2
+    assert sorted(k for k in target.list("") if k != _MIGRATION_LEASE_KEY) == ["docs/a", "docs/b"]
+    assert not any(k.startswith(".knokeep-fence/") for k in target.list(""))
+    assert target.read("docs/a").body == b"a2"
+
+
+def test_migration_from_objectstore_source_ignores_phantoms():
+    source = _make_objectstore()
+    _put(source, "docs/a", b"a")
+    source.lock("docs/phantom", ttl_s=30)                     # lock()'d, never written
+    target = FakeBackend()
+    report = migrate(source, target)
+    assert report.status == "success", report.reason
+    assert report.source_key_count == 1 and report.keys_copied == 1
+    assert sorted(k for k in target.list("") if k != _MIGRATION_LEASE_KEY) == ["docs/a"]
+
+
+# ---------------------------------------------------------------------------
+# Round-2 review: acquisition races on per-process advisory registries, and
+# fail-closed lock() failures.
+# ---------------------------------------------------------------------------
+
+
+def _objectstore_pair():
+    endpoint, bucket = get_moto_endpoint(), make_bucket()
+
+    def _instance():
+        return ObjectStoreBackend(
+            endpoint=endpoint, bucket=bucket, region=DUMMY_REGION,
+            access_key_id=DUMMY_ACCESS_KEY_ID, secret_access_key=DUMMY_SECRET_ACCESS_KEY,
+        )
+
+    return _instance(), _instance()
+
+
+def test_losing_contender_advancing_the_fence_does_not_kill_the_winners_heartbeat():
+    """Two processes read the control key as absent and both call lock():
+    the LOSER's lock() lands second and holds the durable fence, while the
+    WINNER's unfenced create-only lands the doc. The winner must not abort
+    on its next fenced control-doc write: the doc is provably still its own
+    (hash unchanged), so it re-acquires the fence and carries on."""
+    from migrate.migrate import _MigrationLease, _acquire_migration_lease
+
+    target_a, target_b = _objectstore_pair()
+    lease_a, err = _acquire_migration_lease(target_a, "proc-a", "w-a", time.time())
+    assert err is None
+    doc_hash_after_acquire = lease_a.doc_hash
+
+    # The late loser: its lock() (per-process registry -> succeeds) supersedes
+    # A's durable fence; it then sees the doc held and never writes it.
+    stray = target_b.lock(_MIGRATION_LEASE_KEY, 120.0)
+    assert stray.fence > lease_a.lock.fence
+    assert target_b.read(_MIGRATION_LEASE_KEY).version_hash == doc_hash_after_acquire
+
+    lease_a.last_heartbeat = float("-inf")               # force the heartbeat due
+    assert lease_a.heartbeat_if_due() is None            # recovered, not "lost"
+    assert lease_a.lock.fence > stray.fence              # fence re-acquired past the loser's
+    assert lease_a.doc_hash != doc_hash_after_acquire     # the heartbeat landed
+    doc = json.loads(target_b.read(_MIGRATION_LEASE_KEY).body.decode("utf-8"))
+    assert doc["owner_id"] == "proc-a" and doc["status"] == "held"
+
+    lease_a.release()
+    doc = json.loads(target_b.read(_MIGRATION_LEASE_KEY).body.decode("utf-8"))
+    assert doc["status"] == "released"
+    assert isinstance(lease_a, _MigrationLease)
+
+
+def test_acquisition_confirms_ownership_when_a_loser_took_the_fence_first():
+    """Same race, at acquisition: B's lock() lands between A's lock() and
+    A's create-only. A confirms with a fenced write right after creating the
+    doc, so A still comes out owning both the doc and the fence."""
+    from migrate.migrate import _acquire_migration_lease
+
+    target_a, target_b = _objectstore_pair()
+    real_lock = target_a.lock
+    stray = {}
+
+    def _lock_then_let_b_supersede(key, ttl_s):
+        lock = real_lock(key, ttl_s)
+        if key == _MIGRATION_LEASE_KEY and not stray:
+            stray["lock"] = target_b.lock(_MIGRATION_LEASE_KEY, 120.0)   # B races in
+        return lock
+
+    target_a.lock = _lock_then_let_b_supersede
+    lease_a, err = _acquire_migration_lease(target_a, "proc-a", "w-a", time.time())
+    assert err is None, err
+    assert lease_a.lock.fence > stray["lock"].fence
+    lease_a.last_heartbeat = float("-inf")
+    assert lease_a.heartbeat_if_due() is None
+    # B (the loser) is refused by the durable doc, as before.
+    source = FakeBackend()
+    _put(source, "docs/a", b"alpha")
+    assert migrate(source, target_b).status == "aborted"
+    lease_a.release()
+
+
+def test_control_doc_taken_by_another_run_is_still_reported_lost():
+    """The recovery only applies while the doc is provably ours: if another
+    run actually took the lease (doc hash changed), a heartbeat reports the
+    loss and does not re-acquire anything."""
+    from migrate.migrate import _acquire_migration_lease
+
+    target_a, target_b = _objectstore_pair()
+    lease_a, err = _acquire_migration_lease(target_a, "proc-a", "w-a", time.time())
+    assert err is None
+    # Simulate a crash-takeover by another run: it locks and rewrites the doc.
+    _plant_control_doc(target_b, owner_id="taker", status="held", expires_at=time.time() + 300)
+    lease_a.last_heartbeat = float("-inf")
+    lost = lease_a.heartbeat_if_due()
+    assert lost is not None and "another migration took the lease" in lost
+    doc = json.loads(target_b.read(_MIGRATION_LEASE_KEY).body.decode("utf-8"))
+    assert doc["owner_id"] == "taker"
+
+
+def test_lock_raising_a_non_busy_error_aborts_with_a_report_not_an_exception():
+    class _LockExplodes(FakeBackend):
+        def lock(self, key, ttl_s):
+            raise RuntimeError("simulated backend I/O failure inside lock()")
+
+    source = FakeBackend()
+    _put(source, "docs/a", b"alpha")
+    target = _LockExplodes()
+    report = migrate(source, target)
+    assert report.status == "aborted"
+    assert "lock() raised" in report.reason and "RuntimeError" in report.reason
+    assert target.read("docs/a") is None and target.read(_MIGRATION_LEASE_KEY) is None
+
+
+# ---------------------------------------------------------------------------
+# Round-3 review: a control doc is recognized only by its COMPLETE schema.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", [
+    b'{"kind": "knokeep-migration-lease", "payload": "a real user document"}',
+    b'{"kind": "knokeep-migration-lease", "owner_id": "x", "write_id": "w", "started_at": 1, "status": "held", "notes": "mine"}',
+    b'{"kind": "knokeep-migration-lease", "owner_id": 7, "write_id": "w", "started_at": 1, "status": "held"}',
+    b'{"kind": "knokeep-migration-lease", "owner_id": "x", "write_id": "w", "started_at": "yesterday", "status": "held"}',
+    b'{"kind": "knokeep-migration-lease", "owner_id": "x", "write_id": "w", "started_at": 1, "status": "weird"}',
+    b'["knokeep-migration-lease"]',
+], ids=["kind-plus-payload", "extra-field", "wrong-type", "str-started_at", "bad-status", "not-an-object"])
+def test_user_value_carrying_the_kind_tag_is_not_a_control_doc(value):
+    from migrate.migrate import _parse_lease_doc
+
+    assert _parse_lease_doc(Blob(body=value, version_hash=sha256_hex(value))) is None
+
+    # On the TARGET: refused, value untouched.
+    source = FakeBackend()
+    _put(source, "docs/a", b"alpha")
+    target = FakeBackend()
+    _put(target, _MIGRATION_LEASE_KEY, value)
+    report = migrate(source, target)
+    assert report.status == "aborted" and "holds real data" in report.reason
+    assert target.read(_MIGRATION_LEASE_KEY).body == value
+    assert target.read("docs/a") is None
+
+    # On the SOURCE: abort before any upload, never silently omitted.
+    source2 = FakeBackend()
+    _put(source2, "docs/a", b"alpha")
+    _put(source2, _MIGRATION_LEASE_KEY, value)
+    report2 = migrate(source2, FakeBackend())
+    assert report2.status == "aborted" and "collides with the migration control key" in report2.reason
+
+
+def test_control_docs_written_by_this_module_and_its_predecessor_still_parse():
+    from migrate.migrate import _lease_doc_body, _parse_lease_doc
+
+    current = _lease_doc_body(owner_id="o", write_id="w", started_at=1.0, status="held",
+                              expires_at=2.0, heartbeat_at=1.5, prior_owner=None, took_over_from="p")
+    assert _parse_lease_doc(Blob(body=current, version_hash=sha256_hex(current)))["owner_id"] == "o"
+    legacy = json.dumps({"kind": "knokeep-migration-lease", "owner_id": "o", "write_id": "w",
+                         "started_at": 1.0, "status": "held", "took_over_from": None}).encode()
+    assert _parse_lease_doc(Blob(body=legacy, version_hash=sha256_hex(legacy)))["owner_id"] == "o"
+
+
+# ---------------------------------------------------------------------------
+# An aliased source/target must be refused before the source is modified.
+# ---------------------------------------------------------------------------
+
+
+def test_migrate_refuses_the_same_backend_object_as_source_and_target():
+    b = FakeBackend()
+    _put(b, "docs/a", b"alpha")
+    before = sorted(b.list(""))
+    report = migrate(b, b)
+    assert report.status == "aborted" and "onto itself" in report.reason
+    assert sorted(b.list("")) == before                 # not even a control doc was written
+    assert b.read(_MIGRATION_LEASE_KEY) is None
+
+
+def test_migrate_refuses_two_instances_over_the_same_store(tmp_path):
+    """Distinct adapter objects, one store: the target-side control doc shows
+    up through the source, which is the tell. Refused before the source is
+    frozen and before any data key is written."""
+    root = tmp_path / "shared"
+    a = LocalBackend(root)
+    b = LocalBackend(root)
+    _put(a, "docs/a", b"alpha")
+    report = migrate(a, b)
+    assert report.status == "aborted" and "same store" in report.reason
+    assert report.keys_copied == 0 and report.keys_scanned == 0
+    assert sorted(a.list("")) == ["docs/a"]             # detected BEFORE the lease: source untouched
+    assert a.read(_MIGRATION_LEASE_KEY) is None
+    a.close()
+    b.close()
+
+
+def test_migrate_backstop_detects_aliasing_the_identity_hint_cannot_see(tmp_path):
+    """When the read-only identity hint cannot tell (here: an adapter that
+    reports a different identity for the same root), the post-acquisition
+    check -- this run's own control doc visible through the source -- still
+    refuses before the source is frozen or any data key is written."""
+    from store.types import BackendHealth
+
+    class _OtherIdentity(LocalBackend):
+        def health(self):
+            return BackendHealth(ok=True, detail="pretends to be elsewhere")
+
+    root = tmp_path / "shared"
+    a = LocalBackend(root)
+    b = _OtherIdentity(root)
+    _put(a, "docs/a", b"alpha")
+    report = migrate(a, b)
+    assert report.status == "aborted" and "alias the same store" in report.reason
+    assert report.keys_copied == 0 and report.keys_scanned == 0
+    assert sorted(k for k in a.list("") if k != _MIGRATION_LEASE_KEY) == ["docs/a"]
+    doc = json.loads(a.read(_MIGRATION_LEASE_KEY).body.decode("utf-8"))
+    assert doc["status"] == "released"                 # the only trace: the lease it took, released again
+    a.close()
+    b.close()
+
+
+def test_migrate_aborts_when_the_alias_check_read_fails():
+    class _ControlReadFails(FakeBackend):
+        def read(self, key):
+            if key == _MIGRATION_LEASE_KEY:
+                raise RuntimeError("simulated transient read failure")
+            return super().read(key)
+
+    source = _ControlReadFails()
+    _put(source, "docs/a", b"alpha")
+    target = FakeBackend()
+    report = migrate(source, target)
+    assert report.status == "aborted" and "exclude source/target aliasing" in report.reason
+    assert report.keys_copied == 0
+    assert target.read("docs/a") is None
+
+
+# ---------------------------------------------------------------------------
+# A takeover DURING a key's I/O (past the pre-write heartbeat) must never be
+# reported as a successful cutover.
+# ---------------------------------------------------------------------------
+
+
+class _TakeoverDuringLastReadBack(_SlowCopyTarget):
+    """During the read-back of the LAST key, another migration takes the
+    lease over (as a crashed-owner takeover would: supersede the fence and
+    rewrite the control doc); the clock is advanced past the heartbeat
+    interval when `advance_clock` is set, to model an I/O longer than the
+    TTL."""
+
+    def __init__(self, clock, n_keys, advance_clock):
+        super().__init__(clock, ok_renewals=10**6)
+        self._last = f"k/{n_keys - 1:03d}"
+        self._advance = advance_clock
+        self._fired = False
+
+    def read(self, key):
+        blob = super().read(key)
+        if key == self._last and not self._fired and blob is not None:
+            self._fired = True
+            if self._advance:
+                self._clock.now += _MIGRATION_HEARTBEAT_INTERVAL_S * 2
+            with self._mutex:
+                fs = self._fence.setdefault(_MIGRATION_LEASE_KEY, {})
+                fs["owner_token"] = "taker"
+                fs["owner_fence"] = int(fs.get("owner_fence", 0)) + 1
+                fs["owner_expiry"] = time.time() + 300.0
+                taken = json.dumps({"kind": "knokeep-migration-lease", "owner_id": "taker",
+                                    "write_id": "w", "started_at": 0.0, "status": "held",
+                                    "expires_at": time.time() + 300.0}, sort_keys=True).encode("utf-8")
+                self._store[_MIGRATION_LEASE_KEY] = (taken, sha256_hex(taken))
+        return blob
+
+
+@pytest.mark.parametrize("advance_clock", [True, False], ids=["io-longer-than-interval", "instant-io"])
+def test_takeover_during_the_final_keys_io_is_never_reported_as_success(monkeypatch, advance_clock):
+    import migrate.migrate as migrate_module
+
+    clock = _FakeClock(per_write_s=0.0)
+    monkeypatch.setattr(migrate_module, "_monotonic", clock)
+    n = 3
+    source = FakeBackend()
+    for i in range(n):
+        _put(source, f"k/{i:03d}", f"v{i}".encode())
+    target = _TakeoverDuringLastReadBack(clock, n, advance_clock)
+    report = migrate(source, target)
+    assert report.status == "aborted", report
+    assert report.cutover_signaled is False
+    assert "lease lost" in report.reason and "another migration took the lease" in report.reason
+    assert report.keys_verified == n                     # the data itself was fine and is left in place
+    assert target.read("k/002").body == b"v2"

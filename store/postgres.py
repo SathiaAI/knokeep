@@ -149,8 +149,10 @@ JUDGMENT CALLS (numbered, also called out inline at point of use):
 """
 from __future__ import annotations
 
+import hashlib
 import re
 import threading
+import time
 import uuid
 from typing import Dict, Iterator, List, Optional, Tuple
 
@@ -159,6 +161,7 @@ import pg8000.exceptions
 
 from . import gate
 from .backend import BackendBusyError, Lock
+from .context import Overwrite, create_ctx, overwrite_ctx
 from .gate import ScannedBody, ScannedKey
 from .types import (
     BackendHealth,
@@ -211,10 +214,34 @@ def _validate_identifier(name: str, what: str) -> str:
     return name
 
 
+_FENCE_TABLE_SUFFIX = "_fence"
+_PG_IDENTIFIER_MAX = 63
+
+
+def _fence_table_name(table: str) -> str:
+    """The companion fence table's identifier, derived from the (already
+    validated) store table name WITHOUT narrowing the accepted range: any
+    table name that was valid before the fence table existed (up to 63
+    chars) must still construct. When `<table>_fence` would exceed
+    Postgres's 63-char identifier limit, the table name is truncated and
+    disambiguated with a stable 8-hex digest of the full name, so two
+    long names that share a prefix never share a fence table."""
+    candidate = f"{table}{_FENCE_TABLE_SUFFIX}"
+    if len(candidate) <= _PG_IDENTIFIER_MAX:
+        return candidate
+    digest = hashlib.sha256(table.encode("utf-8")).hexdigest()[:8]
+    keep = _PG_IDENTIFIER_MAX - len(_FENCE_TABLE_SUFFIX) - 1 - len(digest)
+    return _validate_identifier(f"{table[:keep]}_{digest}{_FENCE_TABLE_SUFFIX}", "fence table")
+
+
 # Postgres SQLSTATEs that mean "couldn't get the row lock / ran past our own
 # timeout" — definitely-not-committed, never an outcome-unknown kind
 # (JUDGMENT CALL 3).
-_BUSY_SQLSTATES = frozenset({"55P03", "57014"})  # lock_not_available, query_canceled
+# 40P01 (deadlock_detected) is included defensively: Postgres aborts one of
+# the two transactions, so it is definitely-not-committed and retryable --
+# though write() takes its row locks in one fixed order (store row, then
+# fence row) on every path precisely so it never deadlocks with itself.
+_BUSY_SQLSTATES = frozenset({"55P03", "57014", "40P01"})  # lock_not_available, query_canceled, deadlock_detected
 
 
 def _sqlstate(exc: BaseException) -> Optional[str]:
@@ -243,6 +270,19 @@ class PostgresBackend:
         self._statement_timeout_ms = int(statement_timeout_ms)
         self._lock_timeout_ms = int(lock_timeout_ms)
         self._qualified_table = f'"{self._schema}"."{self._table}"'
+        # H1 Increment 2, Phase 2: durable, cross-process fence-ownership
+        # state lives in a companion table, kept SEPARATE from the main
+        # `store` table (mirrors store/local.py's locks/fence-alloc/ being a
+        # separate directory from data/) rather than extra columns on
+        # `store` itself -- `store.body`/`store.version_hash` are NOT NULL
+        # (contract §4.4's schema, verified by
+        # tests/test_postgres.py::test_schema_and_table_created_with_contract_columns),
+        # but lock() must work on a key that has never been written yet
+        # (conformance/suite.py's C7 calls backend.lock() before any write)
+        # -- a companion table with no such constraint is the only way to
+        # satisfy both without weakening that existing test.
+        self._fence_table = _fence_table_name(self._table)
+        self._qualified_fence_table = f'"{self._schema}"."{self._fence_table}"'
 
         self._local = threading.local()
         self._conn_registry_lock = threading.Lock()
@@ -267,6 +307,35 @@ class PostgresBackend:
             )
             """
         )
+        # H1 Increment 2, Phase 2: companion fence-ownership table (see the
+        # comment on self._fence_table above for why this is separate from
+        # {self._qualified_table} rather than extra columns on it).
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {self._qualified_fence_table} (
+                key text PRIMARY KEY,
+                owner_token text,
+                owner_expiry double precision,
+                owner_fence bigint NOT NULL DEFAULT 0,
+                last_accepted_fence bigint NOT NULL DEFAULT 0
+            )
+            """
+        )
+        conn.commit()
+        # CREATE TABLE IF NOT EXISTS never checks an EXISTING relation's
+        # layout: two stores in one schema configured as e.g. `foo` and
+        # `foo_fence` would otherwise silently share a table (one's data
+        # table is the other's fence table) and fail later on a missing
+        # column. Refuse to start instead (contract §8 spirit: no degraded
+        # mode) when either relation is not what this adapter created.
+        self._verify_columns(
+            cur, self._table,
+            {"key", "body", "version_hash", "generation", "updated_at"}, "store",
+        )
+        self._verify_columns(
+            cur, self._fence_table,
+            {"key", "owner_token", "owner_expiry", "owner_fence", "last_accepted_fence"}, "fence",
+        )
         conn.commit()
 
         # Contract §8: load-time capability probe against a reserved prefix,
@@ -274,6 +343,24 @@ class PostgresBackend:
         # precondition -> REFUSE TO START. No degraded mode."
         if run_probe:
             self._run_capability_probe()
+
+    def _verify_columns(self, cur, table: str, expected: set, what: str) -> None:
+        cur.execute(
+            """
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema = %s AND table_name = %s
+            """,
+            (self._schema, table),
+        )
+        present = {row[0] for row in cur.fetchall()}
+        missing = expected - present
+        if missing:
+            raise RuntimeError(
+                f"PostgresBackend: {what} table \"{self._schema}\".\"{table}\" already exists "
+                f"with an incompatible layout (missing columns: {sorted(missing)}); it is not "
+                "a relation this adapter created -- another store's table probably collides "
+                "with this name. REFUSING TO START."
+            )
 
     # -- connection management ----------------------------------------------
 
@@ -347,19 +434,29 @@ class PostgresBackend:
         probe_key = f".knokeep/probe/{uuid.uuid4().hex}"
         try:
             r1 = gate.persist(
-                self, probe_key, b"probe-create", expected_hash=None, doc_type="system_state"
+                self, probe_key, b"probe-create", ctx=create_ctx(), doc_type="system_state"
             )
             if not isinstance(r1, OK):
                 raise RuntimeError(f"probe create-only did not return OK: {r1!r}")
 
             r2 = gate.persist(
-                self, probe_key, b"probe-duplicate", expected_hash=None, doc_type="system_state"
+                self, probe_key, b"probe-duplicate", ctx=create_ctx(), doc_type="system_state"
             )
             if not isinstance(r2, EXISTS):
                 raise RuntimeError(f"probe duplicate create-only did not return EXISTS: {r2!r}")
 
+            # Phase 0: ctx requires a real (advisory) lease for an Overwrite
+            # precondition; acquired-then-released immediately since fence
+            # enforcement is a later phase and this probe must not hold a
+            # lock past its own call.
+            probe_lease = self.lock(probe_key, ttl_s=30)
+            self.unlock(probe_lease)
             r3 = gate.persist(
-                self, probe_key, b"probe-stale-cas", expected_hash="0" * 64, doc_type="system_state"
+                self,
+                probe_key,
+                b"probe-stale-cas",
+                ctx=overwrite_ctx("0" * 64, probe_lease),
+                doc_type="system_state",
             )
             if not isinstance(r3, STALE):
                 raise RuntimeError(f"probe stale CAS-update did not return STALE: {r3!r}")
@@ -375,12 +472,16 @@ class PostgresBackend:
         conn = self._get_conn()
         cur = conn.cursor()
         cur.execute(f"DELETE FROM {self._qualified_table} WHERE key = %s", (probe_key,))
+        cur.execute(f"DELETE FROM {self._qualified_fence_table} WHERE key = %s", (probe_key,))
         conn.commit()
 
     # -- StoreBackend protocol -----------------------------------------------
 
     def capabilities(self) -> Caps:
-        return Caps(atomic=True, cas=True, lock=True, durable=True, remote=True)
+        # H1 Increment 2, Phase 2: this backend now enforces lock()-issued
+        # fence ordering on every Overwrite CAS-update (see write() and the
+        # companion self._qualified_fence_table).
+        return Caps(atomic=True, cas=True, lock=True, durable=True, remote=True, fence=True)
 
     def health(self) -> BackendHealth:
         try:
@@ -389,9 +490,14 @@ class PostgresBackend:
             cur.execute("SELECT 1")
             cur.fetchone()
             conn.commit()
+            # Identity = connection + relation (never credentials): two
+            # distinct servers/databases with the same schema.table must not
+            # report the same detail (migrate() compares adapter identities).
+            ck = self._connect_kwargs
             return BackendHealth(
                 ok=True,
-                detail=f"postgres backend table={self._qualified_table}",
+                detail=(f"postgres backend host={ck.get('host')} port={ck.get('port')} "
+                        f"database={ck.get('database')} table={self._qualified_table}"),
             )
         except Exception as exc:
             return BackendHealth(ok=False, detail=str(exc))
@@ -431,7 +537,7 @@ class PostgresBackend:
         key: ScannedKey,
         body: ScannedBody,
         *,
-        expected_hash: Optional[str],
+        ctx,
     ) -> WriteResult:
         # Adapter accepts only gate-issued values; raw bytes/str are a
         # TypeError before any I/O (contract §1/§5).
@@ -441,6 +547,16 @@ class PostgresBackend:
             )
         if not gate.verify(key) or not gate.verify(body):
             raise TypeError("PostgresBackend.write: gate marker verification failed")
+
+        # H1 Increment 2, Phase 2: ctx is required; derive expected_hash the
+        # same way store/gate.py does, plus the caller's lease for fence
+        # enforcement (Phase 0/1 only carried it structurally).
+        precondition_lease: Optional[Lock] = (
+            ctx.precondition.lease if isinstance(ctx.precondition, Overwrite) else None
+        )
+        expected_hash: Optional[str] = (
+            ctx.precondition.expected_hash if isinstance(ctx.precondition, Overwrite) else None
+        )
 
         k = key.key
         raw = body.body
@@ -468,6 +584,19 @@ class PostgresBackend:
                     (k, raw, new_hash, new_generation),
                 )
                 if cur.rowcount == 1:
+                    # H1 Increment 2, Phase 2: a fresh create starts the
+                    # key's fence floor at 0, regardless of any earlier
+                    # lock() activity on this (previously nonexistent) key
+                    # -- mirrors store/local.py's
+                    # _commit(..., last_accepted_fence=0) on create.
+                    cur.execute(
+                        f"""
+                        INSERT INTO {self._qualified_fence_table} (key, last_accepted_fence)
+                        VALUES (%s, 0)
+                        ON CONFLICT (key) DO UPDATE SET last_accepted_fence = 0
+                        """,
+                        (k,),
+                    )
                     conn.commit()
                     return OK(new_hash)
 
@@ -490,6 +619,70 @@ class PostgresBackend:
                 return EXISTS(current_hash)
 
             # --- CAS-update ---
+            # H1 Increment 2, Phase 2: ownership/fence FIRST, checked under
+            # the SAME transaction's row locks (SELECT ... FOR UPDATE) as
+            # the hash check and the eventual UPDATE -- Postgres's own row
+            # lock is the linearization point for this whole check-then-act
+            # sequence (the module docstring's existing rationale for the
+            # plain hash CAS, extended here to cover fence: no other writer
+            # can change either row while we hold both locks).
+            # ROW-LOCK ORDER: store row first, then fence row -- the same
+            # order the create-only path above takes (INSERT store, then
+            # upsert fence), so a create racing a fenced CAS on the same key
+            # can never deadlock (each would otherwise hold the row the other
+            # needs). The fence is still EVALUATED first.
+            cur.execute(
+                f"SELECT version_hash, generation FROM {self._qualified_table} WHERE key = %s FOR UPDATE",
+                (k,),
+            )
+            srow = cur.fetchone()
+            current_hash = srow[0] if srow else None
+
+            cur.execute(
+                f"""
+                SELECT owner_token, owner_expiry, owner_fence, last_accepted_fence
+                FROM {self._qualified_fence_table} WHERE key = %s FOR UPDATE
+                """,
+                (k,),
+            )
+            frow = cur.fetchone()
+            owner_token, owner_expiry, owner_fence, last_accepted_fence = (
+                frow if frow else (None, None, 0, 0)
+            )
+
+            fence_ok = (
+                precondition_lease is not None
+                and precondition_lease.token == owner_token
+                and owner_expiry is not None
+                and owner_expiry > time.time()
+                and precondition_lease.fence == owner_fence  # exactly what lock() allocated for this token
+                and precondition_lease.fence >= last_accepted_fence
+            )
+
+            if not fence_ok:
+                # Release the row locks FIRST (the racer holding the current
+                # fence needs them to land its write), then settle (bounded)
+                # so STALE carries the true winner's hash rather than this
+                # caller's own pre-race snapshot.
+                conn.commit()
+                settled_hash = self._settle_current_hash_after_fence_loss(k, expected_hash)
+                return STALE(settled_hash, reason="FENCE")
+
+            if srow is None:
+                conn.commit()
+                return STALE(None)  # §4.4: absent -> STALE{None}; a CAS-update never creates
+
+            # The content-hash CAS itself is the NATIVE precondition mandated
+            # by contract §3/§4.4 -- `UPDATE ... WHERE key = ? AND
+            # version_hash = ?` (rowcount 1 -> OK) -- not a Python-side
+            # compare of the value read above. The row lock held since the
+            # SELECT ... FOR UPDATE makes the two equivalent for correctness,
+            # but only the native form lets the load-time capability probe
+            # (§8) detect a wrong mapping / missing precondition: a
+            # Python-side compare would pass the probe's stale-CAS check
+            # even on a backend whose conditional UPDATE never matched.
+            # JUDGMENT CALL 1: the generation-monotonicity guard is folded
+            # into the same atomic UPDATE.
             if new_generation is None:
                 cur.execute(
                     f"""
@@ -500,8 +693,6 @@ class PostgresBackend:
                     (raw, new_hash, new_generation, k, expected_hash),
                 )
             else:
-                # JUDGMENT CALL 1: generation-monotonicity guard folded into
-                # the same atomic UPDATE.
                 cur.execute(
                     f"""
                     UPDATE {self._qualified_table}
@@ -511,22 +702,21 @@ class PostgresBackend:
                     """,
                     (raw, new_hash, new_generation, k, expected_hash, new_generation),
                 )
-
-            if cur.rowcount == 1:
+            if cur.rowcount != 1:
+                # 0-row update -> hash mismatch or generation regressed. The
+                # row is still locked by this transaction, so the hash read
+                # under that lock IS the follow-up SELECT §4.4 asks for.
                 conn.commit()
-                return OK(new_hash)
+                return STALE(current_hash)
 
-            # JUDGMENT CALL 2: single follow-up SELECT disambiguates BOTH
-            # "key absent" and "hash mismatch / generation regressed".
+            # last_accepted_fence lands in the SAME transaction/commit as
+            # the body -- atomic together, per the contract requirement.
             cur.execute(
-                f"SELECT version_hash FROM {self._qualified_table} WHERE key = %s",
-                (k,),
+                f"UPDATE {self._qualified_fence_table} SET last_accepted_fence = %s WHERE key = %s",
+                (precondition_lease.fence, k),
             )
-            row = cur.fetchone()
             conn.commit()
-            if row is None:
-                return STALE(None)
-            return STALE(row[0])
+            return OK(new_hash)
 
         except pg8000.exceptions.DatabaseError as exc:
             try:
@@ -549,11 +739,78 @@ class PostgresBackend:
             self._reset_conn()
             return ERROR(ErrorKind.NETWORK)
 
+    # Upper bound on how long a fence-losing write() waits for the current
+    # fence owner's pending write to land before reporting STALE. Only ever
+    # reached when the owner never writes (it lost interest, or is slow
+    # beyond this bound); the wait also ends as soon as the owner's lease
+    # expires, since no fenced write can land after that.
+    _FENCE_LOSS_SETTLE_MAX_S = 5.0
+    _FENCE_LOSS_SETTLE_POLL_S = 0.01
+
+    def _settle_current_hash_after_fence_loss(self, key: str, expected_hash: str) -> Optional[str]:
+        """Called with NO transaction open (write() commits -- releasing its
+        row locks -- before calling this, since the racer holding the
+        current fence needs those locks to land its write). Returns the
+        key's current hash once the race that superseded this caller's
+        fence has SETTLED: either the hash moved away from `expected_hash`
+        (the winner landed), or no fenced write is pending any more (the
+        fence row's owner_fence has been consumed by a committed write, or
+        the owner's lease expired), or the bounded wait ran out. Returns
+        the last successfully observed hash (initially `expected_hash`) if
+        a re-read fails -- never a value worse than the pre-read one."""
+        deadline = time.monotonic() + self._FENCE_LOSS_SETTLE_MAX_S
+        current_hash: Optional[str] = expected_hash
+        while True:
+            try:
+                conn = self._get_conn()
+                cur = conn.cursor()
+                # READ ORDER MATTERS: fence row FIRST, store row SECOND. Under
+                # READ COMMITTED each statement has its own snapshot, so the
+                # opposite order can straddle the winner's commit -- hash read
+                # before it (still the pre-race value), fence read after it
+                # (consumed -> "nothing pending") -- and settle on the stale
+                # hash. Reading the fence first means a "not pending"
+                # observation is followed by a hash read that also postdates
+                # the commit that consumed the fence.
+                cur.execute(
+                    f"""
+                    SELECT owner_fence, last_accepted_fence, owner_expiry
+                    FROM {self._qualified_fence_table} WHERE key = %s
+                    """,
+                    (key,),
+                )
+                frow = cur.fetchone()
+                cur.execute(
+                    f"SELECT version_hash FROM {self._qualified_table} WHERE key = %s", (key,)
+                )
+                srow = cur.fetchone()
+                conn.commit()  # READ COMMITTED: end the snapshot so the next poll sees new commits
+            except pg8000.exceptions.DatabaseError:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                return current_hash
+            except (pg8000.exceptions.InterfaceError, OSError):
+                self._reset_conn()
+                return current_hash
+            current_hash = srow[0] if srow else None
+            if current_hash != expected_hash:
+                return current_hash
+            pending = (
+                frow is not None
+                and frow[0] > frow[1]
+                and frow[2] is not None
+                and frow[2] > time.time()
+            )
+            if not pending or time.monotonic() >= deadline:
+                return current_hash
+            time.sleep(self._FENCE_LOSS_SETTLE_POLL_S)
+
     # -- advisory lock() API (JUDGMENT CALL 6 — NOT the CAS mechanism) -------
 
     def lock(self, key: str, ttl_s: float) -> Lock:
         import secrets
-        import time
 
         with self._lock_mutex:
             now = time.time()
@@ -562,8 +819,67 @@ class PostgresBackend:
                 raise BackendBusyError(f"key {key!r} is locked")
             token = secrets.token_hex(16)  # 128-bit CSPRNG token
             expiry = now + ttl_s
+            new_fence = self._advance_durable_fence(key, token, expiry)
             self._locks[key] = (token, expiry)
-            return Lock(key=key, token=token, expiry_epoch=expiry)
+            return Lock(key=key, token=token, expiry_epoch=expiry, fence=new_fence)
+
+    def _advance_durable_fence(self, key: str, token: str, expiry: float) -> int:
+        """H1 Increment 2, Phase 2: durable, cross-process/-connection/
+        -instance fence allocation. Row-locked via SELECT ... FOR UPDATE
+        inside one transaction, so two concurrent lock() calls on the same
+        key -- including from separate PostgresBackend instances/
+        connections/processes -- can never compute the same "next" fence:
+        Postgres's own row lock is the serialization point, mirroring the
+        same argument write() already relies on for its CAS (module
+        docstring)."""
+        try:
+            conn = self._get_conn()
+        except (pg8000.exceptions.InterfaceError, OSError) as exc:
+            raise BackendBusyError(f"lock({key!r}): could not open a connection") from exc
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                f"INSERT INTO {self._qualified_fence_table} (key) VALUES (%s) ON CONFLICT (key) DO NOTHING",
+                (key,),
+            )
+            cur.execute(
+                f"""
+                SELECT owner_fence, last_accepted_fence FROM {self._qualified_fence_table}
+                WHERE key = %s FOR UPDATE
+                """,
+                (key,),
+            )
+            owner_fence, last_accepted_fence = cur.fetchone()
+            new_fence = max(owner_fence, last_accepted_fence) + 1
+            cur.execute(
+                f"""
+                UPDATE {self._qualified_fence_table}
+                SET owner_token = %s, owner_expiry = %s, owner_fence = %s
+                WHERE key = %s
+                """,
+                (token, expiry, new_fence, key),
+            )
+            conn.commit()
+            return new_fence
+        except pg8000.exceptions.DatabaseError as exc:
+            # lock_timeout/statement_timeout (a concurrent write() holds the
+            # fence row) or any other server error: the transaction is now
+            # aborted and MUST be rolled back, or every later statement on
+            # this thread-local connection fails with "current transaction
+            # is aborted". Surface as BackendBusyError -- lock()'s one
+            # failure shape -- with the cause chained.
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise BackendBusyError(
+                f"lock({key!r}): fence allocation failed "
+                f"(sqlstate={_sqlstate(exc) or 'unknown'})"
+            ) from exc
+        except (pg8000.exceptions.InterfaceError, OSError) as exc:
+            # Connection dropped mid-operation: nothing was committed.
+            self._reset_conn()
+            raise BackendBusyError(f"lock({key!r}): connection failed during fence allocation") from exc
 
     def unlock(self, lock: Lock) -> bool:
         import time
@@ -579,8 +895,6 @@ class PostgresBackend:
             return True
 
     def renew(self, lock: Lock, ttl_s: float) -> bool:
-        import time
-
         with self._lock_mutex:
             existing = self._locks.get(lock.key)
             if existing is None:
@@ -588,7 +902,44 @@ class PostgresBackend:
             token, expiry = existing
             if token != lock.token or expiry <= time.time():
                 return False
-            self._locks[lock.key] = (token, time.time() + ttl_s)
+            new_expiry = time.time() + ttl_s
+            # H1 Increment 2, Phase 2: extend the DURABLE fence-owner's
+            # expiry too (fence unchanged) -- mirrors store/local.py's
+            # renew() -- so a renewed lease keeps its CAS-write
+            # authorization when write() reads the durable fence table
+            # fresh. Done BEFORE extending the in-memory advisory lock, and
+            # rolled back on failure (an aborted transaction left open
+            # would poison every later statement on this connection): a
+            # renew whose durable half did not land reports False.
+            try:
+                conn = self._get_conn()
+                cur = conn.cursor()
+                cur.execute(
+                    f"""
+                    UPDATE {self._qualified_fence_table} SET owner_expiry = %s
+                    WHERE key = %s AND owner_token = %s
+                    """,
+                    (new_expiry, lock.key, token),
+                )
+                matched = cur.rowcount
+                conn.commit()
+            except pg8000.exceptions.DatabaseError:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                return False
+            except (pg8000.exceptions.InterfaceError, OSError):
+                self._reset_conn()
+                return False
+            if matched != 1:
+                # The durable owner is no longer this token: another
+                # PostgresBackend instance/process lock()'d the key and
+                # superseded this lease (the advisory registry is per
+                # instance, so only the fence row can tell). Contract:
+                # renew "succeeds ONLY if this token still owns".
+                return False
+            self._locks[lock.key] = (token, new_expiry)
             return True
 
 

@@ -21,6 +21,7 @@ import pytest
 from store import gate
 from store.fake import FakeBackend
 from store.types import ERROR, OK, ErrorKind
+from tests.ctx_helpers import create_ctx
 
 
 def _blocked(s) -> bool:
@@ -90,7 +91,7 @@ def test_scanner_recovers_utf16_ascii_token_defense_in_depth():
 
 def _persist(body):
     return gate.persist(FakeBackend(), "demo/system_state", body,
-                        expected_hash=None, doc_type="system_state")
+                        ctx=create_ctx(), doc_type="system_state")
 
 
 def test_persist_refuses_utf16_body():
@@ -133,7 +134,7 @@ def test_persist_fails_closed_on_oversize_without_raising():
     # secret_scan raises ValueError on oversize; persist() must catch it (or its
     # own size guard) and return a WriteResult ERROR, never an unhandled exception.
     r = gate.persist(FakeBackend(), "demo/system_state", b"a" * (8 * 1024 * 1024 + 1),
-                     expected_hash=None, doc_type="system_state")
+                     ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r, ERROR)
 
 

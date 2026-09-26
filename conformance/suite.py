@@ -28,6 +28,7 @@ from store.git_backend import GitBackend
 from store.local import LocalBackend
 from store.objectstore import ObjectStoreBackend
 from store.types import ERROR, EXISTS, OK, STALE, ErrorKind, commit_class, sha256_hex
+from tests.ctx_helpers import create_ctx, fenced_ctx, overwrite_ctx
 from tests.moto_support import (
     DUMMY_ACCESS_KEY_ID,
     DUMMY_REGION,
@@ -161,13 +162,13 @@ def _gen(n: int) -> bytes:
 
 
 def test_c1_stale_write_single(backend):
-    r0 = gate.persist(backend, "k1", b"hello", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "k1", b"hello", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
     h0 = r0.new_hash
 
     # A CAS-update against a hash that no longer matches must be rejected.
     r1 = gate.persist(
-        backend, "k1", b"goodbye", expected_hash="0" * 64, doc_type="system_state"
+        backend, "k1", b"goodbye", ctx=fenced_ctx(backend, "k1", "0" * 64), doc_type="system_state"
     )
     assert isinstance(r1, STALE)
     assert r1.current_hash == h0
@@ -178,7 +179,7 @@ def test_c1_stale_write_single(backend):
 def test_c1_stale_write_absent_key_is_stale_none(backend):
     r = gate.persist(
         backend, "does/not/exist", b"x",
-        expected_hash="a" * 64, doc_type="system_state",
+        ctx=fenced_ctx(backend, "does/not/exist", "a" * 64), doc_type="system_state",
     )
     assert isinstance(r, STALE)
     assert r.current_hash is None
@@ -188,7 +189,7 @@ def test_c1_stale_write_reject_race(backend):
     """Two writers race a CAS-update against the same expected_hash. Exactly
     one gets OK, the other gets STALE, and the store ends up holding exactly
     the winner's bytes (the loser never clobbers it)."""
-    r0 = gate.persist(backend, "race1", b"base", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "race1", b"base", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
     base_hash = r0.new_hash
 
@@ -200,7 +201,7 @@ def test_c1_stale_write_reject_race(backend):
     def worker(i):
         barrier.wait()
         results[i] = gate.persist(
-            backend, "race1", bodies[i], expected_hash=base_hash, doc_type="system_state"
+            backend, "race1", bodies[i], ctx=fenced_ctx(backend, "race1", base_hash), doc_type="system_state"
         )
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
@@ -218,9 +219,81 @@ def test_c1_stale_write_reject_race(backend):
     final = backend.read("race1")
     assert final.body == bodies[winner_index]
     assert final.version_hash == oks[0].new_hash
-    # No STALE result may report a current_hash other than the true winner's.
+    # Every STALE loser's current_hash must be the true winner's hash -- EXCEPT
+    # on the git backend, where the owner-approved single-re-read simplification
+    # of _settle_current_hash_after_fence_loss (D-008, 2026-09-24) makes it
+    # best-effort: git has no global mutex, so a loser may re-read the head
+    # before the winner's commit lands (-> the pre-race base). The safety
+    # invariants above (exactly one OK, final == winner) are unchanged, and the
+    # caller reconciles a lagging hash on STALE (contract §7). fake/local/
+    # object-store still provide the strong guarantee.
+    from store.git_backend import GitBackend
+    allowed = ({oks[0].new_hash, base_hash} if isinstance(backend, GitBackend)
+               else {oks[0].new_hash})
     for s in stales:
-        assert s.current_hash == oks[0].new_hash
+        assert s.current_hash in allowed
+
+
+def test_c1_fence_loss_stale_settles_to_winner_hash(backend):
+    """The exact interleaving behind test_c1_stale_write_reject_race's
+    strong guarantee, made deterministic: writer A acquires (and releases)
+    its lease, writer B then acquires a NEWER lease (superseding A's fence),
+    and A's CAS-update reaches the backend BEFORE B's write lands. A must be
+    refused on FENCE -- and its STALE.current_hash must be B's committed
+    hash, not A's own pre-race snapshot: the backend settles (bounded) on
+    the owner's pending write rather than reporting the momentary state.
+    Git stays best-effort (winner|base), per the owner-approved D-008
+    single-re-read simplification."""
+    r0 = gate.persist(backend, "settle1", b"base", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    base_hash = r0.new_hash
+
+    ctx_a = fenced_ctx(backend, "settle1", base_hash)  # older fence
+    ctx_b = fenced_ctx(backend, "settle1", base_hash)  # newer fence -> B is the owner
+    assert ctx_b.precondition.lease.fence > ctx_a.precondition.lease.fence
+
+    started = threading.Event()
+    outcome = {}
+
+    def loser():
+        started.set()
+        outcome["a"] = gate.persist(backend, "settle1", b"a-late", ctx=ctx_a, doc_type="system_state")
+
+    t = threading.Thread(target=loser)
+    t.start()
+    started.wait()
+    time.sleep(0.25)  # A is inside write(), already refused on fence, settling
+    rb = gate.persist(backend, "settle1", b"b-wins", ctx=ctx_b, doc_type="system_state")
+    assert isinstance(rb, OK), rb
+    t.join(timeout=15)
+    assert not t.is_alive(), "a fence-losing write must never hang"
+
+    ra = outcome["a"]
+    assert isinstance(ra, STALE), ra
+    assert ra.reason == "FENCE"
+    from store.git_backend import GitBackend
+    allowed = {rb.new_hash, base_hash} if isinstance(backend, GitBackend) else {rb.new_hash}
+    assert ra.current_hash in allowed, (ra, rb)
+    assert backend.read("settle1").body == b"b-wins"
+
+
+def test_c1_fence_loss_settle_is_bounded_when_owner_never_writes(backend, monkeypatch):
+    """The settle wait is BOUNDED (contract: never block indefinitely): when
+    the superseding owner never writes, the loser still returns within the
+    backend's settle cap, carrying the (unchanged) current hash."""
+    r0 = gate.persist(backend, "settle2", b"base", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    ctx_a = fenced_ctx(backend, "settle2", r0.new_hash)
+    fenced_ctx(backend, "settle2", r0.new_hash)  # supersede A; this owner never writes
+    monkeypatch.setattr(type(backend), "_FENCE_LOSS_SETTLE_MAX_S", 0.3, raising=False)
+
+    t0 = time.monotonic()
+    ra = gate.persist(backend, "settle2", b"a-late", ctx=ctx_a, doc_type="system_state")
+    elapsed = time.monotonic() - t0
+    assert isinstance(ra, STALE) and ra.reason == "FENCE", ra
+    assert ra.current_hash == r0.new_hash
+    assert elapsed < 5.0, f"fence-loss settle must be bounded, took {elapsed:.2f}s"
+    assert backend.read("settle2").body == b"base"
 
 
 # ---------------------------------------------------------------------------
@@ -229,9 +302,9 @@ def test_c1_stale_write_reject_race(backend):
 
 
 def test_c2_create_only_collision_single(backend):
-    r0 = gate.persist(backend, "k2", b"first", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "k2", b"first", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
-    r1 = gate.persist(backend, "k2", b"second", expected_hash=None, doc_type="system_state")
+    r1 = gate.persist(backend, "k2", b"second", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r1, EXISTS)
     assert r1.current_hash == r0.new_hash
     assert backend.read("k2").body == b"first"
@@ -248,7 +321,7 @@ def test_c2_create_only_collision_race(backend):
     def worker(i):
         barrier.wait()
         results[i] = gate.persist(
-            backend, "race2", bodies[i], expected_hash=None, doc_type="system_state"
+            backend, "race2", bodies[i], ctx=create_ctx(), doc_type="system_state"
         )
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
@@ -286,7 +359,7 @@ def test_c2_create_only_collision_race(backend):
 )
 def test_c4_secret_blocked_nothing_written(backend, planted, expect_label_substr):
     result = gate.persist(
-        backend, "secrets/planted", planted, expected_hash=None, doc_type="system_state"
+        backend, "secrets/planted", planted, ctx=create_ctx(), doc_type="system_state"
     )
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.SECRET_BLOCKED
@@ -311,7 +384,7 @@ def test_c4_high_entropy_token_blocked(backend):
 
     planted = b"session_secret=" + _secrets.token_urlsafe(32).encode()
     result = gate.persist(
-        backend, "secrets/entropy", planted, expected_hash=None, doc_type="system_state"
+        backend, "secrets/entropy", planted, ctx=create_ctx(), doc_type="system_state"
     )
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.SECRET_BLOCKED
@@ -321,7 +394,7 @@ def test_c4_high_entropy_token_blocked(backend):
 def test_c4_clean_body_not_blocked(backend):
     result = gate.persist(
         backend, "notes/clean", b"just an ordinary status note, nothing secret here",
-        expected_hash=None, doc_type="system_state",
+        ctx=create_ctx(), doc_type="system_state",
     )
     assert isinstance(result, OK)
 
@@ -334,7 +407,7 @@ def test_c4_clean_body_not_blocked(backend):
 def test_c5_pointer_stays_pointer(backend):
     pointer_body = _gen(1) + b"s3://knokeep-bucket/objects/1234-abcd-pointer"
     result = gate.persist(
-        backend, "pointers/ref-1", pointer_body, expected_hash=None, doc_type="pointer_ref"
+        backend, "pointers/ref-1", pointer_body, ctx=create_ctx(), doc_type="pointer_ref"
     )
     assert isinstance(result, OK)
     blob = backend.read("pointers/ref-1")
@@ -377,7 +450,7 @@ def test_c7_lock_ttl_and_token(backend):
 
     # CAS succeeds regardless of an active lock (locks are advisory, never
     # the CAS mechanism for this in-memory backend).
-    r = gate.persist(backend, "under-lock", b"v1", expected_hash=None, doc_type="system_state")
+    r = gate.persist(backend, "under-lock", b"v1", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r, OK)
 
     # Clean up the still-valid lock, then let it expire and confirm CAS still
@@ -388,11 +461,96 @@ def test_c7_lock_ttl_and_token(backend):
     time.sleep(0.2)  # generous margin past the 50ms TTL (CI-runner-safe)
     # lock3 is now expired but still present in the backend's bookkeeping.
     r2 = gate.persist(
-        backend, "under-lock", b"v2", expected_hash=r.new_hash, doc_type="system_state"
+        backend, "under-lock", b"v2", ctx=fenced_ctx(backend, "under-lock", r.new_hash), doc_type="system_state"
     )
     assert isinstance(r2, OK)
     # Renew must fail once expired, even with the correct token.
     assert backend.renew(lock3, ttl_s=5) is False
+
+
+# ---------------------------------------------------------------------------
+# C14/C17 — server-side fence enforcement (H1 Increment 2, Phase 1). Gated on
+# backend.capabilities().fence so this runs against local/fake now and lights
+# up automatically for the remote backends once a later phase adds their
+# enforcement (their capabilities().fence is False in this phase, so pytest
+# reports them skipped, not passing-by-vacuity).
+# ---------------------------------------------------------------------------
+
+
+def _require_fence(backend):
+    if not backend.capabilities().fence:
+        pytest.skip(
+            "this backend does not enforce lock()-fence ordering yet "
+            "(H1 Increment 2, Phase 1 adds it to local/fake only; the "
+            "remote backends still accept `ctx` unchanged for now)."
+        )
+
+
+def test_c14_stale_fence_refusal_despite_matching_hash(backend):
+    """The key fencing test: a lease that has been superseded by a later
+    lock() on the same key must be refused on the FENCE even when its
+    expected_hash happens to match the CURRENT content — i.e. fencing is
+    enforced independently of, and in addition to, the pre-existing
+    content-hash CAS guard."""
+    _require_fence(backend)
+
+    r0 = gate.persist(backend, "fence/c14", b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    h0 = r0.new_hash
+
+    lease_a = backend.lock("fence/c14", ttl_s=30)
+    r1 = gate.persist(
+        backend, "fence/c14", b"v1-from-a", ctx=overwrite_ctx(h0, lease_a), doc_type="system_state"
+    )
+    assert isinstance(r1, OK)  # last_accepted_fence is now lease_a.fence
+    h1 = r1.new_hash
+    assert backend.unlock(lease_a) is True
+
+    lease_b = backend.lock("fence/c14", ttl_s=30)
+    assert lease_b.fence > lease_a.fence, "two successive acquisitions must strictly increase the fence"
+    r2 = gate.persist(
+        backend, "fence/c14", b"v2-from-b", ctx=overwrite_ctx(h1, lease_b), doc_type="system_state"
+    )
+    assert isinstance(r2, OK)  # last_accepted_fence is now lease_b.fence
+    h2 = r2.new_hash
+    assert backend.unlock(lease_b) is True
+
+    # The stale writer A replays against the CURRENT hash (h2) — the
+    # content-hash CAS alone would accept this — but its lease's fence
+    # (lease_a.fence) is behind last_accepted_fence (lease_b.fence), so the
+    # fence check must refuse it before the hash check is even reached.
+    r3 = gate.persist(
+        backend, "fence/c14", b"v3-stale-a-replay", ctx=overwrite_ctx(h2, lease_a), doc_type="system_state"
+    )
+    assert isinstance(r3, STALE)
+    assert r3.reason == "FENCE"
+    # Nothing changed: the store still holds B's write.
+    final = backend.read("fence/c14")
+    assert final.body == b"v2-from-b"
+    assert final.version_hash == h2
+
+
+def test_c17_same_fence_repeated_writes_succeed(backend):
+    """The holder of one lease may write through it more than once (each a
+    valid CAS-update against the current hash) without needing to
+    re-acquire a fresh lease between writes."""
+    _require_fence(backend)
+
+    r0 = gate.persist(backend, "fence/c17", b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+
+    lease = backend.lock("fence/c17", ttl_s=30)
+    r1 = gate.persist(
+        backend, "fence/c17", b"v1", ctx=overwrite_ctx(r0.new_hash, lease), doc_type="system_state"
+    )
+    assert isinstance(r1, OK)
+
+    r2 = gate.persist(
+        backend, "fence/c17", b"v2", ctx=overwrite_ctx(r1.new_hash, lease), doc_type="system_state"
+    )
+    assert isinstance(r2, OK)
+    assert backend.read("fence/c17").body == b"v2"
+    backend.unlock(lease)
 
 
 # ---------------------------------------------------------------------------
@@ -404,14 +562,14 @@ def test_reconcile_our_write_landed_returns_ok(backend):
     """TIMEOUT_AFTER_COMMIT where the write actually landed: reconcile must
     report OK, and must not re-write."""
     _require_fault_injection(backend)
-    r0 = gate.persist(backend, "amb1", b"v0", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "amb1", b"v0", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
 
     backend.inject_timeout_after_commit(1)
     intended = b"v1"
     intended_hash = sha256_hex(intended)
     r1 = gate.persist(
-        backend, "amb1", intended, expected_hash=r0.new_hash, doc_type="system_state"
+        backend, "amb1", intended, ctx=fenced_ctx(backend, "amb1", r0.new_hash), doc_type="system_state"
     )
     assert isinstance(r1, ERROR) and r1.kind is ErrorKind.TIMEOUT_AFTER_COMMIT
     assert commit_class(r1) == "outcome_unknown"
@@ -431,14 +589,14 @@ def test_reconcile_committed_then_superseded_is_conflict_unknown_never_stale(bac
     per contract §7 ("a lost ack cannot distinguish 'our write committed then
     was superseded' from 'our write never committed'")."""
     _require_fault_injection(backend)
-    r0 = gate.persist(backend, "amb2", b"v0", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "amb2", b"v0", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
 
     backend.inject_conflict_unknown(1)
     intended = b"v1-ours"
     intended_hash = sha256_hex(intended)
     r1 = gate.persist(
-        backend, "amb2", intended, expected_hash=r0.new_hash, doc_type="system_state"
+        backend, "amb2", intended, ctx=fenced_ctx(backend, "amb2", r0.new_hash), doc_type="system_state"
     )
     assert isinstance(r1, ERROR) and r1.kind is ErrorKind.CONFLICT_UNKNOWN
     assert commit_class(r1) == "outcome_unknown"
@@ -447,7 +605,7 @@ def test_reconcile_committed_then_superseded_is_conflict_unknown_never_stale(bac
 
     # Now someone else supersedes the key before we reconcile.
     other = gate.persist(
-        backend, "amb2", b"v1-someone-else", expected_hash=r0.new_hash, doc_type="system_state"
+        backend, "amb2", b"v1-someone-else", ctx=fenced_ctx(backend, "amb2", r0.new_hash), doc_type="system_state"
     )
     assert isinstance(other, OK)
 
@@ -463,14 +621,14 @@ def test_reconcile_still_current_no_retry_stays_conflict_unknown(backend):
     """current == expected_hash (nothing has changed since) and no retry is
     performed: outcome remains CONFLICT_UNKNOWN, not STALE and not OK."""
     _require_fault_injection(backend)
-    r0 = gate.persist(backend, "amb3", b"v0", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "amb3", b"v0", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
 
     backend.inject_conflict_unknown(1)
     intended = b"v1"
     intended_hash = sha256_hex(intended)
     r1 = gate.persist(
-        backend, "amb3", intended, expected_hash=r0.new_hash, doc_type="system_state"
+        backend, "amb3", intended, ctx=fenced_ctx(backend, "amb3", r0.new_hash), doc_type="system_state"
     )
     assert isinstance(r1, ERROR) and r1.kind is ErrorKind.CONFLICT_UNKNOWN
 
@@ -493,14 +651,14 @@ def test_reconcile_retry_stale_is_returned_as_the_true_outcome(backend):
     swallowed the retry's result and always reported CONFLICT_UNKNOWN; that
     was the old, less-informative behavior this test used to encode.)"""
     _require_fault_injection(backend)
-    r0 = gate.persist(backend, "amb4", b"v0", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "amb4", b"v0", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
 
     backend.inject_conflict_unknown(1)
     intended = b"v1"
     intended_hash = sha256_hex(intended)
     r1 = gate.persist(
-        backend, "amb4", intended, expected_hash=r0.new_hash, doc_type="system_state"
+        backend, "amb4", intended, ctx=fenced_ctx(backend, "amb4", r0.new_hash), doc_type="system_state"
     )
     assert isinstance(r1, ERROR) and r1.kind is ErrorKind.CONFLICT_UNKNOWN
     # Our write did NOT actually land: the store still holds the pre-write value.
@@ -509,9 +667,9 @@ def test_reconcile_retry_stale_is_returned_as_the_true_outcome(backend):
     def flaky_retry():
         # Simulate a third party racing in right as we retry: make the retry
         # itself observe a mismatched expected_hash -> STALE.
-        gate.persist(backend, "amb4", b"someone-else", expected_hash=r0.new_hash, doc_type="system_state")
+        gate.persist(backend, "amb4", b"someone-else", ctx=fenced_ctx(backend, "amb4", r0.new_hash), doc_type="system_state")
         return gate.persist(
-            backend, "amb4", intended, expected_hash=r0.new_hash, doc_type="system_state"
+            backend, "amb4", intended, ctx=fenced_ctx(backend, "amb4", r0.new_hash), doc_type="system_state"
         )
 
     result = gate.reconcile(
@@ -523,20 +681,20 @@ def test_reconcile_retry_stale_is_returned_as_the_true_outcome(backend):
 
 def test_reconcile_retry_ok_is_a_fresh_commit(backend):
     _require_fault_injection(backend)
-    r0 = gate.persist(backend, "amb5", b"v0", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "amb5", b"v0", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
 
     backend.inject_conflict_unknown(1)
     intended = b"v1"
     intended_hash = sha256_hex(intended)
     r1 = gate.persist(
-        backend, "amb5", intended, expected_hash=r0.new_hash, doc_type="system_state"
+        backend, "amb5", intended, ctx=fenced_ctx(backend, "amb5", r0.new_hash), doc_type="system_state"
     )
     assert isinstance(r1, ERROR) and r1.kind is ErrorKind.CONFLICT_UNKNOWN
 
     def retry():
         return gate.persist(
-            backend, "amb5", intended, expected_hash=r0.new_hash, doc_type="system_state"
+            backend, "amb5", intended, ctx=fenced_ctx(backend, "amb5", r0.new_hash), doc_type="system_state"
         )
 
     result = gate.reconcile(
@@ -557,7 +715,7 @@ def test_reconcile_retry_ok_is_a_fresh_commit(backend):
 )
 def test_invalid_argument_for_malformed_hash(backend, bad_hash):
     result = gate.persist(
-        backend, "badhash", b"body", expected_hash=bad_hash, doc_type="system_state"
+        backend, "badhash", b"body", ctx=fenced_ctx(backend, "badhash", bad_hash), doc_type="system_state"
     )
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.INVALID_ARGUMENT
@@ -571,7 +729,7 @@ def test_invalid_argument_for_malformed_hash(backend, bad_hash):
 )
 def test_invalid_argument_for_malformed_key(backend, bad_key):
     result = gate.persist(
-        backend, bad_key, b"body", expected_hash=None, doc_type="system_state"
+        backend, bad_key, b"body", ctx=create_ctx(), doc_type="system_state"
     )
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.INVALID_ARGUMENT
@@ -584,9 +742,9 @@ def test_invalid_argument_for_malformed_key(backend, bad_key):
 
 def test_idempotent_create_replay(backend):
     body = b"same-bytes-both-times"
-    r0 = gate.persist(backend, "replay", body, expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "replay", body, ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
-    r1 = gate.persist(backend, "replay", body, expected_hash=None, doc_type="system_state")
+    r1 = gate.persist(backend, "replay", body, ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r1, OK)
     assert r1.new_hash == r0.new_hash
 
@@ -599,7 +757,7 @@ def test_idempotent_create_replay(backend):
 def test_doc_type_allowlist_refuses_non_state_without_generation(backend):
     result = gate.persist(
         backend, "lease/x", b"no generation header here",
-        expected_hash=None, doc_type="lease",
+        ctx=create_ctx(), doc_type="lease",
     )
     assert isinstance(result, ERROR)
     assert result.kind is ErrorKind.INVALID_ARGUMENT
@@ -609,7 +767,7 @@ def test_doc_type_allowlist_refuses_non_state_without_generation(backend):
 def test_doc_type_allowlist_accepts_non_state_with_generation(backend):
     result = gate.persist(
         backend, "lease/y", _gen(1) + b"leaseholder=alice",
-        expected_hash=None, doc_type="lease",
+        ctx=create_ctx(), doc_type="lease",
     )
     assert isinstance(result, OK)
 
@@ -618,7 +776,7 @@ def test_doc_type_allowlist_accepts_non_state_with_generation(backend):
 def test_doc_type_allowlist_state_types_do_not_need_generation(backend, state_doc_type):
     result = gate.persist(
         backend, f"state/{state_doc_type}", b"plain content, no generation header",
-        expected_hash=None, doc_type=state_doc_type,
+        ctx=create_ctx(), doc_type=state_doc_type,
     )
     assert isinstance(result, OK)
 
@@ -724,7 +882,7 @@ def test_migration_into_every_backend(backend):
         "empty/body": b"",
     }
     for key, body in keys_and_bodies.items():
-        r = gate.persist(source, key, body, expected_hash=None, doc_type="system_state")
+        r = gate.persist(source, key, body, ctx=create_ctx(), doc_type="system_state")
         assert isinstance(r, OK)
 
     report = migrate(source, backend)
@@ -748,3 +906,64 @@ def test_migration_into_every_backend(backend):
     assert report2.status == "success", report2.reason
     assert report2.keys_copied == 0
     assert report2.keys_already_present == len(keys_and_bodies)
+
+
+def test_injected_ambiguous_outcome_never_bypasses_the_fence_or_cas(backend):
+    """Fault injection simulates a lost ack AROUND a commit -- it must never
+    turn a write the backend would have refused (superseded fence, stale
+    hash, create-only collision) into one that lands. The fault applies only
+    after the same preconditions as a normal write have passed, and an
+    unreached fault stays armed for the next write that does reach it."""
+    _require_fault_injection(backend)
+    r0 = gate.persist(backend, "amb6", b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    ctx_old = fenced_ctx(backend, "amb6", r0.new_hash)
+    ctx_new = fenced_ctx(backend, "amb6", r0.new_hash)  # supersedes ctx_old's fence
+
+    backend.inject_timeout_after_commit(1)
+    r1 = gate.persist(backend, "amb6", b"stale-writer", ctx=ctx_old, doc_type="system_state")
+    assert isinstance(r1, STALE) and r1.reason == "FENCE", r1
+    assert backend.read("amb6").body == b"v0", "a fence-refused write must not land via an injected fault"
+
+    backend.inject_conflict_unknown(1)
+    r2 = gate.persist(backend, "amb6", b"dup", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r2, EXISTS), r2
+
+    # Both faults are still armed: the next write that passes its checks
+    # consumes the timeout_after_commit (lands + reports outcome-unknown).
+    r3 = gate.persist(backend, "amb6", b"winner", ctx=ctx_new, doc_type="system_state")
+    assert isinstance(r3, ERROR) and r3.kind is ErrorKind.TIMEOUT_AFTER_COMMIT, r3
+    assert backend.read("amb6").body == b"winner"
+
+
+# ---------------------------------------------------------------------------
+# The fence is not caller-supplied data: a Lock rebuilt with the real token
+# but any other fence must be refused (else the forged value is committed as
+# last_accepted, and a huge one wedges every later allocation past the gate).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("delta", ["plus-one", "minus-one", "max"])
+def test_c14_fence_must_equal_the_allocated_owner_fence(backend, delta):
+    from store.backend import Lock
+
+    r0 = gate.persist(backend, "forge1", b"base", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    real = backend.lock("forge1", ttl_s=30.0)
+    backend.unlock(real)
+    forged_fence = {"plus-one": real.fence + 1, "minus-one": max(real.fence - 1, 0), "max": (1 << 63) - 1}[delta]
+    if forged_fence == real.fence:
+        pytest.skip("no distinct forged value for this delta")
+    forged = Lock(key=real.key, token=real.token, expiry_epoch=real.expiry_epoch, fence=forged_fence)
+
+    r1 = gate.persist(backend, "forge1", b"forged", ctx=overwrite_ctx(r0.new_hash, forged), doc_type="system_state")
+    assert isinstance(r1, STALE) and r1.reason == "FENCE", r1
+    assert backend.read("forge1").body == b"base"
+
+    # The genuine lease still writes, and a later acquisition allocates a
+    # sane next fence (nothing huge was committed as accepted).
+    r2 = gate.persist(backend, "forge1", b"real", ctx=overwrite_ctx(r0.new_hash, real), doc_type="system_state")
+    assert isinstance(r2, OK), r2
+    nxt = backend.lock("forge1", ttl_s=30.0)
+    assert nxt.fence == real.fence + 1
+    backend.unlock(nxt)

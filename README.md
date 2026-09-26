@@ -2,7 +2,7 @@
   <img src="docs/brand/banner.png" alt="KnoKeep" width="640">
 </p>
 
-<p align="center"><b>Portable, secret-safe memory that lets any AI coding agent pick up exactly where the last session left off — even in a different tool.</b></p>
+<p align="center"><b>KnoKeep is a portable, secret-safe memory layer that works across your AI tools.</b></p>
 
 <p align="center">
   <a href="https://github.com/SathiaAI/knokeep/actions/workflows/ci.yml"><img src="https://github.com/SathiaAI/knokeep/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -125,3 +125,7 @@ Found a vulnerability? Please open an issue (or email the maintainer) rather tha
 ## License
 
 GNU **AGPL-3.0** (see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE)). AGPL is copyleft **including over a network** — if you run a modified KnoKeep as a service, you must share your source. Use it freely; just keep it open.
+
+---
+
+KnoKeep is built and run by [Viaknox](https://viaknox.com/products).

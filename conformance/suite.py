@@ -234,7 +234,7 @@ def test_c1_stale_write_reject_race(backend):
         assert s.current_hash in allowed
 
 
-def test_c1_fence_loss_stale_settles_to_winner_hash(backend):
+def test_c1_fence_loss_stale_settles_to_winner_hash(backend, monkeypatch):
     """The exact interleaving behind test_c1_stale_write_reject_race's
     strong guarantee, made deterministic: writer A acquires (and releases)
     its lease, writer B then acquires a NEWER lease (superseding A's fence),
@@ -252,17 +252,28 @@ def test_c1_fence_loss_stale_settles_to_winner_hash(backend):
     ctx_b = fenced_ctx(backend, "settle1", base_hash)  # newer fence -> B is the owner
     assert ctx_b.precondition.lease.fence > ctx_a.precondition.lease.fence
 
-    started = threading.Event()
+    # Synchronize on A actually ENTERING the backend's settle path (not a sleep):
+    # the winner's write is issued only once A has been refused on FENCE and is
+    # inside _settle_current_hash_after_fence_loss with the winner's write still
+    # in flight. A settle that returned on its first look would therefore hand
+    # back the pre-race base hash and fail the assertion below deterministically.
+    in_settle = threading.Event()
+    real_settle = type(backend)._settle_current_hash_after_fence_loss
+
+    def _observed_settle(self, key, expected_hash):
+        in_settle.set()
+        return real_settle(self, key, expected_hash)
+
+    monkeypatch.setattr(type(backend), "_settle_current_hash_after_fence_loss", _observed_settle)
     outcome = {}
 
     def loser():
-        started.set()
         outcome["a"] = gate.persist(backend, "settle1", b"a-late", ctx=ctx_a, doc_type="system_state")
 
     t = threading.Thread(target=loser)
     t.start()
-    started.wait()
-    time.sleep(0.25)  # A is inside write(), already refused on fence, settling
+    assert in_settle.wait(15), "A never reached the settle path (was it refused on FENCE at all?)"
+    time.sleep(0.05)  # A is now polling/waiting with nothing landed yet
     rb = gate.persist(backend, "settle1", b"b-wins", ctx=ctx_b, doc_type="system_state")
     assert isinstance(rb, OK), rb
     t.join(timeout=15)

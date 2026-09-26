@@ -767,3 +767,22 @@ def test_lock_maps_a_push_timeout_to_busy(tmp_path, monkeypatch):
     monkeypatch.undo()
     lease = backend.lock("docs/k", ttl_s=30)          # remote back: acquisition works again
     backend.unlock(lease)
+
+
+def test_renew_returns_false_when_the_sidecar_push_raises(tmp_path, monkeypatch):
+    from store.git_backend import GitBackendError
+
+    backend = _make_backend(tmp_path, "renew-push-raises")
+    lease = backend.lock("renew/raise", ttl_s=30.0)
+    before_local = backend._locks["renew/raise"]
+    before_sidecar = _sidecar(backend, "renew/raise")
+
+    def _timeout(sha):
+        raise GitBackendError("git push: timed out")
+
+    monkeypatch.setattr(backend, "_push", _timeout)
+    assert backend.renew(lease, ttl_s=300.0) is False        # never raises
+    assert backend._locks["renew/raise"] == before_local
+    monkeypatch.undo()
+    assert _sidecar(backend, "renew/raise") == before_sidecar
+    assert backend.renew(lease, ttl_s=300.0) is True

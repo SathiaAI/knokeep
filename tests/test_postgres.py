@@ -747,3 +747,11 @@ def test_refuses_to_start_when_fence_table_name_collides_with_another_store():
             PostgresBackend(dict(_PG_CONNECT_KWARGS), schema=schema2, table="foo_fence")
     finally:
         foo._conformance_teardown()
+
+
+def test_health_detail_carries_the_connection_identity_never_credentials(backend):
+    h = backend.health()
+    assert h.ok
+    assert "host=127.0.0.1" in h.detail and "port=5433" in h.detail and "database=knokeep_test" in h.detail
+    assert backend._qualified_table in h.detail
+    assert "password" not in h.detail.lower() and "user=" not in h.detail

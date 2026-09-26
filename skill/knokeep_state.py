@@ -723,12 +723,27 @@ def resolve_conflict(store, project, conflict_key):
           "conflict_key": conflict_key}
     # CreateOnly: first resolve wins; a repeat is EXISTS -> already resolved (OK).
     res = _persist(backend, marker_key, "conflict", _bytes(fm, "resolved"), None)
-    if isinstance(res, (OK, EXISTS)):
+    if isinstance(res, EXISTS):
+        # A marker already sits at this name. It is an idempotent success ONLY
+        # if it is bound to this exact conflict; otherwise (a marker written
+        # before the binding existed, or a stray value) bootstrap() would keep
+        # reporting the conflict outstanding, so REPLACE it under a held lease.
+        if _is_resolved(backend, project, conflict_key):
+            return {"ok": True, "resolved": conflict_key, "marker": marker_key}
+        try:
+            with _hold(backend, marker_key) as lease:
+                blob = backend.read(marker_key)
+                res = _persist(backend, marker_key, "conflict", _bytes(fm, "resolved"),
+                               blob.version_hash if blob else None,
+                               lease=(lease if blob else None))
+        except BackendBusyError:
+            die(reason="resolve_failed", kind="BUSY")
+    if isinstance(res, OK):
         return {"ok": True, "resolved": conflict_key, "marker": marker_key}
     if isinstance(res, ERROR) and res.kind == ErrorKind.SECRET_BLOCKED:
         die(reasons=list(res.labels))
     die(reason="resolve_failed",
-        kind=(res.kind.value if isinstance(res, ERROR) else "unknown"))
+        kind=(res.kind.value if isinstance(res, ERROR) else type(res).__name__))
 
 def rollup(store, project):
     _validate_project(project)

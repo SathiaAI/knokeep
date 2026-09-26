@@ -490,9 +490,14 @@ class PostgresBackend:
             cur.execute("SELECT 1")
             cur.fetchone()
             conn.commit()
+            # Identity = connection + relation (never credentials): two
+            # distinct servers/databases with the same schema.table must not
+            # report the same detail (migrate() compares adapter identities).
+            ck = self._connect_kwargs
             return BackendHealth(
                 ok=True,
-                detail=f"postgres backend table={self._qualified_table}",
+                detail=(f"postgres backend host={ck.get('host')} port={ck.get('port')} "
+                        f"database={ck.get('database')} table={self._qualified_table}"),
             )
         except Exception as exc:
             return BackendHealth(ok=False, detail=str(exc))
@@ -635,19 +640,22 @@ class PostgresBackend:
 
             cur.execute(
                 f"""
-                SELECT owner_token, owner_expiry, last_accepted_fence
+                SELECT owner_token, owner_expiry, owner_fence, last_accepted_fence
                 FROM {self._qualified_fence_table} WHERE key = %s FOR UPDATE
                 """,
                 (k,),
             )
             frow = cur.fetchone()
-            owner_token, owner_expiry, last_accepted_fence = frow if frow else (None, None, 0)
+            owner_token, owner_expiry, owner_fence, last_accepted_fence = (
+                frow if frow else (None, None, 0, 0)
+            )
 
             fence_ok = (
                 precondition_lease is not None
                 and precondition_lease.token == owner_token
                 and owner_expiry is not None
                 and owner_expiry > time.time()
+                and precondition_lease.fence == owner_fence  # exactly what lock() allocated for this token
                 and precondition_lease.fence >= last_accepted_fence
             )
 

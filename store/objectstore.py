@@ -1134,6 +1134,7 @@ class ObjectStoreBackend:
             precondition_lease is not None
             and precondition_lease.token == env.owner_token
             and env.owner_expiry > time.time()
+            and precondition_lease.fence == env.owner_fence  # exactly what lock() allocated for this token
             and precondition_lease.fence >= env.last_accepted_fence
         )
         if not fence_ok:

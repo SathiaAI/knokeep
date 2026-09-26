@@ -613,7 +613,10 @@ class GitBackend:
             scan_result = self._publish_checked(new_commit, head)
             if scan_result is not None:
                 return False
-            ok, rejected, _stderr = self._push(new_commit)
+            try:
+                ok, rejected, _stderr = self._push(new_commit)
+            except GitBackendError:
+                return False  # push timed out / could not start: not renewed, never raised
             if ok:
                 return True
             if not rejected:
@@ -814,11 +817,13 @@ class GitBackend:
                 return ERROR(ErrorKind.NETWORK)
             owner_token = fence_state[0] if fence_state else None
             owner_expiry = fence_state[1] if fence_state else 0.0
+            owner_fence = fence_state[2] if fence_state else 0
             last_accepted_fence = fence_state[3] if fence_state else 0
             fence_ok = (
                 precondition_lease is not None
                 and precondition_lease.token == owner_token
                 and owner_expiry > time.time()
+                and precondition_lease.fence == owner_fence  # exactly what lock() allocated for this token
                 and precondition_lease.fence >= last_accepted_fence
             )
             if not fence_ok:

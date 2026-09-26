@@ -761,11 +761,18 @@ class LocalBackend:
         owner = self._read_fence_owner(self._fence_owner_path(key))
         owner_token = owner[0] if owner is not None else None
         owner_expiry = owner[1] if owner is not None else 0.0
+        owner_fence = owner[2] if owner is not None else 0
         with self._fence_lock:
             last_accepted = self._last_accepted_fence.get(key, 0)
         if lease.token != owner_token:
             return False
         if owner_expiry <= time.time():
+            return False
+        # The fence is not caller-supplied data: it must be exactly the value
+        # lock() allocated for this token (a reconstructed Lock with any
+        # other in-range fence would otherwise be journaled as accepted, and
+        # a huge one would wedge every later allocation past the gate's cap).
+        if lease.fence != owner_fence:
             return False
         if lease.fence < last_accepted:
             return False

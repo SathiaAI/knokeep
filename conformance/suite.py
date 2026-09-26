@@ -934,3 +934,36 @@ def test_injected_ambiguous_outcome_never_bypasses_the_fence_or_cas(backend):
     r3 = gate.persist(backend, "amb6", b"winner", ctx=ctx_new, doc_type="system_state")
     assert isinstance(r3, ERROR) and r3.kind is ErrorKind.TIMEOUT_AFTER_COMMIT, r3
     assert backend.read("amb6").body == b"winner"
+
+
+# ---------------------------------------------------------------------------
+# The fence is not caller-supplied data: a Lock rebuilt with the real token
+# but any other fence must be refused (else the forged value is committed as
+# last_accepted, and a huge one wedges every later allocation past the gate).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("delta", ["plus-one", "minus-one", "max"])
+def test_c14_fence_must_equal_the_allocated_owner_fence(backend, delta):
+    from store.backend import Lock
+
+    r0 = gate.persist(backend, "forge1", b"base", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    real = backend.lock("forge1", ttl_s=30.0)
+    backend.unlock(real)
+    forged_fence = {"plus-one": real.fence + 1, "minus-one": max(real.fence - 1, 0), "max": (1 << 63) - 1}[delta]
+    if forged_fence == real.fence:
+        pytest.skip("no distinct forged value for this delta")
+    forged = Lock(key=real.key, token=real.token, expiry_epoch=real.expiry_epoch, fence=forged_fence)
+
+    r1 = gate.persist(backend, "forge1", b"forged", ctx=overwrite_ctx(r0.new_hash, forged), doc_type="system_state")
+    assert isinstance(r1, STALE) and r1.reason == "FENCE", r1
+    assert backend.read("forge1").body == b"base"
+
+    # The genuine lease still writes, and a later acquisition allocates a
+    # sane next fence (nothing huge was committed as accepted).
+    r2 = gate.persist(backend, "forge1", b"real", ctx=overwrite_ctx(r0.new_hash, real), doc_type="system_state")
+    assert isinstance(r2, OK), r2
+    nxt = backend.lock("forge1", ttl_s=30.0)
+    assert nxt.fence == real.fence + 1
+    backend.unlock(nxt)

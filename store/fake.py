@@ -273,10 +273,13 @@ class FakeBackend:
         fs = self._fence.get(key)
         owner_token = fs.get("owner_token") if fs else None
         owner_expiry = fs.get("owner_expiry", 0.0) if fs else 0.0
+        owner_fence = fs.get("owner_fence", 0) if fs else 0
         last_accepted = fs.get("last_accepted_fence", 0) if fs else 0
         if lease.token != owner_token:
             return False
         if owner_expiry <= time.time():
+            return False
+        if lease.fence != owner_fence:  # exactly the fence lock() allocated for this token
             return False
         if lease.fence < last_accepted:
             return False

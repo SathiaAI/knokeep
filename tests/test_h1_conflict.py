@@ -913,3 +913,31 @@ def test_planted_marker_without_matching_conflict_key_does_not_settle_the_confli
     assert f"conflict_key: {ck2}" in marker or ck2 in marker
     b2 = ks.bootstrap(store2, project)
     assert b2["conflict_count"] == 0 and b2["settled_count"] == 1
+
+
+def test_resolve_repairs_an_existing_marker_not_bound_to_the_conflict(tmp_path):
+    """A marker already at the deterministic name but not bound to this
+    conflict (written before the binding existed, or a stray value) must not
+    be reported as an idempotent success while bootstrap() keeps the conflict
+    outstanding: resolve replaces it with a bound marker and the conflict is
+    then settled."""
+    store = str(tmp_path)
+    project = "proj-marker-repair"
+    r0 = ks.flush_state(store, project, "## Active State\n\n## Notes\n\n")
+    _direct_section_write(ks._persist, store, project, "Active State", "winner", r0["version_hash"])
+    with pytest.raises(SystemExit) as exc:
+        ks.flush_state(store, project, "loser", expect_hash=r0["version_hash"], section="Active State")
+    conflict_key = _die_payload(exc)["conflict_key"]
+    backend = ks._backend(store)
+    marker_key = ks._resolved_key(project, conflict_key)
+    legacy_fm = {"schema_version": ks.SCHEMA_VERSION, "project_id": project, "resolved_at": ks.now()}
+    assert ks._persist(backend, marker_key, "conflict", ks._bytes(legacy_fm, "resolved"), None).__class__.__name__ == "OK"
+    assert ks.bootstrap(store, project)["conflict_count"] == 1        # unbound marker does not settle
+
+    out = ks.resolve_conflict(store, project, conflict_key)
+    assert out["ok"] is True and out["marker"] == marker_key
+    marker = ks._backend(store).read(marker_key).body.decode("utf-8")
+    assert conflict_key in marker                                      # repaired: now bound
+    b = ks.bootstrap(store, project)
+    assert b["conflict_count"] == 0 and b["settled_count"] == 1
+    assert ks.resolve_conflict(store, project, conflict_key)["ok"] is True   # still idempotent

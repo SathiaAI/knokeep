@@ -22,3 +22,6 @@ stores/
 
 # local Claude Code plugin cache / settings (never commit)
 .claude/
+
+# adversarial-review run artifacts (audit records, never committed)
+.adversarial-review/

@@ -14,15 +14,17 @@ validation (identifier shape, no-newline metadata) stays skill-side. The bootstr
 out-of-band store audit enumerates via backend.list()/read() and re-scans each blob through
 store.gate (content-based: reject non-utf-8/secret-bearing blobs). knokeep_secretgate retired."""
 import sys, os, re, json, datetime, argparse
-import hashlib, random, time
+import hashlib, random, time, contextlib
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
 sys.path.insert(0, _ROOT)   # store package (parent) — the shared V2 engine
 from store import gate
 from store.local import LocalBackend
+from store.backend import BackendBusyError
 from store.types import OK, STALE, EXISTS, ERROR, ErrorKind
 from store.config import default_store_root
+from store.context import create_ctx, overwrite_ctx
 
 SCHEMA_VERSION = 1
 ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -103,8 +105,57 @@ def _bytes(fm, body):
     _validate_fm(fm)
     return dump(fm, body).encode("utf-8")
 
-def _persist(backend, key, kind, raw_bytes, expected_hash):
-    return gate.persist(backend, key, raw_bytes, expected_hash=expected_hash, doc_type=_DOC_TYPE[kind])
+_LEASE_TTL_S = 30  # advisory-lease TTL for the read->compute->persist critical
+                   # section (D-006). That section is milliseconds — well under
+                   # the TTL — so the lease is never held across I/O or a user
+                   # turn and needs no renewal/heartbeat (panel refinement:
+                   # "hold only for that key's persist critical section").
+
+
+@contextlib.contextmanager
+def _hold(backend, key):
+    """Acquire this key's advisory lease and HOLD it across the caller's
+    read->compute->persist critical section (D-006 / checklist #16), releasing
+    it in a finally. LocalBackend.unlock is ownership-conditional (it releases
+    only if OUR token still owns and the TTL has not elapsed), so an expired
+    writer can never release a successor's lease. Raises BackendBusyError if the
+    key is currently held by another writer; the caller treats that as one
+    bounded retry, never an unbounded spin (checklist #11)."""
+    lease = backend.lock(key, ttl_s=_LEASE_TTL_S)
+    try:
+        yield lease
+    finally:
+        try:
+            backend.unlock(lease)
+        except Exception:
+            pass
+
+
+def _persist(backend, key, kind, raw_bytes, expected_hash, lease=None):
+    """Single write door (store.gate.persist) with the required OperationContext.
+
+    - expected_hash is None -> CreateOnly: a create physically cannot clobber, so
+      no lease is needed (D-005; C2 first-writer-wins).
+    - expected_hash set + `lease` given -> Overwrite carrying the HELD lease
+      (D-006 / checklist #16): the runtime caller acquired the lease, read UNDER
+      it, and derived expected_hash from that under-lease read, so the backend
+      enforces the monotonic fence (token + fence) against a lease that was live
+      BEFORE the read — this closes the stale-writer-with-matching-hash hole that
+      the old acquire-then-unlock-then-write pattern left open.
+    - expected_hash set + lease None -> legacy acquire-and-release compatibility
+      for direct callers/tests only. The runtime skill paths
+      (flush_state/flush_log/session_append) always pass a held lease now.
+
+    `lease` is a trailing keyword arg so existing positional 5-arg calls keep
+    working; monkeypatch stubs must accept it (tests/test_h1_conflict.py)."""
+    if expected_hash is None:
+        ctx = create_ctx()
+    else:
+        if lease is None:
+            lease = backend.lock(key, ttl_s=_LEASE_TTL_S)
+            backend.unlock(lease)
+        ctx = overwrite_ctx(expected_hash, lease)
+    return gate.persist(backend, key, raw_bytes, ctx=ctx, doc_type=_DOC_TYPE[kind])
 
 def _require_ok(res):
     """Map a WriteResult onto the skill's die()/JSON contract; return the new 64-hex on OK."""
@@ -185,6 +236,30 @@ def _flush_doc(kind, store, project, new_content, expect_hash=None, section=None
     if expect_hash is not None and not re.fullmatch(r"[0-9a-f]{64}", str(expect_hash)):
         die(reason="invalid_expect_hash", value=str(expect_hash))
 
+    # Deferral A (SAT-1158): a section BODY line that looks like a level-2
+    # heading ("## ...") would shift section boundaries on reparse, letting a
+    # later writer mis-target a section or bleed content across sections.
+    # Increment 1 flattened the section NAME only; here we fail closed on
+    # body-level heading-injection for SECTION-scoped writes (a leaf section's
+    # content is not itself sectioned). Whole-doc writes are the caller's own
+    # full structure (intentional headings), so they are exempt. Fails loud
+    # BEFORE any read/lock/park so a bad body never produces a durable write.
+    # The section NAME is interpolated into "## {name}" by _replace_section:
+    # a name carrying a line break would persist a second level-2 heading
+    # (the very boundary ambiguity the body guard below prevents), and an
+    # empty name is not a heading at all. Refuse both before any read/lock.
+    if section is not None and (
+        not isinstance(section, str) or not section.strip() or "\n" in section or "\r" in section
+    ):
+        die(reason="invalid_section_name", section=str(section).replace("\r", " ").replace("\n", " "))
+    # Scan the body on NORMALIZED line boundaries: a bare CR is a line ending
+    # for Markdown consumers (CommonMark: LF, CR or CRLF), so "x\r## y" would
+    # otherwise slip past a LF-only `^` and land a second level-2 heading.
+    if section is not None and _ANY_H2_RE.search(
+        (new_content or "").replace("\r\n", "\n").replace("\r", "\n")
+    ):
+        die(reason="section_body_heading_injection", section=str(section))
+
     base_section = None
     base_hash = None
     base_established = False
@@ -192,75 +267,108 @@ def _flush_doc(kind, store, project, new_content, expect_hash=None, section=None
     res = None
 
     attempt = 0
+    busy_waits = 0
+    busy_deadline = time.monotonic() + _BUSY_WAIT_S
     while attempt < _MAX_CAS_ATTEMPTS:
         attempt += 1
-        blob = backend.read(key)
-        if blob is not None:
-            fm, cur_body = parse(blob.body.decode("utf-8"))
-            if not fm:
-                die(reason=f"malformed {kind} frontmatter")
-            cur_hash = blob.version_hash
-        else:
-            fm, cur_body, cur_hash = None, "", None
-
-        if blob is not None and not expect_hash and attempt == 1:
-            die(reason=("expect_hash required for log update" if kind == "log"
-                        else "expect_hash required for update"), current_hash=cur_hash)
-
-        if section is not None:
-            try:
-                got = _get_section(cur_body, section)
-            except ValueError:
-                _park_conflict(backend, store, project, sess, new_content, section,
-                                base_hash, cur_hash, reason="conflict_parked", doc_kind=kind)
-            cur_section = got[2] if got else None
-
-            if not base_established:
-                # F1 fix: the reapply baseline is valid ONLY against the caller's
-                # known version. expect_hash is None only on a first-ever create
-                # (no prior winner to clobber). If the store has already advanced
-                # past expect_hash, we NEVER observed the caller's true section, so
-                # reapplying could silently overwrite whoever advanced it -> PARK.
-                if expect_hash is None or cur_hash == expect_hash:
-                    base_section = cur_section
-                    base_hash = cur_hash
-                    base_established = True
+        # D-006 / checklist #16: HOLD this key's lease across read->compute->
+        # persist so the backend fence protects us from a stale writer whose
+        # content-hash still matches. A fresh lease per attempt (a higher fence)
+        # is the "re-acquire on retry" path. `park` defers any conflict-parking
+        # until AFTER the lease is released, so only ONE key is ever locked at a
+        # time (checklist #5 — no nested locks, no self-deadlock).
+        park = None
+        try:
+            with _hold(backend, key) as lease:
+                blob = backend.read(key)
+                if blob is not None:
+                    fm, cur_body = parse(blob.body.decode("utf-8"))
+                    if not fm:
+                        die(reason=f"malformed {kind} frontmatter")
+                    cur_hash = blob.version_hash
                 else:
-                    _park_conflict(backend, store, project, sess, new_content, section,
-                                    expect_hash, cur_hash, reason="conflict_parked", doc_kind=kind)
-            elif not _section_eq(cur_section, base_section):
-                _park_conflict(backend, store, project, sess, new_content, section,
-                                base_hash, cur_hash, reason="conflict_parked", doc_kind=kind)
+                    fm, cur_body, cur_hash = None, "", None
 
-            try:
-                new_body = _replace_section(cur_body, section, new_content)
-            except ValueError:
-                _park_conflict(backend, store, project, sess, new_content, section,
-                                base_hash, cur_hash, reason="conflict_parked", doc_kind=kind)
+                if blob is not None and not expect_hash and attempt == 1:
+                    die(reason=("expect_hash required for log update" if kind == "log"
+                                else "expect_hash required for update"), current_hash=cur_hash)
 
-            persist_expect = cur_hash   # always CAS against the version we built upon
-        else:
-            # Whole-doc base is the caller's DECLARED version (what the losing
-            # body was written against), not the winner we happened to read —
-            # preserves conflict lineage so base != current in the record.
-            base_hash = expect_hash
-            new_body = new_content
-            persist_expect = expect_hash if blob is not None else None
+                if section is not None:
+                    try:
+                        got = _get_section(cur_body, section)
+                    except ValueError:
+                        park = (new_content, section, base_hash, cur_hash, "conflict_parked")
+                        break
+                    cur_section = got[2] if got else None
 
-        if blob is not None:
-            out_fm = dict(fm)
-            out_fm["revision"] = int(fm.get("revision", 0)) + 1
-            out_fm["updated"] = now()
-        else:
-            # Legacy metadata preserved per-kind (F7): state carries client, log does not.
-            out_fm = {"schema_version": SCHEMA_VERSION, "project_id": project}
-            if kind == "state":
-                out_fm["client"] = "cowork"
-            out_fm["revision"] = 1
-            out_fm["updated"] = now()
+                    if not base_established:
+                        # F1 fix: the reapply baseline is valid ONLY against the
+                        # caller's known version. expect_hash is None only on a
+                        # first-ever create (no prior winner to clobber). If the
+                        # store already advanced past expect_hash we never observed
+                        # the caller's true section, so reapplying could silently
+                        # overwrite whoever advanced it -> PARK.
+                        if expect_hash is None or cur_hash == expect_hash:
+                            base_section = cur_section
+                            base_hash = cur_hash
+                            base_established = True
+                        else:
+                            park = (new_content, section, expect_hash, cur_hash, "conflict_parked")
+                            break
+                    elif not _section_eq(cur_section, base_section):
+                        park = (new_content, section, base_hash, cur_hash, "conflict_parked")
+                        break
 
-        res = _persist(backend, key, kind, _bytes(out_fm, new_body), persist_expect)
+                    try:
+                        new_body = _replace_section(cur_body, section, new_content)
+                    except ValueError:
+                        park = (new_content, section, base_hash, cur_hash, "conflict_parked")
+                        break
 
+                    persist_expect = cur_hash   # always CAS against the version we built upon
+                else:
+                    # Whole-doc base is the caller's DECLARED version (what the
+                    # losing body was written against), not the winner we happened
+                    # to read — preserves conflict lineage so base != current.
+                    base_hash = expect_hash
+                    new_body = new_content
+                    persist_expect = expect_hash if blob is not None else None
+
+                if blob is not None:
+                    out_fm = dict(fm)
+                    out_fm["revision"] = int(fm.get("revision", 0)) + 1
+                    out_fm["updated"] = now()
+                else:
+                    # Legacy metadata preserved per-kind (F7): state carries
+                    # client, log does not.
+                    out_fm = {"schema_version": SCHEMA_VERSION, "project_id": project}
+                    if kind == "state":
+                        out_fm["client"] = "cowork"
+                    out_fm["revision"] = 1
+                    out_fm["updated"] = now()
+
+                # CreateOnly (persist_expect is None) needs no lease; a fenced
+                # Overwrite carries the HELD lease so write() enforces the fence.
+                res = _persist(backend, key, kind, _bytes(out_fm, new_body),
+                               persist_expect,
+                               lease=(lease if persist_expect is not None else None))
+        except BackendBusyError:
+            # Another writer holds this key's lease across ITS read->compute->
+            # persist section. Waiting it out is not a CAS conflict, so it
+            # must not consume the _MAX_CAS_ATTEMPTS reapply budget: five
+            # 10-50ms backoffs (< 1s in total) are shorter than one fsync-heavy
+            # critical section on a slow disk, which parked perfectly good
+            # writes as "conflict_retry_exhausted". Bounded by wall-clock
+            # instead (_BUSY_WAIT_S, never an unbounded spin -- checklist
+            # #11); the backoff multiplier is capped.
+            if time.monotonic() >= busy_deadline:
+                break
+            busy_waits += 1
+            attempt -= 1
+            time.sleep(random.uniform(0.01, 0.05) * min(busy_waits, 10))
+            continue
+
+        # --- lease released; act on the outcome outside any critical section ---
         if isinstance(res, OK):
             return {"ok": True, "revision": out_fm["revision"], "version_hash": res.new_hash}
 
@@ -279,6 +387,13 @@ def _flush_doc(kind, store, project, new_content, expect_hash=None, section=None
         if attempt >= _MAX_CAS_ATTEMPTS:
             break
         time.sleep(random.uniform(0.01, 0.05) * attempt)
+
+    # A section-mode conflict detected under the lease parks here, AFTER the
+    # lease is released (one key at a time).
+    if park is not None:
+        losing_content, park_section, park_base, park_current, park_reason = park
+        _park_conflict(backend, store, project, sess, losing_content, park_section,
+                        park_base, park_current, reason=park_reason, doc_kind=kind)
 
     _park_conflict(backend, store, project, sess, new_content, section,
                     base_hash, getattr(res, "current_hash", None),
@@ -301,22 +416,43 @@ def session_append(store, project, session_id, client, entry):
         die(reason="invalid client", value=client)
     backend = _backend(store)
     jkey = _key(project, "journal", session_id)
-    for _ in range(50):                                       # bounded CAS retry: same-session concurrent appends
-        blob = backend.read(jkey)
-        if blob is None:
-            fm = {"schema_version": SCHEMA_VERSION, "project_id": project,
-                  "session_id": session_id, "client": client, "updated": now()}
-            body = "## Journal\n"
-            expect = None
-        else:
-            fm, body = parse(blob.body.decode("utf-8"))
-            fm = fm or {"schema_version": SCHEMA_VERSION, "project_id": project,
-                        "session_id": session_id, "client": client}
-            fm["updated"] = now()
-            body = body or "## Journal\n"
-            expect = blob.version_hash
-        body = body + f"[{now()}] {entry}\n"
-        res = _persist(backend, jkey, "journal", _bytes(fm, body), expect)
+    for attempt in range(1, 51):                              # bounded CAS retry: same-session concurrent appends
+        # D-006 / checklist #16: read the journal and append UNDER a held lease
+        # (a fresh lease per iteration = the re-acquire-on-retry path) so the
+        # fence rejects a stale appender whose content-hash still matches.
+        try:
+            with _hold(backend, jkey) as lease:
+                blob = backend.read(jkey)
+                if blob is None:
+                    fm = {"schema_version": SCHEMA_VERSION, "project_id": project,
+                          "session_id": session_id, "client": client, "updated": now()}
+                    body = "## Journal\n"
+                    expect = None
+                else:
+                    fm, body = parse(blob.body.decode("utf-8"))
+                    fm = fm or {"schema_version": SCHEMA_VERSION, "project_id": project,
+                                "session_id": session_id, "client": client}
+                    fm["updated"] = now()
+                    body = body or "## Journal\n"
+                    expect = blob.version_hash
+                body = body + f"[{now()}] {entry}\n"
+                # CreateOnly (expect is None) needs no lease; an Overwrite append
+                # carries the HELD lease. The whole-doc version_hash stays the CAS
+                # token: under the held lease the fence + hash re-check happen
+                # atomically at write time, which already prevents a lost append,
+                # so no separate tail-hash/sequence precondition is needed (see
+                # decision note in the Phase-3 handoff).
+                res = _persist(backend, jkey, "journal", _bytes(fm, body),
+                               expect, lease=(lease if expect is not None else None))
+        except BackendBusyError:
+            # Another writer holds the journal lease across ITS read->append
+            # critical section. lock() refuses immediately (never waits), so
+            # back off briefly before retrying -- otherwise all 50 attempts
+            # can burn through in a few milliseconds while the holder is
+            # still inside its section, exhausting the budget spuriously.
+            # Bounded (capped multiplier), same shape as _flush_doc's retry.
+            time.sleep(random.uniform(0.01, 0.05) * min(attempt, 10))
+            continue                                          # bounded retry
         if isinstance(res, OK):
             return {"ok": True, "log": jkey}
         if isinstance(res, ERROR) and res.kind == ErrorKind.SECRET_BLOCKED:
@@ -336,7 +472,10 @@ def _section(b, h):
 # followed by whitespace (so "### Sub" never matches — after the 2nd '#' a
 # 3rd '#' is not whitespace), anchored to the start of a line so "##" text
 # appearing mid-paragraph is never mistaken for a heading.
-_ANY_H2_RE = re.compile(r"(?m)^##(?=[ \t]|\r?$)")
+# CommonMark allows an ATX heading to be indented by up to three spaces, so
+# the guard and _get_section agree on that too (a body line "   ## X" is a
+# heading to every Markdown consumer and must be treated as one here).
+_ANY_H2_RE = re.compile(r"(?m)^[ ]{0,3}##(?=[ \t]|\r?$)")
 
 
 def _get_section(body, heading):
@@ -349,7 +488,7 @@ def _get_section(body, heading):
     The heading match tolerates a trailing CR (CRLF docs) so it never fails
     to find an existing heading and blindly appends a duplicate.
     """
-    hre = re.compile(rf"(?m)^##[ \t]+{re.escape(heading)}[ \t]*\r?$")
+    hre = re.compile(rf"(?m)^[ ]{{0,3}}##[ \t]+{re.escape(heading)}[ \t]*\r?$")
     matches = list(hre.finditer(body))
     if not matches:
         return None
@@ -395,6 +534,11 @@ def _section_eq(a, b):
 
 
 _MAX_CAS_ATTEMPTS = 5
+# Total wall-clock a writer will wait for a competitor's held lease before
+# giving up (parking as retry-exhausted). A held section is milliseconds to
+# a second even on a slow disk; the advisory TTL (_LEASE_TTL_S) is the hard
+# ceiling behind it.
+_BUSY_WAIT_S = 5.0
 
 
 def _park_conflict(backend, store, project, session, losing_content, section,
@@ -446,9 +590,49 @@ def _park_conflict(backend, store, project, session, losing_content, section,
     except SystemExit:
         journal_recorded = False  # surfaced in the die payload — never silently swallowed
 
+    # Deferral B (SAT-1158): park-noise telemetry. Emit a dedicated durable
+    # event so the dogfood soak can measure how often — and at what scope —
+    # writers park, and decide whether a tighter whole-doc merge is warranted.
+    # decision="park" is its own bucket (never "block"), so it does not pollute
+    # the secret/concurrency block counters in evaluate(). Fail-open (never
+    # blocks or alters the park). No body bytes — labels/keys/hashes only.
+    _event(store, project, "park", "park",
+           {"reason": reason, "doc_kind": doc_kind or "unknown",
+            "scope": "whole_doc" if section is None else "section",
+            "conflict_key": conflict_key})
     die(reason=reason, conflict_key=conflict_key, current_hash=current_hash,
         base_hash=base_hash, doc_kind=doc_kind, journal_recorded=journal_recorded)
 # --- end H1 increment 1 helpers ---------------------------------------------
+
+# --- Deferral C (SAT-1158): conflict resolve / tombstone lifecycle ----------
+# Parked conflict keys accumulate monotonically; bootstrap() kept counting a key
+# even after its edit was reviewed + reapplied, and a raw file delete is undone
+# by LocalBackend's append-only journal replay. A "resolved" marker is therefore
+# itself a durable gate.persist WRITE (survives replay) under a SEPARATE prefix
+# {project}/conflict-resolved/ (which never matches the {project}/conflicts/
+# listing prefix), named by a hex digest of the conflict key so the marker key
+# is short + pure-hex (never entropy-flagged by the gate's KEY scanner).
+
+def _resolved_marker_name(conflict_key):
+    return hashlib.sha256(conflict_key.encode("utf-8")).hexdigest()[:32]
+
+def _resolved_key(project, conflict_key):
+    return f"{project}/conflict-resolved/{_resolved_marker_name(conflict_key)}"
+
+def _is_resolved(backend, project, conflict_key):
+    """A conflict counts as settled only if its marker exists AND reads back
+    as a resolve_conflict() marker bound to this exact conflict key."""
+    try:
+        blob = backend.read(_resolved_key(project, conflict_key))
+    except Exception:
+        return False
+    if blob is None:
+        return False
+    try:
+        fm, _body = parse(blob.body.decode("utf-8"))
+    except Exception:
+        return False
+    return bool(fm) and fm.get("conflict_key") == conflict_key and fm.get("project_id") == project
 
 _BENIGN_STORE_FILES = {".ds_store", "thumbs.db", "desktop.ini"}
 
@@ -492,11 +676,16 @@ def bootstrap(store, project):
     vh = sblob.version_hash if sblob else None
     lh = lblob.version_hash if lblob else None
     rev = int(fm["revision"]) if fm.get("revision") else None
-    # Surface any parked conflicts so a resuming session cannot silently miss
-    # a losing writer's work. Each key under {project}/conflicts/ is one parked
-    # body; ASCII marker only (no emoji) so it renders on every console.
-    conflicts = list(backend.list(project + "/conflicts/"))
+    # Surface parked conflicts so a resuming session cannot silently miss a
+    # losing writer's work. Deferral C: subtract those explicitly RESOLVED (a
+    # durable marker under {project}/conflict-resolved/ that survives journal
+    # replay), so conflict_count now means OUTSTANDING (unreviewed) conflicts —
+    # a reviewed+reapplied key stops being counted. Each key under
+    # {project}/conflicts/ is one parked body; ASCII marker only (no emoji).
+    parked = list(backend.list(project + "/conflicts/"))
+    conflicts = [k for k in parked if not _is_resolved(backend, project, k)]
     conflict_count = len(conflicts)
+    settled_count = len(parked) - conflict_count
     resume = f"resuming: {active or '(none)'} / next: {nxt or '(none)'} / v{(vh or '?')[:12]}"
     if conflict_count:
         resume += (f"  [!] {conflict_count} parked conflict(s) - "
@@ -504,7 +693,51 @@ def bootstrap(store, project):
     return {"version_hash": vh, "revision": rev, "log_hash": lh,
             "active": active, "next": nxt,
             "conflicts": conflicts, "conflict_count": conflict_count,
+            "settled_count": settled_count,
             "resume_line": resume}
+
+def resolve_conflict(store, project, conflict_key):
+    """Deferral C: mark a parked conflict RESOLVED with a durable, append-only
+    marker that SURVIVES LocalBackend journal replay (a raw file delete would be
+    undone by replay; a gate.persist write is not). After this, bootstrap()
+    counts the conflict as settled, not outstanding. Idempotent: resolving an
+    already-resolved key is a no-op OK (CreateOnly -> EXISTS)."""
+    _validate_project(project)
+    backend = _backend(store)
+    prefix = project + "/conflicts/"
+    if not isinstance(conflict_key, str) or not conflict_key.startswith(prefix):
+        die(reason="invalid_conflict_key", value=str(conflict_key))
+    # The marker is named from the key's spelling, and bootstrap() matches
+    # markers against the CANONICAL listing -- so the supplied key must be
+    # exactly one of the listed parked keys. A non-canonical alias (".."
+    # segments, doubled separators) can read the same file through the
+    # backend but would mint a marker bootstrap() never matches.
+    if not gate._valid_key_shape(conflict_key) or conflict_key not in set(backend.list(prefix)):
+        die(reason="unknown_conflict_key", value=conflict_key)
+    marker_key = _resolved_key(project, conflict_key)
+    # The marker names the FULL conflict key it resolves; bootstrap() reads it
+    # back and honours it only when that field matches the parked key exactly,
+    # so a marker-shaped value that merely has the right digest name (planted
+    # or written out of band) never silently settles a conflict.
+    fm = {"schema_version": SCHEMA_VERSION, "project_id": project, "resolved_at": now(),
+          "conflict_key": conflict_key}
+    # CreateOnly: first resolve wins; a repeat is EXISTS -> already resolved (OK).
+    res = _persist(backend, marker_key, "conflict", _bytes(fm, "resolved"), None)
+    if isinstance(res, EXISTS):
+        # A value already sits at this name. It is an idempotent success ONLY
+        # if it is a marker bound to this exact conflict. Anything else is a
+        # NAMESPACE COLLISION: {project}/conflict-resolved/ is not reserved
+        # by the gate and was legal user storage, so the existing bytes are
+        # never replaced -- fail closed and leave the conflict outstanding.
+        if _is_resolved(backend, project, conflict_key):
+            return {"ok": True, "resolved": conflict_key, "marker": marker_key}
+        die(reason="conflict_marker_collision", marker=marker_key, conflict_key=conflict_key)
+    if isinstance(res, OK):
+        return {"ok": True, "resolved": conflict_key, "marker": marker_key}
+    if isinstance(res, ERROR) and res.kind == ErrorKind.SECRET_BLOCKED:
+        die(reasons=list(res.labels))
+    die(reason="resolve_failed",
+        kind=(res.kind.value if isinstance(res, ERROR) else type(res).__name__))
 
 def rollup(store, project):
     _validate_project(project)
@@ -538,10 +771,14 @@ def evaluate(store):
     block = [r for r in rows if r.get("decision") == "block"]
     error = [r for r in rows if r.get("decision") == "error"]
     boot = [r for r in rows if r.get("op") == "bootstrap"]
+    park = [r for r in rows if r.get("op") == "park"]          # Deferral B: park-noise
     sc = {
         "events": len(rows),
         "writes_allowed": len(allow),
         "blocks_total": len(block),
+        "parks_total": len(park),
+        "whole_doc_parks": sum(1 for r in park if r.get("scope") == "whole_doc"),
+        "section_parks": sum(1 for r in park if r.get("scope") == "section"),
         "secret_blocks": sum(1 for r in block if _has(r, "key") or _has(r, "secret")
                              or _has(r, "token") or _has(r, "private key") or _has(r, "URI")),
         "concurrency_blocks": sum(1 for r in block if _has(r, "stale") or _has(r, "lock_timeout")
@@ -621,10 +858,10 @@ def _entry(a):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["init", "flush-state", "flush-log", "session-append", "bootstrap", "rollup", "eval", "health"])
+    ap.add_argument("cmd", choices=["init", "flush-state", "flush-log", "session-append", "bootstrap", "rollup", "resolve", "eval", "health"])
     ap.add_argument("--store"); ap.add_argument("--project")   # --store optional: defaults to the shared cross-tool root
     ap.add_argument("--session-id"); ap.add_argument("--client", default="cowork")
-    ap.add_argument("--body-file"); ap.add_argument("--entry"); ap.add_argument("--entry-file"); ap.add_argument("--expect-hash"); ap.add_argument("--section")
+    ap.add_argument("--body-file"); ap.add_argument("--entry"); ap.add_argument("--entry-file"); ap.add_argument("--expect-hash"); ap.add_argument("--section"); ap.add_argument("--conflict-key")
     a = ap.parse_args()
     if not a.store:
         a.store = default_store_root()                     # shared cross-tool default (T-4)
@@ -641,6 +878,7 @@ def main():
         elif a.cmd == "session-append": result = session_append(a.store, a.project, a.session_id or _auto_sid(), a.client, _entry(a))
         elif a.cmd == "bootstrap": result = bootstrap(a.store, a.project)
         elif a.cmd == "rollup": result = rollup(a.store, a.project)
+        elif a.cmd == "resolve": result = resolve_conflict(a.store, a.project, a.conflict_key)
     except SystemExit as e:
         _event(a.store, a.project, a.cmd, "block", _labels(e.code))   # observe the block; never alter it
         raise

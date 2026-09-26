@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from .types import BackendHealth, Blob, Caps, WriteResult
 
 if typing.TYPE_CHECKING:  # pragma: no cover - typing only, no runtime import
+    from .context import OperationContext
     from .gate import ScannedBody, ScannedKey
 
 
@@ -15,6 +16,7 @@ class Lock:
     key: str
     token: str
     expiry_epoch: float
+    fence: int = 0
 
 
 class BackendBusyError(Exception):
@@ -45,11 +47,16 @@ class StoreBackend(typing.Protocol):
         key: "ScannedKey",
         body: "ScannedBody",
         *,
-        expected_hash: typing.Optional[str],
+        ctx: "OperationContext",
     ) -> WriteResult:
         """CAS write. See contract §3. `key`/`body` MUST be gate-issued
         ScannedKey/ScannedBody; adapters verify the marker and raise TypeError
-        for anything else before any I/O.
+        for anything else before any I/O. `ctx` is a required OperationContext
+        (store.context) carrying the write's precondition (create-only vs a
+        CAS-update's expected_hash) plus auth/lease metadata; Phase 0 (H1
+        Increment 2) backends derive the same expected_hash they used to
+        receive directly and enforce nothing new — fence enforcement is a
+        later phase.
         """
         ...
 

@@ -24,13 +24,16 @@ from __future__ import annotations
 
 import subprocess
 import threading
+import time
 import types
 
 import pytest
 
 from store import gate
+from store.backend import Lock
 from store.git_backend import GitBackend, _extract_generation
 from store.types import ERROR, EXISTS, OK, STALE, ErrorKind, sha256_hex
+from tests.ctx_helpers import create_ctx, fenced_ctx, overwrite_ctx
 
 
 def _gen(n: int) -> bytes:
@@ -84,7 +87,7 @@ def _make_backend(tmp_path, name: str = "default") -> GitBackend:
 
 def test_c1_two_concurrent_writers_exactly_one_ok_other_stale(tmp_path):
     backend = _make_backend(tmp_path, "c1")
-    r0 = gate.persist(backend, "k1", b"base", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "k1", b"base", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
     base_hash = r0.new_hash
 
@@ -94,7 +97,7 @@ def test_c1_two_concurrent_writers_exactly_one_ok_other_stale(tmp_path):
     def worker(i, body):
         barrier.wait()
         results[i] = gate.persist(
-            backend, "k1", body, expected_hash=base_hash, doc_type="system_state"
+            backend, "k1", body, ctx=fenced_ctx(backend, "k1", base_hash), doc_type="system_state"
         )
 
     t0 = threading.Thread(target=worker, args=(0, b"writer-0"))
@@ -108,7 +111,16 @@ def test_c1_two_concurrent_writers_exactly_one_ok_other_stale(tmp_path):
     stales = [r for r in results if isinstance(r, STALE)]
     assert len(oks) == 1, results
     assert len(stales) == 1, results
-    assert stales[0].current_hash == oks[0].new_hash
+    # Final committed state is unambiguously the winner (the safety property).
+    assert backend.read("k1").version_hash == oks[0].new_hash
+    # STALE.current_hash is BEST-EFFORT after the owner-approved 2026-09-24
+    # simplification of _settle_current_hash_after_fence_loss to a single
+    # re-read (D-008): git has no global mutex, so a loser may re-read the head
+    # before the winner's commit lands. It is therefore either the winner's hash
+    # or the pre-race base; the caller reconciles on STALE (contract §7), so a
+    # momentary lag self-corrects. Only the immediate "loser hash == winner hash"
+    # convenience was relaxed, never the fence rejection or the final state.
+    assert stales[0].current_hash in (oks[0].new_hash, base_hash)
 
     winner_index = results.index(oks[0])
     winner_body = b"writer-0" if winner_index == 0 else b"writer-1"
@@ -120,7 +132,7 @@ def test_c1_two_concurrent_writers_exactly_one_ok_other_stale(tmp_path):
 
 def test_c1_eight_way_race_exactly_one_ok(tmp_path):
     backend = _make_backend(tmp_path, "c1b")
-    r0 = gate.persist(backend, "race", b"base", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "race", b"base", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
     base_hash = r0.new_hash
 
@@ -131,7 +143,7 @@ def test_c1_eight_way_race_exactly_one_ok(tmp_path):
     def worker(i):
         barrier.wait()
         results[i] = gate.persist(
-            backend, "race", f"writer-{i}".encode(), expected_hash=base_hash, doc_type="system_state"
+            backend, "race", f"writer-{i}".encode(), ctx=fenced_ctx(backend, "race", base_hash), doc_type="system_state"
         )
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
@@ -145,9 +157,14 @@ def test_c1_eight_way_race_exactly_one_ok(tmp_path):
     assert len(oks) == 1, results
     assert len(stales) == n - 1
     final = backend.read("race")
-    assert final.version_hash == oks[0].new_hash
+    assert final.version_hash == oks[0].new_hash        # final state = winner (safety)
+    # STALE.current_hash is best-effort after the owner-approved single re-read
+    # simplification (D-008, 2026-09-24): a git loser may re-read before the
+    # winner's commit lands, so each is either the winner's hash or the pre-race
+    # base -- a momentary lag the caller reconciles away on STALE (contract §7).
+    # The fence rejection + final winner are unchanged.
     for s in stales:
-        assert s.current_hash == oks[0].new_hash
+        assert s.current_hash in (oks[0].new_hash, base_hash)
 
 
 # ---------------------------------------------------------------------------
@@ -157,9 +174,9 @@ def test_c1_eight_way_race_exactly_one_ok(tmp_path):
 
 def test_c2_create_only_collision_single(tmp_path):
     backend = _make_backend(tmp_path, "c2")
-    r0 = gate.persist(backend, "k2", b"first", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "k2", b"first", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
-    r1 = gate.persist(backend, "k2", b"second", expected_hash=None, doc_type="system_state")
+    r1 = gate.persist(backend, "k2", b"second", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r1, EXISTS)
     assert r1.current_hash == r0.new_hash
     assert backend.read("k2").body == b"first"
@@ -174,7 +191,7 @@ def test_c2_create_only_collision_race(tmp_path):
     def worker(i):
         barrier.wait()
         results[i] = gate.persist(
-            backend, "newkey", f"creator-{i}".encode(), expected_hash=None, doc_type="system_state"
+            backend, "newkey", f"creator-{i}".encode(), ctx=create_ctx(), doc_type="system_state"
         )
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
@@ -202,17 +219,17 @@ def test_stale_per_key_hash_rejected_even_on_clean_fast_forward(tmp_path):
     backend = _make_backend(tmp_path, "stale-ff")
 
     # 1. Key A's first version.
-    r_a0 = gate.persist(backend, "keyA", b"a-v0", expected_hash=None, doc_type="system_state")
+    r_a0 = gate.persist(backend, "keyA", b"a-v0", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r_a0, OK)
 
     # 2. A DISTINCT, unrelated key changes (advances the ref; does not touch A).
-    r_b0 = gate.persist(backend, "keyB", b"b-v0", expected_hash=None, doc_type="system_state")
+    r_b0 = gate.persist(backend, "keyB", b"b-v0", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r_b0, OK)
 
     # 3. Key A is legitimately updated for real (a proper CAS write), so the
     #    caller's earlier knowledge of A's hash (r_a0.new_hash) is now stale.
     r_a1 = gate.persist(
-        backend, "keyA", b"a-v1", expected_hash=r_a0.new_hash, doc_type="system_state"
+        backend, "keyA", b"a-v1", ctx=fenced_ctx(backend, "keyA", r_a0.new_hash), doc_type="system_state"
     )
     assert isinstance(r_a1, OK)
 
@@ -225,7 +242,7 @@ def test_stale_per_key_hash_rejected_even_on_clean_fast_forward(tmp_path):
     #    hash even if the push would fast-forward").
     result = gate.persist(
         backend, "keyA", b"a-v2-should-be-rejected",
-        expected_hash=r_a0.new_hash, doc_type="system_state",
+        ctx=fenced_ctx(backend, "keyA", r_a0.new_hash), doc_type="system_state",
     )
     assert isinstance(result, STALE), result
     assert result.current_hash == r_a1.new_hash
@@ -311,7 +328,7 @@ def test_clean_write_after_failed_secret_publish_still_works(tmp_path):
     result = backend._publish_checked(new_commit, None)
     assert isinstance(result, ERROR) and result.kind is ErrorKind.SECRET_BLOCKED
 
-    ok = gate.persist(backend, "notes/after", b"clean content", expected_hash=None, doc_type="system_state")
+    ok = gate.persist(backend, "notes/after", b"clean content", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(ok, OK)
     assert backend.read("notes/after").body == b"clean content"
     assert backend.read("secrets/x") is None
@@ -326,18 +343,18 @@ def test_generation_monotonicity_rejects_non_increasing_update(tmp_path):
     backend = _make_backend(tmp_path, "gen")
     key = "lease/holder"
 
-    r0 = gate.persist(backend, key, _gen(1) + b"leaseholder=alice", expected_hash=None, doc_type="lease")
+    r0 = gate.persist(backend, key, _gen(1) + b"leaseholder=alice", ctx=create_ctx(), doc_type="lease")
     assert isinstance(r0, OK)
 
     r_same_gen = gate.persist(
         backend, key, _gen(1) + b"leaseholder=bob",
-        expected_hash=r0.new_hash, doc_type="lease",
+        ctx=fenced_ctx(backend, key, r0.new_hash), doc_type="lease",
     )
     assert isinstance(r_same_gen, STALE)
 
     r_lower_gen = gate.persist(
         backend, key, _gen(0) + b"leaseholder=bob",
-        expected_hash=r0.new_hash, doc_type="lease",
+        ctx=fenced_ctx(backend, key, r0.new_hash), doc_type="lease",
     )
     assert isinstance(r_lower_gen, STALE)
 
@@ -345,7 +362,7 @@ def test_generation_monotonicity_rejects_non_increasing_update(tmp_path):
 
     r_higher_gen = gate.persist(
         backend, key, _gen(2) + b"leaseholder=bob",
-        expected_hash=r0.new_hash, doc_type="lease",
+        ctx=fenced_ctx(backend, key, r0.new_hash), doc_type="lease",
     )
     assert isinstance(r_higher_gen, OK)
     assert backend.read(key).body == _gen(2) + b"leaseholder=bob"
@@ -359,7 +376,7 @@ def test_generation_monotonicity_rejects_non_increasing_update(tmp_path):
 def test_write_rejects_raw_bytes_before_any_io(tmp_path):
     backend = _make_backend(tmp_path, "typeerror")
     with pytest.raises(TypeError):
-        backend.write("plain-str-key", b"plain-bytes-body", expected_hash=None)  # type: ignore[arg-type]
+        backend.write("plain-str-key", b"plain-bytes-body", ctx=create_ctx())  # type: ignore[arg-type]
     assert backend.read("plain-str-key") is None
     assert list(backend.list("")) == []
 
@@ -373,7 +390,7 @@ class _CaptureBackend:
     def __init__(self) -> None:
         self.captured = None
 
-    def write(self, key, body, *, expected_hash):
+    def write(self, key, body, *, ctx):
         self.captured = (key, body)
         return OK("0" * 64)
 
@@ -383,7 +400,7 @@ def test_scanned_body_is_immutable_after_construction(tmp_path):
     a would-be tamper (rewriting `_body` post-issuance) must raise TypeError
     immediately rather than silently succeeding."""
     capture = _CaptureBackend()
-    r = gate.persist(capture, "k", b"hello", expected_hash=None, doc_type="system_state")
+    r = gate.persist(capture, "k", b"hello", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r, OK)
     key_obj, body_obj = capture.captured
 
@@ -394,7 +411,7 @@ def test_scanned_body_is_immutable_after_construction(tmp_path):
 
     # Untampered, the legitimately-issued pair still writes fine.
     backend = _make_backend(tmp_path, "tamper")
-    result = backend.write(key_obj, body_obj, expected_hash=None)
+    result = backend.write(key_obj, body_obj, ctx=create_ctx())
     assert isinstance(result, OK)
     assert backend.read("k").body == b"hello"
 
@@ -408,7 +425,7 @@ def test_write_rejects_forged_non_gate_object(tmp_path):
 
     backend = _make_backend(tmp_path, "forged")
     with pytest.raises(TypeError):
-        backend.write(forged_key, forged_body, expected_hash=None)
+        backend.write(forged_key, forged_body, ctx=create_ctx())
     assert backend.read("k") is None
     assert gate.verify(forged_key) is False
     assert gate.verify(forged_body) is False
@@ -426,9 +443,9 @@ def test_write_rejects_forged_non_gate_object(tmp_path):
 def test_idempotent_create_replay(tmp_path):
     backend = _make_backend(tmp_path, "idempotent")
     body = b"same-bytes-both-times"
-    r0 = gate.persist(backend, "replay", body, expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "replay", body, ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
-    r1 = gate.persist(backend, "replay", body, expected_hash=None, doc_type="system_state")
+    r1 = gate.persist(backend, "replay", body, ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r1, OK)
     assert r1.new_hash == r0.new_hash
 
@@ -436,11 +453,356 @@ def test_idempotent_create_replay(tmp_path):
 def test_only_target_keys_blob_mutated(tmp_path):
     """Writing key B must not change key A's stored bytes/hash at all."""
     backend = _make_backend(tmp_path, "isolation")
-    r_a = gate.persist(backend, "keyA", b"a-content", expected_hash=None, doc_type="system_state")
+    r_a = gate.persist(backend, "keyA", b"a-content", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r_a, OK)
-    r_b = gate.persist(backend, "keyB", b"b-content", expected_hash=None, doc_type="system_state")
+    r_b = gate.persist(backend, "keyB", b"b-content", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r_b, OK)
 
     blob_a = backend.read("keyA")
     assert blob_a.body == b"a-content"
     assert blob_a.version_hash == r_a.new_hash == sha256_hex(b"a-content")
+
+
+# ---------------------------------------------------------------------------
+# H1 Increment 2, Phase 3: renew() -- advisory lease + durable fence sidecar.
+# GitBackend reads the wall clock directly (time.time()), so expiry is driven
+# with short TTLs and sub-second sleeps rather than an injected clock.
+# ---------------------------------------------------------------------------
+
+
+def _sidecar(backend: GitBackend, key: str):
+    """(owner_token, owner_expiry, owner_fence, last_accepted_fence) at the remote tip."""
+    return backend._read_fence_sidecar(backend._fetch_head(), key)
+
+
+def test_renew_extends_lease_so_write_past_original_expiry_succeeds(tmp_path):
+    backend = _make_backend(tmp_path, "renew-extend")
+    key = "renew-key"
+    r0 = gate.persist(backend, key, b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+
+    lease = backend.lock(key, ttl_s=2.0)
+    original_expiry = lease.expiry_epoch
+    assert backend.renew(lease, ttl_s=30.0) is True
+
+    time.sleep(max(0.0, original_expiry - time.time()) + 0.3)  # past the ORIGINAL expiry, well inside the renewed one
+    assert time.time() > original_expiry
+    r1 = gate.persist(
+        backend, key, b"v1", ctx=overwrite_ctx(r0.new_hash, lease), doc_type="system_state"
+    )
+    assert isinstance(r1, OK), r1
+    assert backend.read(key).body == b"v1"
+    # The accepted write recorded the (unchanged) fence as last_accepted.
+    assert _sidecar(backend, key)[3] == lease.fence
+    assert backend.unlock(lease) is True
+
+
+def test_write_past_expiry_without_renew_is_fence_stale(tmp_path):
+    """Control for the renew test: same timeline, no renew -> the durable
+    fence has lapsed and the CAS-update is refused with reason FENCE."""
+    backend = _make_backend(tmp_path, "renew-control")
+    key = "lapse-key"
+    r0 = gate.persist(backend, key, b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+
+    lease = backend.lock(key, ttl_s=0.4)
+    time.sleep(0.6)
+    r1 = gate.persist(
+        backend, key, b"v1", ctx=overwrite_ctx(r0.new_hash, lease), doc_type="system_state"
+    )
+    assert isinstance(r1, STALE), r1
+    assert r1.reason == "FENCE"
+    assert backend.read(key).body == b"v0"
+
+
+def test_renew_false_for_wrong_released_and_expired_tokens(tmp_path):
+    backend = _make_backend(tmp_path, "renew-false")
+    key = "k"
+
+    # Never-locked key.
+    assert backend.renew(Lock(key="never-locked", token="00" * 16, expiry_epoch=0.0), 5.0) is False
+
+    lease = backend.lock(key, ttl_s=30.0)
+
+    # Wrong token: refused, and the durable sidecar is left exactly as lock() wrote it.
+    wrong = Lock(key=key, token="00" * 16, expiry_epoch=lease.expiry_epoch, fence=lease.fence)
+    assert backend.renew(wrong, ttl_s=5.0) is False
+    assert _sidecar(backend, key) == (lease.token, lease.expiry_epoch, lease.fence, 0)
+
+    # Released token.
+    assert backend.unlock(lease) is True
+    assert backend.renew(lease, ttl_s=5.0) is False
+
+    # Expired token: refused, sidecar expiry not extended.
+    lease2 = backend.lock(key, ttl_s=0.3)
+    time.sleep(0.45)
+    assert backend.renew(lease2, ttl_s=5.0) is False
+    assert _sidecar(backend, key)[1] == lease2.expiry_epoch
+
+
+def test_renew_extends_durable_sidecar_expiry_with_same_fence(tmp_path):
+    backend = _make_backend(tmp_path, "renew-sidecar")
+    key = "fenced"
+    lease = backend.lock(key, ttl_s=30.0)
+
+    before = _sidecar(backend, key)
+    assert before == (lease.token, lease.expiry_epoch, lease.fence, 0)
+
+    t0 = time.time()
+    assert backend.renew(lease, ttl_s=60.0) is True
+    after = _sidecar(backend, key)
+    assert after is not None
+    assert after[0] == lease.token
+    assert after[2] == lease.fence  # fence number unchanged by renew
+    assert after[3] == before[3]
+    assert after[1] > before[1]
+    assert after[1] >= t0 + 60.0
+
+    # A second renew keeps moving expiry forward, still on the same fence.
+    t1 = time.time()
+    assert backend.renew(lease, ttl_s=120.0) is True
+    again = _sidecar(backend, key)
+    assert again[2] == lease.fence
+    assert again[1] >= t1 + 120.0 > after[1]
+
+    # renew() consumed no fence: the next lock() advances by exactly one.
+    assert backend.unlock(lease) is True
+    lease2 = backend.lock(key, ttl_s=1.0)
+    assert lease2.fence == lease.fence + 1
+
+
+# ---------------------------------------------------------------------------
+# The fence sidecar namespace (`.knokeep-fence/`) is INTERNAL: reserved at the
+# gate, hidden from list(), absent to read(), and never overwritten when a
+# non-sidecar blob already sits at a sidecar path.
+# ---------------------------------------------------------------------------
+
+
+def _tree_paths(backend: GitBackend):
+    head = backend._fetch_head()
+    proc = backend._run(["ls-tree", "-r", "--name-only", head], check=True)
+    return sorted(n for n in proc.stdout.decode("utf-8").splitlines() if n)
+
+
+def test_fence_sidecars_are_hidden_from_list_and_read(tmp_path):
+    backend = _make_backend(tmp_path, "hide-sidecars")
+    r0 = gate.persist(backend, "docs/a", b"a", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    r1 = gate.persist(backend, "docs/a", b"a2", ctx=fenced_ctx(backend, "docs/a", r0.new_hash), doc_type="system_state")
+    assert isinstance(r1, OK)
+    backend.lock("docs/only-locked", ttl_s=30)  # sidecar with no data key
+
+    sidecar_a = backend._fence_sidecar_path("docs/a")
+    sidecar_locked = backend._fence_sidecar_path("docs/only-locked")
+    # The sidecars really are committed tree paths...
+    assert sidecar_a in _tree_paths(backend) and sidecar_locked in _tree_paths(backend)
+    # ...but never logical keys.
+    assert list(backend.list("")) == ["docs/a"]
+    assert list(backend.list(".knokeep-fence/")) == []
+    assert list(backend.list(".")) == []
+    assert backend.read(sidecar_a) is None
+    assert backend.read(sidecar_locked) is None
+    assert backend.read("docs/only-locked") is None
+
+
+@pytest.mark.parametrize("key", [".knokeep-fence/" + "0" * 64 + ".fence", ".knokeep-fence/" + "ab" * 32 + ".fence"])
+def test_fence_sidecar_shape_is_rejected_by_the_gate(tmp_path, key):
+    backend = _make_backend(tmp_path, "reserved")
+    r = gate.persist(backend, key, b"user data", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r, ERROR) and r.kind is ErrorKind.INVALID_ARGUMENT
+    assert list(backend.list("")) == []
+    # Anything else under the prefix is an ordinary key (pre-upgrade keys stay legal).
+    for legal in ("knokeep-fence/x", ".knokeep-fence/x", ".knokeep-fence/deadbeef.fence"):
+        ok = gate.persist(backend, legal, b"fine", ctx=create_ctx(), doc_type="system_state")
+        assert isinstance(ok, OK), legal
+    assert list(backend.list("")) == [".knokeep-fence/deadbeef.fence", ".knokeep-fence/x", "knokeep-fence/x"]
+
+
+def test_lock_refuses_to_overwrite_foreign_blob_at_sidecar_path(tmp_path):
+    """A blob that already occupies a sidecar path but is not a sidecar
+    (written before the namespace was reserved, or by another tool) is user
+    data: lock() must refuse rather than commit fence state over it."""
+    backend = _make_backend(tmp_path, "foreign-sidecar")
+    r0 = gate.persist(backend, "docs/k", b"k", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    path = backend._fence_sidecar_path("docs/k")
+    # Plant the foreign blob through the private commit helpers (the public
+    # door now refuses this path), exactly as the secret-in-history test does.
+    head = backend._fetch_head()
+    commit = backend._build_commit(head, path, b"legacy user data at a reserved path")
+    ok, rejected, _ = backend._push(commit)
+    assert ok and not rejected
+
+    from store.backend import BackendBusyError
+
+    with pytest.raises(BackendBusyError, match="non-sidecar"):
+        backend.lock("docs/k", ttl_s=30)
+    assert backend._read_blob_at(backend._fetch_head(), path) == b"legacy user data at a reserved path"
+    # Other keys are unaffected.
+    lease = backend.lock("docs/other", ttl_s=30)
+    backend.unlock(lease)
+
+
+def test_renew_reports_false_when_durable_sidecar_push_fails(tmp_path, monkeypatch):
+    """A renew whose sidecar update never reached the remote must report
+    False and leave the local expiry unchanged; once the remote is reachable
+    again the same lease renews normally."""
+    backend = _make_backend(tmp_path, "renew-push-fails")
+    key = "renew/push"
+    lease = backend.lock(key, ttl_s=30.0)
+    before_local = backend._locks[key]
+    before_sidecar = _sidecar(backend, key)
+
+    monkeypatch.setattr(backend, "_push", lambda sha: (False, False, "simulated remote outage"))
+    assert backend.renew(lease, ttl_s=300.0) is False
+    assert backend._locks[key] == before_local
+    monkeypatch.undo()
+    assert _sidecar(backend, key) == before_sidecar
+    assert backend.renew(lease, ttl_s=300.0) is True
+    assert _sidecar(backend, key)[1] > before_sidecar[1] + 200.0
+
+
+def test_renew_reports_false_when_another_instance_superseded_the_sidecar(tmp_path):
+    remote = tmp_path / "remote-shared.git"
+    _init_bare(remote)
+    a = GitBackend(tmp_path / "work-a", remote)
+    b = GitBackend(tmp_path / "work-b", remote)
+    key = "renew/shared"
+    mine = a.lock(key, ttl_s=30.0)
+    theirs = b.lock(key, ttl_s=30.0)
+    assert theirs.fence > mine.fence
+    assert a.renew(mine, ttl_s=300.0) is False
+    assert _sidecar(a, key)[0] == theirs.token
+
+
+def test_legacy_logical_key_under_fence_prefix_stays_visible(tmp_path):
+    """Only canonical `<sha256>.fence` sidecars are internal. A logical key a
+    pre-reservation gate accepted under the same prefix must still be
+    listed and readable after the upgrade (it can be migrated out; the gate
+    just refuses NEW writes there)."""
+    backend = _make_backend(tmp_path, "legacy-prefix")
+    r0 = gate.persist(backend, "docs/a", b"a", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    backend.lock("docs/a", ttl_s=30)  # a real sidecar
+    head = backend._fetch_head()
+    commit = backend._build_commit(head, ".knokeep-fence/notes", b"legacy value")
+    ok, rejected, _ = backend._push(commit)
+    assert ok and not rejected
+
+    assert list(backend.list("")) == [".knokeep-fence/notes", "docs/a"]
+    assert backend.read(".knokeep-fence/notes").body == b"legacy value"
+    assert backend.read(backend._fence_sidecar_path("docs/a")) is None
+    assert not any(n.endswith(".fence") for n in backend.list(""))
+    # ...and can still be updated in place (only the canonical sidecar shape is reserved).
+    r = gate.persist(backend, ".knokeep-fence/notes", b"update",
+                     ctx=fenced_ctx(backend, ".knokeep-fence/notes", sha256_hex(b"legacy value")),
+                     doc_type="system_state")
+    assert isinstance(r, OK), r
+    assert backend.read(".knokeep-fence/notes").body == b"update"
+
+
+def test_legacy_user_blob_at_canonical_sidecar_path_stays_visible(tmp_path):
+    """Hiding is decided by CONTENT, not path shape: a pre-reservation user
+    blob whose key happens to have the canonical `<sha256>.fence` shape
+    (but is not a sidecar) is still listed and readable, while a real
+    sidecar at another such path is hidden."""
+    backend = _make_backend(tmp_path, "legacy-canonical")
+    r0 = gate.persist(backend, "docs/a", b"a", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    backend.lock("docs/a", ttl_s=30)                                      # real sidecar
+    legacy_path = ".knokeep-fence/" + "ab" * 32 + ".fence"                # canonical shape, user content
+    head = backend._fetch_head()
+    commit = backend._build_commit(head, legacy_path, b"this is not a sidecar, it is user data")
+    ok, rejected, _ = backend._push(commit)
+    assert ok and not rejected
+
+    assert list(backend.list("")) == [legacy_path, "docs/a"]
+    assert backend.read(legacy_path).body == b"this is not a sidecar, it is user data"
+    assert backend.read(backend._fence_sidecar_path("docs/a")) is None
+
+
+def test_sidecar_shaped_legacy_blob_is_not_a_sidecar(tmp_path):
+    """Only the versioned KKF1 marker makes a blob a sidecar: a legacy user
+    blob at a canonical path whose body merely has the same field shape
+    stays visible and is never overwritten by lock()."""
+    backend = _make_backend(tmp_path, "sidecar-shape")
+    r0 = gate.persist(backend, "docs/k", b"k", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    path = backend._fence_sidecar_path("docs/k")
+    head = backend._fetch_head()
+    commit = backend._build_commit(head, path, b"owner 1.0 2 3")   # four fields, no marker
+    ok, rejected, _ = backend._push(commit)
+    assert ok and not rejected
+
+    assert backend._parse_fence_sidecar(b"owner 1.0 2 3") is None
+    assert list(backend.list("")) == [path, "docs/k"]
+    assert backend.read(path).body == b"owner 1.0 2 3"
+    from store.backend import BackendBusyError
+
+    with pytest.raises(BackendBusyError, match="non-sidecar"):
+        backend.lock("docs/k", ttl_s=30)
+    assert backend._read_blob_at(backend._fetch_head(), path) == b"owner 1.0 2 3"
+    # A real sidecar round-trips through the marker.
+    lease = backend.lock("docs/other", ttl_s=30)
+    raw = backend._read_blob_at(backend._fetch_head(), backend._fence_sidecar_path("docs/other"))
+    assert raw.startswith(b"KKF1 ")
+    assert backend._parse_fence_sidecar(raw)[0] == lease.token
+
+
+def test_lock_maps_a_push_timeout_to_busy(tmp_path, monkeypatch):
+    """A fence push that times out (or cannot start) surfaces as
+    BackendBusyError -- lock()'s one failure shape -- never a raw
+    GitBackendError that callers like the MCP write handler do not catch."""
+    from store.backend import BackendBusyError
+    from store.git_backend import GitBackendError
+
+    backend = _make_backend(tmp_path, "push-timeout")
+
+    def _timeout(sha):
+        raise GitBackendError("git push: timed out after 30s")
+
+    monkeypatch.setattr(backend, "_push", _timeout)
+    with pytest.raises(BackendBusyError, match="push failed"):
+        backend.lock("docs/k", ttl_s=30)
+    monkeypatch.undo()
+    lease = backend.lock("docs/k", ttl_s=30)          # remote back: acquisition works again
+    backend.unlock(lease)
+
+
+def test_renew_returns_false_when_the_sidecar_push_raises(tmp_path, monkeypatch):
+    from store.git_backend import GitBackendError
+
+    backend = _make_backend(tmp_path, "renew-push-raises")
+    lease = backend.lock("renew/raise", ttl_s=30.0)
+    before_local = backend._locks["renew/raise"]
+    before_sidecar = _sidecar(backend, "renew/raise")
+
+    def _timeout(sha):
+        raise GitBackendError("git push: timed out")
+
+    monkeypatch.setattr(backend, "_push", _timeout)
+    assert backend.renew(lease, ttl_s=300.0) is False        # never raises
+    assert backend._locks["renew/raise"] == before_local
+    monkeypatch.undo()
+    assert _sidecar(backend, "renew/raise") == before_sidecar
+    assert backend.renew(lease, ttl_s=300.0) is True
+
+
+def test_lock_and_renew_map_a_sidecar_read_failure_like_every_other_failure(tmp_path, monkeypatch):
+    from store.backend import BackendBusyError
+    from store.git_backend import GitBackendError
+
+    backend = _make_backend(tmp_path, "sidecar-read-fails")
+    lease = backend.lock("docs/k", ttl_s=30)
+    local_before = backend._locks["docs/k"]
+
+    def _cat_file_timeout(commit_sha, key):
+        raise GitBackendError("git cat-file: timed out")
+
+    monkeypatch.setattr(backend, "_read_blob_at", _cat_file_timeout)
+    with pytest.raises(BackendBusyError, match="sidecar read failed"):
+        backend.lock("docs/other", ttl_s=30)
+    assert backend.renew(lease, ttl_s=300) is False        # never raises
+    assert backend._locks["docs/k"] == local_before
+    monkeypatch.undo()
+    assert backend.renew(lease, ttl_s=300) is True

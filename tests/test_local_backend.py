@@ -24,6 +24,7 @@ from store import gate
 from store.backend import BackendBusyError
 from store.local import LocalBackend
 from store.types import ERROR, OK, STALE, ErrorKind, sha256_hex
+from tests.ctx_helpers import create_ctx, fenced_ctx, overwrite_ctx
 
 
 def _gen(n: int) -> bytes:
@@ -68,7 +69,7 @@ def test_c8_resume_rebuilds_torn_published_blob(tmp_path):
 
     key = "resume/torn"
     good_body = b"the-real-durable-bytes"
-    r = gate.persist(backend, key, good_body, expected_hash=None, doc_type="system_state")
+    r = gate.persist(backend, key, good_body, ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r, OK)
 
     data_path = root / "data" / "resume" / "torn"
@@ -128,6 +129,99 @@ def test_c8_resume_ignores_torn_tail_journal_record(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# H1 Increment 2, Phase 1 — last_accepted_fence survives a store reopen
+# ---------------------------------------------------------------------------
+
+
+def test_fence_survives_reload(tmp_path):
+    """last_accepted_fence is journal-durable (H1 Increment 2, Phase 1 (A)):
+    a fresh LocalBackend constructed over the same root after a reopen must
+    still refuse a stale-fence Overwrite, proving the fence floor was
+    correctly replayed from the journal rather than reset to 0."""
+    root = tmp_path / "store-root"
+    key = "fence/reload"
+
+    backend = LocalBackend(root)
+    r0 = gate.persist(backend, key, b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+
+    lease_a = backend.lock(key, ttl_s=30)
+    backend.unlock(lease_a)
+    r1 = gate.persist(backend, key, b"v1", ctx=overwrite_ctx(r0.new_hash, lease_a), doc_type="system_state")
+    assert isinstance(r1, OK)  # last_accepted_fence is now durably lease_a.fence
+    backend.close()
+
+    # Reopen: a brand-new instance over the same root, forcing journal replay.
+    resumed = LocalBackend(root)
+
+    # A fresh lock() on `resumed` must mint a fence STRICTLY greater than
+    # lease_a.fence -- if last_accepted_fence had NOT survived the reload
+    # (regressed to 0), this would instead be able to reuse/alias a fence at
+    # or below lease_a.fence.
+    lease_b = resumed.lock(key, ttl_s=30)
+    assert lease_b.fence > lease_a.fence
+    resumed.unlock(lease_b)
+    r2 = gate.persist(resumed, key, b"v2", ctx=overwrite_ctx(r1.new_hash, lease_b), doc_type="system_state")
+    assert isinstance(r2, OK)
+
+    # The old, pre-reload lease_a (whose fence is now behind the durably
+    # replayed last_accepted_fence) must still be refused post-reload.
+    r3 = gate.persist(
+        resumed, key, b"v3-stale-a-replay", ctx=overwrite_ctx(r2.new_hash, lease_a), doc_type="system_state"
+    )
+    assert isinstance(r3, STALE)
+    assert r3.reason == "FENCE"
+    assert resumed.read(key).body == b"v2"  # unchanged by the rejected replay
+    resumed.close()
+
+
+def test_fence_monotonic_across_instances(tmp_path):
+    """H1 Increment 2, Phase 1b: the fence ALLOCATION counter must be
+    durable and cross-process-monotonic, not just last_accepted_fence. Two
+    separate LocalBackend instances over the SAME directory (standing in
+    for two processes) both call lock() on the same key before either has
+    written anything; they must never be handed the same fence number — a
+    purely in-process allocation counter would let both compute the same
+    'next' fence from the same durable last_accepted_fence floor, and the
+    second writer would then silently clobber the first."""
+    root = tmp_path / "store-root"
+    key = "fence/two-instance"
+
+    a = LocalBackend(root)
+    r0 = gate.persist(a, key, b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+
+    b = LocalBackend(root)  # a SECOND instance over the SAME directory
+
+    # A acquires then releases immediately (the fenced_ctx / production
+    # pattern) before B ever tries — otherwise B's lock() would correctly
+    # BackendBusyError on A's still-live advisory lock, which is a
+    # DIFFERENT (already-working) mechanism than the fence-allocation
+    # collision this test targets.
+    lease_a = a.lock(key, ttl_s=30)
+    a.unlock(lease_a)
+    lease_b = b.lock(key, ttl_s=30)
+    assert lease_b.fence > lease_a.fence, "two instances must never allocate the same fence"
+
+    r1 = gate.persist(b, key, b"v2-from-b", ctx=overwrite_ctx(r0.new_hash, lease_b), doc_type="system_state")
+    assert isinstance(r1, OK)
+
+    # A's OLD lease replays against the CURRENT hash (the content-hash CAS
+    # alone would accept this) — the fence, now correctly non-colliding,
+    # must refuse it.
+    r2 = gate.persist(
+        a, key, b"v3-stale-a-replay", ctx=overwrite_ctx(r1.new_hash, lease_a), doc_type="system_state"
+    )
+    assert isinstance(r2, STALE)
+    assert r2.reason == "FENCE"
+    assert a.read(key).body == b"v2-from-b"
+    assert b.read(key).body == b"v2-from-b"
+
+    a.close()
+    b.close()
+
+
+# ---------------------------------------------------------------------------
 # C3 — atomicity under crash: a reader never sees torn bytes at the key
 # ---------------------------------------------------------------------------
 
@@ -141,7 +235,7 @@ def test_c3_atomicity_reader_never_sees_torn_publish(tmp_path):
     backend = LocalBackend(root)
 
     key = "atomic/k"
-    r0 = gate.persist(backend, key, b"old-complete-value", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, key, b"old-complete-value", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
 
     # Simulate "crash after journal fsync, mid-publish": append the new
@@ -247,20 +341,20 @@ def test_generation_monotonicity_rejects_non_increasing_update(tmp_path):
     backend = LocalBackend(tmp_path / "store-root")
     key = "lease/holder"
 
-    r0 = gate.persist(backend, key, _gen(1) + b"leaseholder=alice", expected_hash=None, doc_type="lease")
+    r0 = gate.persist(backend, key, _gen(1) + b"leaseholder=alice", ctx=create_ctx(), doc_type="lease")
     assert isinstance(r0, OK)
 
     # A same-or-lower generation under a MATCHING hash-CAS must be rejected
     # even though the plain hash-CAS check alone would have allowed it.
     r_same_gen = gate.persist(
         backend, key, _gen(1) + b"leaseholder=bob",
-        expected_hash=r0.new_hash, doc_type="lease",
+        ctx=fenced_ctx(backend, key, r0.new_hash), doc_type="lease",
     )
     assert isinstance(r_same_gen, STALE)
 
     r_lower_gen = gate.persist(
         backend, key, _gen(0) + b"leaseholder=bob",
-        expected_hash=r0.new_hash, doc_type="lease",
+        ctx=fenced_ctx(backend, key, r0.new_hash), doc_type="lease",
     )
     assert isinstance(r_lower_gen, STALE)
 
@@ -270,7 +364,7 @@ def test_generation_monotonicity_rejects_non_increasing_update(tmp_path):
     # A strictly-greater generation is accepted.
     r_higher_gen = gate.persist(
         backend, key, _gen(2) + b"leaseholder=bob",
-        expected_hash=r0.new_hash, doc_type="lease",
+        ctx=fenced_ctx(backend, key, r0.new_hash), doc_type="lease",
     )
     assert isinstance(r_higher_gen, OK)
     assert backend.read(key).body == _gen(2) + b"leaseholder=bob"
@@ -285,7 +379,7 @@ def test_generation_monotonicity_rejects_non_increasing_update(tmp_path):
 def test_write_rejects_raw_bytes_before_any_io(tmp_path):
     backend = LocalBackend(tmp_path / "store-root")
     with pytest.raises(TypeError):
-        backend.write("plain-str-key", b"plain-bytes-body", expected_hash=None)  # type: ignore[arg-type]
+        backend.write("plain-str-key", b"plain-bytes-body", ctx=create_ctx())  # type: ignore[arg-type]
     assert backend.read("plain-str-key") is None
     assert list(backend.list("")) == []
     backend.close()
@@ -299,7 +393,7 @@ class _CaptureBackend:
     def __init__(self) -> None:
         self.captured = None
 
-    def write(self, key, body, *, expected_hash):
+    def write(self, key, body, *, ctx):
         self.captured = (key, body)
         return OK("0" * 64)
 
@@ -311,7 +405,7 @@ def test_scanned_body_is_immutable_after_construction(tmp_path):
     rather than silently succeeding and leaving a stale-but-matching marker
     for the adapter to (previously) reject at write() time."""
     capture = _CaptureBackend()
-    r = gate.persist(capture, "k", b"hello", expected_hash=None, doc_type="system_state")
+    r = gate.persist(capture, "k", b"hello", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r, OK)
     key_obj, body_obj = capture.captured
 
@@ -324,7 +418,7 @@ def test_scanned_body_is_immutable_after_construction(tmp_path):
 
     # Untampered, the legitimately-issued pair still writes fine.
     backend = LocalBackend(tmp_path / "store-root")
-    result = backend.write(key_obj, body_obj, expected_hash=None)
+    result = backend.write(key_obj, body_obj, ctx=create_ctx())
     assert isinstance(result, OK)
     assert backend.read("k").body == b"hello"
     backend.close()
@@ -340,7 +434,7 @@ def test_write_rejects_forged_non_gate_object(tmp_path):
 
     backend = LocalBackend(tmp_path / "store-root")
     with pytest.raises(TypeError):
-        backend.write(forged_key, forged_body, expected_hash=None)
+        backend.write(forged_key, forged_body, ctx=create_ctx())
     assert backend.read("k") is None
     assert gate.verify(forged_key) is False
     assert gate.verify(forged_body) is False
@@ -370,10 +464,10 @@ def test_case_insensitive_collision_refused_when_flagged(tmp_path):
     backend = LocalBackend(tmp_path / "store-root")
     backend._case_insensitive = True  # simulate a case-insensitive volume on this case-sensitive host
 
-    r0 = gate.persist(backend, "Notes/Foo", b"v1", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "Notes/Foo", b"v1", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
 
-    r1 = gate.persist(backend, "Notes/foo", b"v2", expected_hash=None, doc_type="system_state")
+    r1 = gate.persist(backend, "Notes/foo", b"v2", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r1, ERROR)
     assert r1.kind is ErrorKind.INVALID_ARGUMENT
     assert backend.read("Notes/foo") is None  # colliding-case key never created (distinct path on this host)
@@ -395,8 +489,8 @@ def test_case_sensitive_volume_allows_distinct_case_keys(tmp_path):
         pytest.skip("host temp volume is case-insensitive (e.g. macOS APFS); this test needs a case-sensitive volume")
     assert backend._case_insensitive is False
 
-    r0 = gate.persist(backend, "Notes/Foo", b"v1", expected_hash=None, doc_type="system_state")
-    r1 = gate.persist(backend, "Notes/foo", b"v2", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(backend, "Notes/Foo", b"v1", ctx=create_ctx(), doc_type="system_state")
+    r1 = gate.persist(backend, "Notes/foo", b"v2", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK) and isinstance(r1, OK)
     backend.close()
 
@@ -422,7 +516,7 @@ def test_write_returns_busy_when_cas_lock_held_externally(tmp_path):
     fcntl.flock(fh.fileno(), fcntl.LOCK_EX)  # hold the exact same lock file
     try:
         start = time.monotonic()
-        result = gate.persist(backend, "busy/k", b"v", expected_hash=None, doc_type="system_state")
+        result = gate.persist(backend, "busy/k", b"v", ctx=create_ctx(), doc_type="system_state")
         elapsed = time.monotonic() - start
         assert isinstance(result, ERROR)
         assert result.kind is ErrorKind.BUSY
@@ -497,7 +591,7 @@ def test_replace_with_retry_gives_up_as_busy(tmp_path, monkeypatch):
 def _mp_create_only_worker(root_str: str, key: str, payload: bytes, queue) -> None:
     # Separate OS process: a fresh LocalBackend instance over the SAME root.
     backend = LocalBackend(root_str)
-    result = gate.persist(backend, key, payload, expected_hash=None, doc_type="system_state")
+    result = gate.persist(backend, key, payload, ctx=create_ctx(), doc_type="system_state")
     backend.close()
     queue.put(type(result).__name__)
 
@@ -538,7 +632,7 @@ def test_two_process_create_only_race(tmp_path):
 
 def _mp_cas_worker(root_str: str, key: str, base_hash: str, payload: bytes, queue) -> None:
     backend = LocalBackend(root_str)
-    result = gate.persist(backend, key, payload, expected_hash=base_hash, doc_type="system_state")
+    result = gate.persist(backend, key, payload, ctx=fenced_ctx(backend, key, base_hash), doc_type="system_state")
     backend.close()
     queue.put(type(result).__name__)
 
@@ -552,7 +646,7 @@ def test_two_process_cas_update_race(tmp_path):
     mechanism" for the local backend)."""
     root = tmp_path / "store-root"
     setup = LocalBackend(root)
-    r0 = gate.persist(setup, "race/cas", b"base", expected_hash=None, doc_type="system_state")
+    r0 = gate.persist(setup, "race/cas", b"base", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
     base_hash = r0.new_hash
     setup.close()
@@ -599,7 +693,7 @@ def test_windows_msvcrt_lock_path_busy_on_contention(tmp_path):  # pragma: no co
     fh.seek(0)
     msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
     try:
-        result = gate.persist(backend, "k", b"v", expected_hash=None, doc_type="system_state")
+        result = gate.persist(backend, "k", b"v", ctx=create_ctx(), doc_type="system_state")
         assert isinstance(result, ERROR) and result.kind is ErrorKind.BUSY
     finally:
         fh.seek(0)
@@ -643,3 +737,232 @@ def test_windows_replace_sharing_violation_retries_then_busy(tmp_path):  # pragm
     assert LocalBackend retries a bounded number of times before returning
     ERROR{BUSY} — never falling back to a non-atomic copy/move."""
     ...
+
+
+# ---------------------------------------------------------------------------
+# Backward compatibility: journals written BEFORE the fence trailer existed
+# (legacy record shape, no last_accepted_fence) must still replay in full,
+# including when new-shape records are appended after them in the same file.
+# ---------------------------------------------------------------------------
+
+
+def _legacy_journal_record(key: str, body: bytes) -> bytes:
+    """The pre-H1-Increment-2 record shape, byte for byte: no magic, no
+    fence trailer (key_len, key, body_len, body, sha256 digest)."""
+    import hashlib
+    import struct
+
+    key_bytes = key.encode("utf-8")
+    return (
+        struct.pack(">I", len(key_bytes))
+        + key_bytes
+        + struct.pack(">Q", len(body))
+        + body
+        + hashlib.sha256(body).digest()
+    )
+
+
+def test_legacy_journal_without_fence_trailer_replays_every_record(tmp_path):
+    root = tmp_path / "store-root"
+    backend = LocalBackend(root)
+    backend.close()
+
+    records = [("legacy/a", b"alpha"), ("legacy/b", b"beta"), ("legacy/a", b"alpha-v2"), ("legacy/c", b"")]
+    with open(root / "journal" / "journal.log", "ab") as f:
+        for key, body in records:
+            f.write(_legacy_journal_record(key, body))
+
+    resumed = LocalBackend(root)  # replays the legacy-only journal
+    replayed = list(resumed._iter_journal_records())
+    assert [(k, b) for k, b, _fence in replayed] == records, "every legacy record must be preserved, in order"
+    assert all(fence == 0 for _k, _b, fence in replayed), "a legacy record replays with fence 0"
+    assert resumed.read("legacy/a").body == b"alpha-v2"  # last record per key wins
+    assert resumed.read("legacy/b").body == b"beta"
+    assert resumed.read("legacy/c").body == b""
+    resumed.close()
+
+
+def test_new_records_appended_after_legacy_journal_replay_together(tmp_path):
+    """The upgrade path: an existing (legacy) journal is appended to in place
+    by the new adapter. Both shapes must replay from the same file, and the
+    fence trailer must survive for the new records."""
+    root = tmp_path / "store-root"
+    backend = LocalBackend(root)
+    backend.close()
+    with open(root / "journal" / "journal.log", "ab") as f:
+        f.write(_legacy_journal_record("mixed/old", b"old-value"))
+        f.write(_legacy_journal_record("mixed/upgraded", b"v1"))
+
+    upgraded = LocalBackend(root)
+    assert upgraded.read("mixed/old").body == b"old-value"
+    r1 = upgraded.read("mixed/upgraded")
+    assert r1.body == b"v1"
+    lease = upgraded.lock("mixed/upgraded", ttl_s=30)
+    upgraded.unlock(lease)
+    r2 = gate.persist(
+        upgraded, "mixed/upgraded", b"v2", ctx=overwrite_ctx(r1.version_hash, lease), doc_type="system_state"
+    )
+    assert isinstance(r2, OK)
+    r3 = gate.persist(upgraded, "mixed/new", b"brand-new", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r3, OK)
+    upgraded.close()
+
+    resumed = LocalBackend(root)
+    replayed = list(resumed._iter_journal_records())
+    assert [(k, b) for k, b, _f in replayed] == [
+        ("mixed/old", b"old-value"),
+        ("mixed/upgraded", b"v1"),
+        ("mixed/upgraded", b"v2"),
+        ("mixed/new", b"brand-new"),
+    ]
+    assert [f for _k, _b, f in replayed] == [0, 0, lease.fence, 0]
+    assert resumed.read("mixed/old").body == b"old-value"
+    assert resumed.read("mixed/upgraded").body == b"v2"
+    assert resumed.read("mixed/new").body == b"brand-new"
+    # The fence floor replayed from the v2 record (not reset to 0 by the
+    # legacy records that precede it in the same file).
+    assert resumed._last_accepted_fence["mixed/upgraded"] == lease.fence
+    assert resumed._last_accepted_fence["mixed/old"] == 0
+    resumed.close()
+
+
+def test_torn_trailer_on_v2_record_drops_only_that_record(tmp_path):
+    """A crash mid-append of the 8-byte fence trailer must drop exactly the
+    torn record and keep everything before it (same rule as a torn body)."""
+    root = tmp_path / "store-root"
+    backend = LocalBackend(root)
+    backend._journal_append("torn/keep", b"kept", 7)
+    from store.local import _JOURNAL_V2_MAGIC
+
+    full = _JOURNAL_V2_MAGIC + _legacy_journal_record("torn/tail", b"lost") + b"\x00\x00\x00"  # 3 of 8 trailer bytes
+    backend._journal_fh.write(full)
+    backend._journal_fh.flush()
+    backend.close()
+
+    resumed = LocalBackend(root)
+    assert list(resumed._iter_journal_records()) == [("torn/keep", b"kept", 7)]
+    assert resumed.read("torn/tail") is None
+    resumed.close()
+
+
+# ---------------------------------------------------------------------------
+# Durability of the fence-owner file: the directory entry is fsync'd after the
+# atomic replace, so lock()'s new owner cannot revert on power loss.
+# ---------------------------------------------------------------------------
+
+
+def test_lock_fsyncs_fence_owner_directory_after_replace(tmp_path, monkeypatch):
+    import store.local as local_module
+
+    backend = LocalBackend(tmp_path / "store-root")
+    synced = []
+    real_fsync_dir = local_module._fsync_dir
+
+    def _recording_fsync_dir(path):
+        synced.append(path)
+        return real_fsync_dir(path)
+
+    monkeypatch.setattr(local_module, "_fsync_dir", _recording_fsync_dir)
+    synced.clear()
+    lease = backend.lock("durable/owner", ttl_s=30)
+    assert backend._fence_alloc_dir in synced, "lock() must fsync the fence-alloc directory after replacing the owner file"
+    synced.clear()
+    assert backend.renew(lease, ttl_s=30) is True
+    assert backend._fence_alloc_dir in synced, "renew() rewrites the owner file and must fsync its directory too"
+    backend.unlock(lease)
+    backend.close()
+
+
+# ---------------------------------------------------------------------------
+# lock() may not advance a key's fence owner while a write() that already
+# passed its fence check is still committing (both are serialized on cas.lock).
+# ---------------------------------------------------------------------------
+
+
+def test_lock_waits_for_an_in_flight_fenced_write_to_commit(tmp_path):
+    import threading
+
+    root = tmp_path / "store-root"
+    writer = LocalBackend(root)
+    other = LocalBackend(root)          # a second process, sharing the directory
+    key = "serialize/k"
+    r0 = gate.persist(writer, key, b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    lease = writer.lock(key, ttl_s=30)
+    writer.unlock(lease)                 # released-but-unexpired: still the fence owner
+
+    in_commit = threading.Event()
+    proceed = threading.Event()
+    real_commit = writer._commit
+
+    def _slow_commit(*args, **kwargs):
+        in_commit.set()                  # past _fence_ok(), cas.lock held, not yet durable
+        assert proceed.wait(10)
+        return real_commit(*args, **kwargs)
+
+    writer._commit = _slow_commit
+    results = {}
+    t_write = threading.Thread(target=lambda: results.update(
+        w=gate.persist(writer, key, b"v1", ctx=overwrite_ctx(r0.new_hash, lease), doc_type="system_state")))
+    t_write.start()
+    assert in_commit.wait(10)
+
+    lock_done = threading.Event()
+    t_lock = threading.Thread(target=lambda: (results.update(l=other.lock(key, ttl_s=30)), lock_done.set()))
+    t_lock.start()
+    # The competing lock() must NOT complete while the fenced write is mid-commit.
+    assert not lock_done.wait(0.6), "lock() advanced the fence owner underneath an in-flight fenced write"
+    proceed.set()
+    t_write.join(10)
+    t_lock.join(10)
+    assert isinstance(results["w"], OK), results
+    assert lock_done.is_set()
+
+    # Ordering held: the write landed under its (then-current) fence, and the
+    # new lease now supersedes it.
+    replay = gate.persist(writer, key, b"v2-replay", ctx=overwrite_ctx(results["w"].new_hash, lease), doc_type="system_state")
+    assert isinstance(replay, STALE) and replay.reason == "FENCE"
+    fresh = gate.persist(other, key, b"v2", ctx=overwrite_ctx(results["w"].new_hash, results["l"]), doc_type="system_state")
+    assert isinstance(fresh, OK)
+    writer.close()
+    other.close()
+
+
+def test_renew_never_extends_the_advisory_lease_when_the_durable_owner_cannot_be_rewritten(tmp_path, monkeypatch):
+    """The durable owner file is what write() enforces; if it cannot be
+    rewritten, renew() must report False and leave the advisory expiry
+    unchanged (extending only the advisory would wedge the key: the lease
+    could not write, and every successor would stay BUSY for the TTL)."""
+    backend = LocalBackend(tmp_path / "store-root")
+    key = "renew/durable-first"
+    lease = backend.lock(key, ttl_s=30)
+    adv_before = backend._read_advisory(backend._advisory_lock_path(key))
+    own_before = backend._read_fence_owner(backend._fence_owner_path(key))
+
+    def _unwritable(*a, **kw):
+        raise OSError("simulated: locks/fence-alloc became unwritable")
+
+    monkeypatch.setattr(backend, "_write_fence_owner", _unwritable)
+    assert backend.renew(lease, ttl_s=300) is False
+    assert backend._read_advisory(backend._advisory_lock_path(key)) == adv_before
+    assert backend._read_fence_owner(backend._fence_owner_path(key)) == own_before
+    monkeypatch.undo()
+    assert backend.renew(lease, ttl_s=300) is True
+    assert backend._read_fence_owner(backend._fence_owner_path(key))[1] > own_before[1] + 200
+    backend.close()
+
+
+def test_renew_reports_false_once_a_second_instance_superseded_the_durable_owner(tmp_path):
+    root = tmp_path / "store-root"
+    a = LocalBackend(root)
+    b = LocalBackend(root)
+    key = "renew/superseded"
+    mine = a.lock(key, ttl_s=0.4)
+    time.sleep(0.5)                                   # advisory lapses, so b can acquire
+    theirs = b.lock(key, ttl_s=30)
+    assert theirs.fence > mine.fence
+    # a's advisory record is gone/expired anyway; even a still-valid one must not renew.
+    assert a.renew(mine, ttl_s=300) is False
+    assert a._read_fence_owner(a._fence_owner_path(key))[0] == theirs.token
+    a.close()
+    b.close()

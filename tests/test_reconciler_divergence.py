@@ -13,6 +13,7 @@ from store.fake import FakeBackend
 
 from reconciler.reconcile import reconcile
 from reconciler.sources import StoreSource
+from tests.ctx_helpers import create_ctx
 
 
 class _FakeGitHub:
@@ -39,7 +40,7 @@ class _FakeTracker:
 def test_seeded_divergence_is_reported_with_source_of_truth(tmp_path):
     backend = FakeBackend()
     write_result = gate.persist(
-        backend, "next_step", b"X", expected_hash=None, doc_type="system_state"
+        backend, "next_step", b"X", ctx=create_ctx(), doc_type="system_state"
     )
     from store.types import OK
 
@@ -71,7 +72,7 @@ def test_agreement_across_sources_is_reported_as_no_drift(tmp_path):
     backend = FakeBackend()
     from store.types import OK
 
-    r = gate.persist(backend, "next_step", b"ship", expected_hash=None, doc_type="system_state")
+    r = gate.persist(backend, "next_step", b"ship", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r, OK)
 
     sources = {
@@ -141,7 +142,7 @@ def test_reconcile_emits_a_labels_and_counts_only_telemetry_event(tmp_path):
     backend = FakeBackend()
     from store.types import OK
 
-    r = gate.persist(backend, "next_step", b"X", expected_hash=None, doc_type="system_state")
+    r = gate.persist(backend, "next_step", b"X", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r, OK)
 
     sources = {

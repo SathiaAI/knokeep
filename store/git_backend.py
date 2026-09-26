@@ -159,6 +159,7 @@ JUDGMENT CALLS (numbered, each also called out inline at its point of use):
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import re
 import secrets
@@ -172,6 +173,7 @@ from typing import Dict, Iterator, List, Optional, Tuple
 
 from . import gate
 from .backend import BackendBusyError, Lock
+from .context import Overwrite
 from .gate import ScannedBody, ScannedKey
 from .types import (
     BackendHealth,
@@ -302,6 +304,8 @@ class GitBackend:
         self._lock_mutex = threading.Lock()
         self._locks: Dict[str, Tuple[str, float]] = {}
 
+
+
     # -- subprocess plumbing -------------------------------------------------
 
     def _run(
@@ -383,8 +387,20 @@ class GitBackend:
         """Build (but do not publish) a commit, child of `parent_sha`, whose
         tree is `parent_sha`'s tree with exactly `key` replaced by a new blob
         of `raw`. Every other path keeps the exact same blob object id it had
-        in the parent's tree."""
-        blob_sha = self._hash_object(raw)
+        in the parent's tree. Thin wrapper over `_build_commit_multi` for the
+        single-path case (kept as its own method so its existing signature/
+        callers -- including tests/test_git_backend.py's direct calls -- are
+        unaffected)."""
+        return self._build_commit_multi(parent_sha, [(key, raw)])
+
+    def _build_commit_multi(
+        self, parent_sha: Optional[str], changes: List[Tuple[str, bytes]]
+    ) -> str:
+        """H1 Increment 2, Phase 2: like `_build_commit`, but replaces
+        MULTIPLE paths in one commit -- used so a CAS-update's data key and
+        its durable fence sidecar (see `_fence_sidecar_path` below) land in
+        the SAME commit, published by the SAME push: both take effect
+        together or neither does."""
         fd, idx_path = tempfile.mkstemp(dir=str(self._scratch_dir), prefix="index-")
         os.close(fd)
         os.remove(idx_path)  # git wants to create this file itself
@@ -392,15 +408,18 @@ class GitBackend:
             idx_env = {"GIT_INDEX_FILE": idx_path}
             if parent_sha is not None:
                 self._run(["read-tree", parent_sha], env_extra=idx_env, check=True)
-            self._run(
-                ["update-index", "--add", "--cacheinfo", "100644", blob_sha, key],
-                env_extra=idx_env,
-                check=True,
-            )
+            for change_key, change_raw in changes:
+                blob_sha = self._hash_object(change_raw)
+                self._run(
+                    ["update-index", "--add", "--cacheinfo", "100644", blob_sha, change_key],
+                    env_extra=idx_env,
+                    check=True,
+                )
             tree_proc = self._run(["write-tree"], env_extra=idx_env, check=True)
             tree_sha = tree_proc.stdout.decode().strip()
 
-            commit_args = ["commit-tree", tree_sha, "-m", f"knokeep: update {key}"]
+            message = "knokeep: update " + ", ".join(k for k, _ in changes)
+            commit_args = ["commit-tree", tree_sha, "-m", message]
             if parent_sha is not None:
                 commit_args += ["-p", parent_sha]
             commit_proc = self._run(commit_args, env_extra=self._identity_env, check=True)
@@ -408,6 +427,207 @@ class GitBackend:
         finally:
             with contextlib.suppress(FileNotFoundError):
                 os.remove(idx_path)
+
+    # -- H1 Increment 2, Phase 2: durable fence-ownership sidecar -----------
+    # Per-key owner_token/owner_expiry/owner_fence/last_accepted_fence,
+    # committed into the repo itself (git has no side-channel storage), at a
+    # RESERVED path under `_FENCE_NAMESPACE`. The reservation is real, not
+    # incidental: the gate refuses any logical key whose first segment is
+    # `.knokeep-fence` (store/gate.py `_RESERVED_TOP_SEGMENTS`), `list()`
+    # never yields tree paths under it and `read()` reports them absent, so
+    # sidecars are invisible to callers (incl. a migration using this
+    # backend as its source) and no logical key can collide with one. A
+    # pre-reservation blob that already sits at a sidecar path but is not a
+    # sidecar is detected by `_advance_durable_fence` and never overwritten.
+
+    _FENCE_NAMESPACE = ".knokeep-fence/"
+    # Exactly the paths lock() writes: a canonical sidecar is the prefix plus
+    # ONE segment `<sha256-hex>.fence`. Only these are hidden from list()/
+    # read(); a legacy logical key that a pre-reservation gate accepted under
+    # the same prefix (e.g. `.knokeep-fence/notes`) stays readable and
+    # listable, so an upgrade never hides stored data (the gate now refuses
+    # NEW writes anywhere under the prefix, so such a key can be read and
+    # migrated out but not extended in place).
+    _SIDECAR_RE = re.compile(r"^\.knokeep-fence/[0-9a-f]{64}\.fence$")
+
+    def _fence_sidecar_path(self, key: str) -> str:
+        name = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        return f"{self._FENCE_NAMESPACE}{name}.fence"
+
+    def _is_sidecar_path(self, key: str) -> bool:
+        return self._SIDECAR_RE.match(key) is not None
+
+    def _is_internal_blob(self, commit_sha: Optional[str], path: str) -> bool:
+        """True only for a canonical sidecar path whose blob PARSES as a
+        sidecar. A pre-reservation logical key that happened to use that
+        exact shape holds user data and stays visible (the same distinction
+        `_advance_durable_fence` makes before it refuses to overwrite)."""
+        if not self._is_sidecar_path(path):
+            return False
+        raw = self._read_blob_at(commit_sha, path)
+        return raw is not None and self._parse_fence_sidecar(raw) is not None
+
+    # Every sidecar starts with this marker, so "parses as a sidecar" is an
+    # unambiguous, versioned test -- a legacy user blob that merely happens
+    # to hold four space-separated fields can never be mistaken for one.
+    _SIDECAR_MARKER = "KKF1"
+
+    def _encode_fence_sidecar(
+        self, owner_token: Optional[str], owner_expiry: float, owner_fence: int,
+        last_accepted_fence: int,
+    ) -> bytes:
+        return (
+            f"{self._SIDECAR_MARKER} {owner_token} {owner_expiry!r} {owner_fence} {last_accepted_fence}"
+        ).encode("ascii")
+
+    def _read_fence_sidecar(
+        self, commit_sha: Optional[str], key: str
+    ) -> Optional[Tuple[Optional[str], float, int, int]]:
+        """Reads the durable fence state for `key` as of `commit_sha` (None
+        if the sidecar does not exist yet -- a key that has never been
+        lock()'d/written under fence enforcement)."""
+        raw = self._read_blob_at(commit_sha, self._fence_sidecar_path(key))
+        if raw is None:
+            return None
+        return self._parse_fence_sidecar(raw)
+
+    @classmethod
+    def _parse_fence_sidecar(cls, raw: bytes) -> Optional[Tuple[Optional[str], float, int, int]]:
+        try:
+            marker, token_s, expiry_s, owner_fence_s, last_accepted_s = raw.decode("ascii").split(" ")
+        except (UnicodeDecodeError, ValueError):
+            return None
+        if marker != cls._SIDECAR_MARKER:
+            return None
+        token: Optional[str] = None if token_s == "None" else token_s
+        try:
+            return token, float(expiry_s), int(owner_fence_s), int(last_accepted_s)
+        except ValueError:
+            return None
+
+    _FENCE_COMMIT_RETRY_ATTEMPTS = 50
+
+    def _advance_durable_fence(self, key: str, token: str, expiry: float) -> int:
+        """Durable, cross-process/-instance fence allocation: reads the
+        sidecar at the current remote tip, computes the next fence, and
+        commits+pushes the advance -- retried (bounded, never indefinite)
+        on a non-fast-forward rejection, which here means a genuinely
+        concurrent lock()/write() (by this or another process) moved the
+        ref first. Raises BackendBusyError (mapped the same way lock()'s
+        existing acquire-timeout is) if it cannot converge."""
+        path = self._fence_sidecar_path(key)
+        for _attempt in range(self._FENCE_COMMIT_RETRY_ATTEMPTS):
+            try:
+                head = self._fetch_head()
+            except GitBackendError as e:
+                raise BackendBusyError(f"lock({key!r}): fetch failed: {e}") from e
+            try:
+                existing = self._read_fence_sidecar(head, key)
+            except GitBackendError as e:
+                # `git cat-file` timed out / could not run: same mapping as
+                # the fetch/build/push failures around it.
+                raise BackendBusyError(f"lock({key!r}): sidecar read failed: {e}") from e
+            if existing is None:
+                # Never commit fence state over a blob that is not a sidecar:
+                # a value written to this reserved path before the namespace
+                # was reserved (or by another tool) is user data, and
+                # silently replacing it would destroy it.
+                try:
+                    foreign = self._read_blob_at(head, path)
+                except GitBackendError as e:
+                    raise BackendBusyError(f"lock({key!r}): sidecar read failed: {e}") from e
+                if foreign is not None:
+                    raise BackendBusyError(
+                        f"lock({key!r}): reserved fence path {path!r} holds a non-sidecar blob; "
+                        "refusing to overwrite it"
+                    )
+            owner_fence = existing[2] if existing else 0
+            last_accepted_fence = existing[3] if existing else 0
+            new_fence = max(owner_fence, last_accepted_fence) + 1
+            sidecar = self._encode_fence_sidecar(token, expiry, new_fence, last_accepted_fence)
+            try:
+                new_commit = self._build_commit(head, path, sidecar)
+            except GitBackendError as e:
+                raise BackendBusyError(f"lock({key!r}): commit build failed: {e}") from e
+            scan_result = self._publish_checked(new_commit, head)
+            if scan_result is not None:
+                raise BackendBusyError(f"lock({key!r}): fence sidecar failed secret scan")
+            try:
+                ok, rejected, stderr = self._push(new_commit)
+            except GitBackendError as e:
+                # A push that timed out or could not start is a transient
+                # remote failure: lock()'s one failure shape, like every
+                # other acquisition failure above, never a raw exception.
+                raise BackendBusyError(f"lock({key!r}): fence commit push failed: {e}") from e
+            if ok:
+                return new_fence
+            if not rejected:
+                raise BackendBusyError(f"lock({key!r}): fence commit push failed: {stderr.strip()}")
+            # Non-fast-forward: someone else advanced the ref (fence
+            # contention or an unrelated key's write). Bounded retry.
+            continue
+        raise BackendBusyError(
+            f"lock({key!r}): fence allocation did not converge after "
+            f"{self._FENCE_COMMIT_RETRY_ATTEMPTS} attempts"
+        )
+
+    _FENCE_LOSS_SETTLE_POLL_S = 0.01
+    _FENCE_LOSS_SETTLE_MAX_S = 20.0
+
+    def _settle_current_hash_after_fence_loss(
+        self, key: str, expected_hash: str
+    ) -> Optional[str]:
+        """A single re-read of the current logical hash at the freshly-fetched
+        head after a fence-loss STALE. Owner-approved simplification 2026-09-24
+        (was a bounded poll ~<=_FENCE_LOSS_SETTLE_MAX_S on the sidecar's
+        pending-fence signal): a fence loss is PERMANENT, and the caller re-reads
+        on STALE anyway, so the poll only added latency + complexity for a
+        momentary race window. Git's own non-fast-forward rejection can only
+        happen AFTER a conflicting commit exists, so the freshly-fetched head is
+        already the settled outcome. Returns the current hash, or `expected_hash`
+        if the re-read itself fails (never worse than the pre-read value)."""
+        try:
+            head = self._fetch_head()
+            raw = self._read_blob_at(head, key)
+        except GitBackendError:
+            return expected_hash
+        return sha256_hex(raw) if raw is not None else None
+
+    def _renew_durable_fence(self, key: str, token: str, new_expiry: float) -> bool:
+        """Extend the durable sidecar's owner_expiry (fence unchanged) to
+        match a renewed advisory lock. Bounded retry on non-fast-forward,
+        same shape as `_advance_durable_fence`. Returns True only once the
+        extension is confirmed pushed; never raises (a fetch/build/scan/push
+        failure, exhausted retries, or a sidecar now owned by another token
+        all report False)."""
+        path = self._fence_sidecar_path(key)
+        for _attempt in range(self._FENCE_COMMIT_RETRY_ATTEMPTS):
+            try:
+                head = self._fetch_head()
+                existing = self._read_fence_sidecar(head, key)
+            except GitBackendError:
+                return False  # fetch or sidecar read failed: not renewed, never raised
+            if existing is None or existing[0] != token:
+                return False  # nothing to extend, or already superseded
+            _, _, owner_fence, last_accepted_fence = existing
+            sidecar = self._encode_fence_sidecar(token, new_expiry, owner_fence, last_accepted_fence)
+            try:
+                new_commit = self._build_commit(head, path, sidecar)
+            except GitBackendError:
+                return False
+            scan_result = self._publish_checked(new_commit, head)
+            if scan_result is not None:
+                return False
+            try:
+                ok, rejected, _stderr = self._push(new_commit)
+            except GitBackendError:
+                return False  # push timed out / could not start: not renewed, never raised
+            if ok:
+                return True
+            if not rejected:
+                return False
+            continue
+        return False
 
     # -- pre-publish scan: the entire to-be-uploaded object set (§4.3) ------
 
@@ -494,7 +714,11 @@ class GitBackend:
 
     def capabilities(self) -> Caps:
         # JUDGMENT CALL 6: remote=True (see module docstring).
-        return Caps(atomic=True, cas=True, lock=True, durable=True, remote=True)
+        # H1 Increment 2, Phase 2: this backend now enforces lock()-issued
+        # fence ordering on every Overwrite CAS-update via the durable
+        # `.knokeep-fence/<sha256(key)>.fence` sidecar committed alongside
+        # the data (see write() and _advance_durable_fence).
+        return Caps(atomic=True, cas=True, lock=True, durable=True, remote=True, fence=True)
 
     def health(self) -> BackendHealth:
         try:
@@ -513,6 +737,8 @@ class GitBackend:
         raw = self._read_blob_at(head, key)
         if raw is None:
             return None
+        if self._is_sidecar_path(key) and self._parse_fence_sidecar(raw) is not None:
+            return None  # a fence sidecar is not a logical key (see _FENCE_NAMESPACE)
         return Blob(body=raw, version_hash=sha256_hex(raw))
 
     def list(self, prefix: str) -> Iterator[str]:
@@ -521,14 +747,16 @@ class GitBackend:
             return iter([])
         proc = self._run(["ls-tree", "-r", "--name-only", head], check=True)
         names = [n for n in proc.stdout.decode("utf-8", "replace").splitlines() if n]
-        return iter(sorted(n for n in names if n.startswith(prefix)))
+        return iter(sorted(
+            n for n in names if n.startswith(prefix) and not self._is_internal_blob(head, n)
+        ))
 
     def write(
         self,
         key: ScannedKey,
         body: ScannedBody,
         *,
-        expected_hash: Optional[str],
+        ctx,
     ) -> WriteResult:
         # Adapter accepts only gate-issued values; raw bytes/str are a
         # TypeError before any I/O (contract §1/§5).
@@ -539,17 +767,43 @@ class GitBackend:
         if not gate.verify(key) or not gate.verify(body):
             raise TypeError("GitBackend.write: gate marker verification failed")
 
+        # H1 Increment 2, Phase 2: ctx is required; derive expected_hash the
+        # same way store/gate.py does, plus the caller's lease for fence
+        # enforcement (Phase 0/1 only carried it structurally).
+        precondition_lease: Optional[Lock] = (
+            ctx.precondition.lease if isinstance(ctx.precondition, Overwrite) else None
+        )
+        expected_hash: Optional[str] = (
+            ctx.precondition.expected_hash if isinstance(ctx.precondition, Overwrite) else None
+        )
+
         k = key.key
         raw = body.body
         new_hash = sha256_hex(raw)
         new_generation = _extract_generation(raw)
 
+        return self._write_inner(
+            k, raw, new_hash, new_generation, expected_hash, precondition_lease
+        )
+
+    def _write_inner(
+        self,
+        k: str,
+        raw: bytes,
+        new_hash: str,
+        new_generation: Optional[int],
+        expected_hash: Optional[str],
+        precondition_lease: Optional[Lock],
+    ) -> WriteResult:
         try:
             captured_head = self._fetch_head()
             current_raw = self._read_blob_at(captured_head, k)
         except GitBackendError:
             return ERROR(ErrorKind.NETWORK)
         current_hash = sha256_hex(current_raw) if current_raw is not None else None
+
+        fence_state: Optional[Tuple[Optional[str], float, int, int]] = None
+        changes: List[Tuple[str, bytes]] = [(k, raw)]
 
         if expected_hash is None:
             # Create-only.
@@ -559,7 +813,42 @@ class GitBackend:
                 return EXISTS(current_hash)
             # else: absent -> fall through to build + publish.
         else:
-            # CAS-update.
+            # CAS-update. Ownership/fence FIRST (H1 Increment 2, Phase 2),
+            # read from the durable sidecar at the SAME captured head as the
+            # data key, then the existing hash/generation CAS check.
+            try:
+                fence_state = self._read_fence_sidecar(captured_head, k)
+            except GitBackendError:
+                return ERROR(ErrorKind.NETWORK)
+            owner_token = fence_state[0] if fence_state else None
+            owner_expiry = fence_state[1] if fence_state else 0.0
+            owner_fence = fence_state[2] if fence_state else 0
+            last_accepted_fence = fence_state[3] if fence_state else 0
+            fence_ok = (
+                precondition_lease is not None
+                and precondition_lease.token == owner_token
+                and owner_expiry > time.time()
+                and precondition_lease.fence == owner_fence  # exactly what lock() allocated for this token
+                and precondition_lease.fence >= last_accepted_fence
+            )
+            if not fence_ok:
+                # H1 Increment 2, Phase 2: a fence loss is PERMANENT (once
+                # superseded, retrying our own check can't change that), but
+                # git has no single mutex serializing every writer the way
+                # local.py's cas.lock does -- our own captured_head snapshot
+                # may simply predate the still-in-flight DATA write of
+                # whichever racer holds the current, valid fence. Without
+                # this, a fence-losing thread here would report a plain
+                # local snapshot instead of the settled outcome that git's
+                # own non-fast-forward rejection already guarantees for the
+                # plain hash-CAS path below (a rejection can only happen
+                # AFTER a conflicting commit exists) -- breaking the
+                # existing "every loser's current_hash is the true winner's
+                # hash" guarantee the pre-fence C1 race tests rely on.
+                # Bounded settle-poll (never indefinite) closes that gap.
+                settled_hash = self._settle_current_hash_after_fence_loss(k, expected_hash)
+                return STALE(settled_hash, reason="FENCE")
+
             if current_raw is None:
                 return STALE(None)
             if current_hash != expected_hash:
@@ -574,8 +863,16 @@ class GitBackend:
                 if stored_generation is not None and new_generation <= stored_generation:
                     return STALE(current_hash)  # JUDGMENT CALL 5
 
+            # fence_ok requires fence_state to be non-None (owner_token
+            # matched precondition_lease.token, which is never None here).
+            assert fence_state is not None
+            sidecar = self._encode_fence_sidecar(
+                fence_state[0], fence_state[1], fence_state[2], precondition_lease.fence
+            )
+            changes = [(k, raw), (self._fence_sidecar_path(k), sidecar)]
+
         try:
-            new_commit = self._build_commit(captured_head, k, raw)
+            new_commit = self._build_commit_multi(captured_head, changes)
         except GitBackendError:
             return ERROR(ErrorKind.CORRUPTION)
 
@@ -592,21 +889,31 @@ class GitBackend:
         # Non-fast-forward: the ref moved between our fetch and our push.
         # Re-read fresh state to classify + report accurately, per §4.3
         # "Non-FF -> STALE" (never retried, never rebased — JUDGMENT CALL 4).
-        try:
-            fresh_head = self._fetch_head()
-            fresh_raw = self._read_blob_at(fresh_head, k)
-        except GitBackendError:
-            return ERROR(ErrorKind.NETWORK)
-        fresh_hash = sha256_hex(fresh_raw) if fresh_raw is not None else None
-
         if expected_hash is None:
+            try:
+                fresh_head = self._fetch_head()
+                fresh_raw = self._read_blob_at(fresh_head, k)
+            except GitBackendError:
+                return ERROR(ErrorKind.NETWORK)
+            fresh_hash = sha256_hex(fresh_raw) if fresh_raw is not None else None
             if fresh_raw is not None:
                 return EXISTS(fresh_hash)
             # Ref moved for a reason unrelated to this (still-absent) key;
             # our own create-only precondition is unaffected but we made no
             # durable write either (definitely-not-committed).
             return ERROR(ErrorKind.CONFLICT_UNKNOWN)
-        return STALE(fresh_hash)
+
+        # H1 Increment 2, Phase 2: for a CAS-update, the ref move that
+        # rejected our push is not necessarily the conflicting DATA write
+        # itself -- it can equally be another caller's fence-sidecar advance
+        # (lock()) for this same key, landing first. A single immediate
+        # re-read right after rejection can therefore still show OUR OWN
+        # pre-race snapshot if the actual winning write has not landed yet,
+        # which is exactly the gap `_settle_current_hash_after_fence_loss`
+        # closes (same durable owner_fence/last_accepted_fence signal, same
+        # bounded poll) -- reused here rather than a bespoke second copy.
+        settled_hash = self._settle_current_hash_after_fence_loss(k, expected_hash)
+        return STALE(settled_hash)
 
     # -- advisory lock() API (JUDGMENT CALL 1 — NOT the CAS mechanism) ------
 
@@ -618,8 +925,9 @@ class GitBackend:
                 raise BackendBusyError(f"key {key!r} is locked")
             token = secrets.token_hex(16)  # 128-bit CSPRNG token
             expiry = now + ttl_s
+            new_fence = self._advance_durable_fence(key, token, expiry)
             self._locks[key] = (token, expiry)
-            return Lock(key=key, token=token, expiry_epoch=expiry)
+            return Lock(key=key, token=token, expiry_epoch=expiry, fence=new_fence)
 
     def unlock(self, lock: Lock) -> bool:
         with self._lock_mutex:
@@ -640,7 +948,14 @@ class GitBackend:
             token, expiry = existing
             if token != lock.token or expiry <= time.time():
                 return False
-            self._locks[lock.key] = (token, time.time() + ttl_s)
+            new_expiry = time.time() + ttl_s
+            # The DURABLE sidecar is what write() enforces the fence against,
+            # so a renew whose durable half did not land reports False and
+            # leaves the in-memory entry unchanged -- contract: renew
+            # "succeeds ONLY if this token still owns".
+            if not self._renew_durable_fence(lock.key, token, new_expiry):
+                return False
+            self._locks[lock.key] = (token, new_expiry)
             return True
 
 

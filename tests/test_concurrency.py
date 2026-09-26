@@ -30,6 +30,9 @@ parked = sum(1 for x in r if "conflict_parked" in x.stderr)
 ok = (oks == 1 and parked == 1)
 print(f"oks={oks} parked={parked}")
 print(("PASS " if ok else "FAIL ") + "2-process no-lost-update (one wins, one parked)")
+if not ok:  # diagnostics only: what each writer actually reported
+    for tag, x in zip(["A", "B"], r):
+        print(f"  writer {tag}: rc={x.returncode} stdout={x.stdout.strip()[-300:]!r} stderr={x.stderr.strip()[-300:]!r}")
 
 # The store is not wedged after contention: a fresh flush with the current hash
 # proceeds (no deadlock; the winner's lock was released, journal is consistent).

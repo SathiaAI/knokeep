@@ -15,6 +15,7 @@ from store.fake import FakeBackend
 from store.types import OK
 
 from reconciler.reconcile import reconcile
+from tests.ctx_helpers import create_ctx
 
 PLANTED_SECRET = "ghp_" + "A" * 36
 
@@ -48,7 +49,7 @@ def _dump_report(report) -> str:
 
 def test_planted_github_secret_is_quarantined_and_never_appears_verbatim(tmp_path):
     backend = FakeBackend()
-    r = gate.persist(backend, "next_step", b"ship", expected_hash=None, doc_type="system_state")
+    r = gate.persist(backend, "next_step", b"ship", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r, OK)
 
     from reconciler.sources import StoreSource
@@ -87,7 +88,7 @@ def test_planted_github_secret_is_quarantined_and_never_appears_verbatim(tmp_pat
 
 def test_planted_secret_never_reaches_the_telemetry_file(tmp_path):
     backend = FakeBackend()
-    r = gate.persist(backend, "next_step", b"ship", expected_hash=None, doc_type="system_state")
+    r = gate.persist(backend, "next_step", b"ship", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r, OK)
 
     from reconciler.sources import StoreSource
@@ -117,7 +118,7 @@ def test_two_different_quarantined_secrets_do_not_falsely_agree(tmp_path):
     specifically to prove the fix compares something other than the
     label/placeholder text."""
     backend = FakeBackend()
-    r = gate.persist(backend, "next_step", b"ship", expected_hash=None, doc_type="system_state")
+    r = gate.persist(backend, "next_step", b"ship", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r, OK)
 
     from reconciler.sources import StoreSource

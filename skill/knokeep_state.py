@@ -724,20 +724,14 @@ def resolve_conflict(store, project, conflict_key):
     # CreateOnly: first resolve wins; a repeat is EXISTS -> already resolved (OK).
     res = _persist(backend, marker_key, "conflict", _bytes(fm, "resolved"), None)
     if isinstance(res, EXISTS):
-        # A marker already sits at this name. It is an idempotent success ONLY
-        # if it is bound to this exact conflict; otherwise (a marker written
-        # before the binding existed, or a stray value) bootstrap() would keep
-        # reporting the conflict outstanding, so REPLACE it under a held lease.
+        # A value already sits at this name. It is an idempotent success ONLY
+        # if it is a marker bound to this exact conflict. Anything else is a
+        # NAMESPACE COLLISION: {project}/conflict-resolved/ is not reserved
+        # by the gate and was legal user storage, so the existing bytes are
+        # never replaced -- fail closed and leave the conflict outstanding.
         if _is_resolved(backend, project, conflict_key):
             return {"ok": True, "resolved": conflict_key, "marker": marker_key}
-        try:
-            with _hold(backend, marker_key) as lease:
-                blob = backend.read(marker_key)
-                res = _persist(backend, marker_key, "conflict", _bytes(fm, "resolved"),
-                               blob.version_hash if blob else None,
-                               lease=(lease if blob else None))
-        except BackendBusyError:
-            die(reason="resolve_failed", kind="BUSY")
+        die(reason="conflict_marker_collision", marker=marker_key, conflict_key=conflict_key)
     if isinstance(res, OK):
         return {"ok": True, "resolved": conflict_key, "marker": marker_key}
     if isinstance(res, ERROR) and res.kind == ErrorKind.SECRET_BLOCKED:

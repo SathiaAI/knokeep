@@ -786,3 +786,23 @@ def test_renew_returns_false_when_the_sidecar_push_raises(tmp_path, monkeypatch)
     monkeypatch.undo()
     assert _sidecar(backend, "renew/raise") == before_sidecar
     assert backend.renew(lease, ttl_s=300.0) is True
+
+
+def test_lock_and_renew_map_a_sidecar_read_failure_like_every_other_failure(tmp_path, monkeypatch):
+    from store.backend import BackendBusyError
+    from store.git_backend import GitBackendError
+
+    backend = _make_backend(tmp_path, "sidecar-read-fails")
+    lease = backend.lock("docs/k", ttl_s=30)
+    local_before = backend._locks["docs/k"]
+
+    def _cat_file_timeout(commit_sha, key):
+        raise GitBackendError("git cat-file: timed out")
+
+    monkeypatch.setattr(backend, "_read_blob_at", _cat_file_timeout)
+    with pytest.raises(BackendBusyError, match="sidecar read failed"):
+        backend.lock("docs/other", ttl_s=30)
+    assert backend.renew(lease, ttl_s=300) is False        # never raises
+    assert backend._locks["docs/k"] == local_before
+    monkeypatch.undo()
+    assert backend.renew(lease, ttl_s=300) is True

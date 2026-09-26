@@ -521,7 +521,12 @@ class GitBackend:
                 head = self._fetch_head()
             except GitBackendError as e:
                 raise BackendBusyError(f"lock({key!r}): fetch failed: {e}") from e
-            existing = self._read_fence_sidecar(head, key)
+            try:
+                existing = self._read_fence_sidecar(head, key)
+            except GitBackendError as e:
+                # `git cat-file` timed out / could not run: same mapping as
+                # the fetch/build/push failures around it.
+                raise BackendBusyError(f"lock({key!r}): sidecar read failed: {e}") from e
             if existing is None:
                 # Never commit fence state over a blob that is not a sidecar:
                 # a value written to this reserved path before the namespace
@@ -599,9 +604,9 @@ class GitBackend:
         for _attempt in range(self._FENCE_COMMIT_RETRY_ATTEMPTS):
             try:
                 head = self._fetch_head()
+                existing = self._read_fence_sidecar(head, key)
             except GitBackendError:
-                return False
-            existing = self._read_fence_sidecar(head, key)
+                return False  # fetch or sidecar read failed: not renewed, never raised
             if existing is None or existing[0] != token:
                 return False  # nothing to extend, or already superseded
             _, _, owner_fence, last_accepted_fence = existing

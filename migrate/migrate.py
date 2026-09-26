@@ -362,6 +362,20 @@ class _MigrationLease:
         return ("could not re-acquire the migration fence after "
                 f"{self._FENCE_REACQUIRE_ATTEMPTS} attempts")
 
+    def verify_ownership(self) -> Optional[str]:
+        """Read-only check that the control doc is still exactly the one this
+        run last wrote (hash unchanged). None if so, else why the lease is
+        lost. Used before the run returns its cutover signal, so a takeover
+        that happened during the final key's I/O is never reported as
+        success."""
+        try:
+            current = self.target.read(_MIGRATION_LEASE_KEY)
+        except Exception as exc:  # noqa: BLE001 - fail closed
+            return f"control doc re-read raised: {exc!r}"
+        if current is None or current.version_hash != self.doc_hash:
+            return "control doc moved underneath this run (another migration took the lease)"
+        return None
+
     def heartbeat_if_due(self) -> Optional[str]:
         """Renew when `_MIGRATION_HEARTBEAT_INTERVAL_S` has elapsed since the
         last renewal: the advisory lock (in-process guard + durable fence
@@ -1136,7 +1150,44 @@ def _migrate_body(
             )
         keys_verified += 1
 
+        # A single write or read-back can outlast the lease TTL (git: several
+        # separately timed subprocesses per persist). The pre-write heartbeat
+        # above cannot see a takeover that happens DURING this key's I/O, so
+        # re-check by elapsed time here as well -- the renewal's fenced
+        # control-doc write is what detects a takeover -- before the next key
+        # is written (#18 item 4). The key just written is create-only and
+        # already read-back verified, so nothing is lost either way.
+        lost = lease.heartbeat_if_due()
+        if lost is not None:
+            return _abort(
+                reason=f"migration lease lost during key {key!r}'s copy ({lost}) -- aborting",
+                source_key_count=len(source_keys),
+                keys_scanned=keys_scanned,
+                keys_copied=keys_copied,
+                keys_already_present=keys_already_present,
+                keys_verified=keys_verified,
+                aborted_key=key,
+                unexpected_target_keys=unexpected_target_keys,
+                started_at=started_at,
+            )
+
     # -- every key scanned, copied-or-already-correct, and verified ---------
+    # Ownership is re-proven ONCE MORE, read-only, before the cutover signal
+    # is returned: a takeover during the final key's I/O (past any heartbeat)
+    # must never be reported as a successful migration.
+    lost = lease.verify_ownership()
+    if lost is not None:
+        return _abort(
+            reason=f"migration lease lost before cutover ({lost}) -- aborting",
+            source_key_count=len(source_keys),
+            keys_scanned=keys_scanned,
+            keys_copied=keys_copied,
+            keys_already_present=keys_already_present,
+            keys_verified=keys_verified,
+            aborted_key=None,
+            unexpected_target_keys=unexpected_target_keys,
+            started_at=started_at,
+        )
     # This return value itself IS the cutover signal (requirement #6): the
     # caller flips its config to target only after seeing status=="success",
     # and only while writers remain stopped through that flip.

@@ -870,11 +870,11 @@ def test_heartbeat_renew_failure_mid_copy_aborts_and_writes_no_further_keys(monk
     target = _SlowCopyTarget(clock, ok_renewals=1)            # 1st heartbeat ok, 2nd fails
     report = migrate(source, target)
 
-    boundary = 8                                              # index of the key at the failed heartbeat
+    boundary = 8                                              # keys 0..7 landed; the takeover is seen right after key 7's read-back
     assert report.status == "aborted"
     assert report.ok is False
-    assert "lease lost during copy" in report.reason and "another migration took the lease" in report.reason
-    assert report.aborted_key == keys[boundary]
+    assert "lease lost during key" in report.reason and "another migration took the lease" in report.reason
+    assert report.aborted_key == keys[boundary - 1]           # the key whose post-I/O heartbeat found the lease gone
     assert report.cutover_signaled is False
     assert report.source_key_count == n_keys
     assert report.keys_scanned == n_keys                      # PASS 1 completed before any write
@@ -1279,3 +1279,59 @@ def test_migrate_aborts_when_the_alias_check_read_fails():
     assert report.status == "aborted" and "exclude source/target aliasing" in report.reason
     assert report.keys_copied == 0
     assert target.read("docs/a") is None
+
+
+# ---------------------------------------------------------------------------
+# A takeover DURING a key's I/O (past the pre-write heartbeat) must never be
+# reported as a successful cutover.
+# ---------------------------------------------------------------------------
+
+
+class _TakeoverDuringLastReadBack(_SlowCopyTarget):
+    """During the read-back of the LAST key, another migration takes the
+    lease over (as a crashed-owner takeover would: supersede the fence and
+    rewrite the control doc); the clock is advanced past the heartbeat
+    interval when `advance_clock` is set, to model an I/O longer than the
+    TTL."""
+
+    def __init__(self, clock, n_keys, advance_clock):
+        super().__init__(clock, ok_renewals=10**6)
+        self._last = f"k/{n_keys - 1:03d}"
+        self._advance = advance_clock
+        self._fired = False
+
+    def read(self, key):
+        blob = super().read(key)
+        if key == self._last and not self._fired and blob is not None:
+            self._fired = True
+            if self._advance:
+                self._clock.now += _MIGRATION_HEARTBEAT_INTERVAL_S * 2
+            with self._mutex:
+                fs = self._fence.setdefault(_MIGRATION_LEASE_KEY, {})
+                fs["owner_token"] = "taker"
+                fs["owner_fence"] = int(fs.get("owner_fence", 0)) + 1
+                fs["owner_expiry"] = time.time() + 300.0
+                taken = json.dumps({"kind": "knokeep-migration-lease", "owner_id": "taker",
+                                    "write_id": "w", "started_at": 0.0, "status": "held",
+                                    "expires_at": time.time() + 300.0}, sort_keys=True).encode("utf-8")
+                self._store[_MIGRATION_LEASE_KEY] = (taken, sha256_hex(taken))
+        return blob
+
+
+@pytest.mark.parametrize("advance_clock", [True, False], ids=["io-longer-than-interval", "instant-io"])
+def test_takeover_during_the_final_keys_io_is_never_reported_as_success(monkeypatch, advance_clock):
+    import migrate.migrate as migrate_module
+
+    clock = _FakeClock(per_write_s=0.0)
+    monkeypatch.setattr(migrate_module, "_monotonic", clock)
+    n = 3
+    source = FakeBackend()
+    for i in range(n):
+        _put(source, f"k/{i:03d}", f"v{i}".encode())
+    target = _TakeoverDuringLastReadBack(clock, n, advance_clock)
+    report = migrate(source, target)
+    assert report.status == "aborted", report
+    assert report.cutover_signaled is False
+    assert "lease lost" in report.reason and "another migration took the lease" in report.reason
+    assert report.keys_verified == n                     # the data itself was fine and is left in place
+    assert target.read("k/002").body == b"v2"

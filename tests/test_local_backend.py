@@ -926,3 +926,43 @@ def test_lock_waits_for_an_in_flight_fenced_write_to_commit(tmp_path):
     assert isinstance(fresh, OK)
     writer.close()
     other.close()
+
+
+def test_renew_never_extends_the_advisory_lease_when_the_durable_owner_cannot_be_rewritten(tmp_path, monkeypatch):
+    """The durable owner file is what write() enforces; if it cannot be
+    rewritten, renew() must report False and leave the advisory expiry
+    unchanged (extending only the advisory would wedge the key: the lease
+    could not write, and every successor would stay BUSY for the TTL)."""
+    backend = LocalBackend(tmp_path / "store-root")
+    key = "renew/durable-first"
+    lease = backend.lock(key, ttl_s=30)
+    adv_before = backend._read_advisory(backend._advisory_lock_path(key))
+    own_before = backend._read_fence_owner(backend._fence_owner_path(key))
+
+    def _unwritable(*a, **kw):
+        raise OSError("simulated: locks/fence-alloc became unwritable")
+
+    monkeypatch.setattr(backend, "_write_fence_owner", _unwritable)
+    assert backend.renew(lease, ttl_s=300) is False
+    assert backend._read_advisory(backend._advisory_lock_path(key)) == adv_before
+    assert backend._read_fence_owner(backend._fence_owner_path(key)) == own_before
+    monkeypatch.undo()
+    assert backend.renew(lease, ttl_s=300) is True
+    assert backend._read_fence_owner(backend._fence_owner_path(key))[1] > own_before[1] + 200
+    backend.close()
+
+
+def test_renew_reports_false_once_a_second_instance_superseded_the_durable_owner(tmp_path):
+    root = tmp_path / "store-root"
+    a = LocalBackend(root)
+    b = LocalBackend(root)
+    key = "renew/superseded"
+    mine = a.lock(key, ttl_s=0.4)
+    time.sleep(0.5)                                   # advisory lapses, so b can acquire
+    theirs = b.lock(key, ttl_s=30)
+    assert theirs.fence > mine.fence
+    # a's advisory record is gone/expired anyway; even a still-valid one must not renew.
+    assert a.renew(mine, ttl_s=300) is False
+    assert a._read_fence_owner(a._fence_owner_path(key))[0] == theirs.token
+    a.close()
+    b.close()

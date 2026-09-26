@@ -1025,15 +1025,25 @@ class LocalBackend:
             if token != lock.token or expiry <= time.time():
                 return False
             new_expiry = time.time() + ttl_s
-            self._write_advisory(path, token, new_expiry)
             # H1 Increment 2, Phase 1b: fence unchanged, but extend the
             # DURABLE fence-owner's expiry to match the renewed advisory
             # lock, so a renewed lease keeps its CAS-write authorization
-            # when write() reads the durable file fresh.
+            # when write() reads the durable file fresh. The durable half
+            # goes FIRST and decides the outcome: if this token no longer
+            # owns the durable record (a second instance's lock() superseded
+            # it) or the owner file cannot be rewritten, renew() reports
+            # False and leaves the advisory expiry UNCHANGED -- extending the
+            # advisory alone would leave a lease that cannot write while
+            # every successor stays BUSY until the longer advisory expiry.
             owner_path = self._fence_owner_path(lock.key)
             existing_owner = self._read_fence_owner(owner_path)
-            if existing_owner is not None and existing_owner[0] == token:
+            if existing_owner is None or existing_owner[0] != token:
+                return False
+            try:
                 self._write_fence_owner(owner_path, token, new_expiry, existing_owner[2])
+            except OSError:
+                return False
+            self._write_advisory(path, token, new_expiry)
             return True
         finally:
             guard.release()

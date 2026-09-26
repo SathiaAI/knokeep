@@ -1182,3 +1182,36 @@ def test_lock_on_real_key_preserves_logical_hash_metadata(backend):
     backend.lock("meta/phantom", ttl_s=30.0)
     phantom_head = oracle_client().head_object(Bucket=backend._client.bucket_name, Key="meta/phantom")
     assert phantom_head["Metadata"].get("knokeep-sha256") == ""
+
+
+@pytest.mark.parametrize("header", [
+    b"{}",
+    b'{"schema_version": 1, "owner_token": null, "owner_expiry": 0.0, "owner_fence": 0, "last_accepted_fence": 0, "version_hash": null}',
+    b'{"schema_version": 2, "owner_token": null, "owner_expiry": 0.0, "owner_fence": 0, "last_accepted_fence": 0, "version_hash": "%s"}',
+    b'{"schema_version": 1, "owner_token": null, "owner_expiry": "never", "owner_fence": 0, "last_accepted_fence": 0, "version_hash": "%s"}',
+    b'{"schema_version": 1, "owner_token": null, "owner_expiry": 0.0, "owner_fence": -1, "last_accepted_fence": 0, "version_hash": "%s"}',
+    b'{"schema_version": 1, "owner_token": null, "owner_expiry": 0.0, "owner_fence": 0, "last_accepted_fence": 0, "version_hash": "nothex"}',
+], ids=["empty-header", "null-hash-nonempty-body", "schema-v2", "str-expiry", "negative-fence", "bad-hash"])
+def test_malformed_envelope_header_is_corruption_never_a_phantom(backend, header):
+    """A header that merely parses is not a valid envelope: in particular
+    `{}` (or a null version_hash) over a non-empty body must not read as a
+    phantom, or read() would report stored data absent and a create-only
+    write would overwrite it."""
+    import struct
+
+    from store.backend import BackendBusyError
+
+    body = b"stored user data"
+    header = header.replace(b"%s", sha256_hex(body).encode())
+    raw = b"KFE1" + struct.pack(">I", len(header)) + header + body
+    key = "envelope/malformed"
+    oracle_client().put_object(Bucket=backend._client.bucket_name, Key=key, Body=raw,
+                               Metadata={"knokeep-sha256": sha256_hex(body)})
+    with pytest.raises(ObjectStoreBackendError, match="corrupt envelope"):
+        backend.read(key)
+    r = gate.persist(backend, key, b"overwrite attempt", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r, ERROR) and r.kind is ErrorKind.CORRUPTION
+    obj = oracle_client().get_object(Bucket=backend._client.bucket_name, Key=key)
+    assert obj["Body"].read() == raw, "a malformed envelope must never be overwritten"
+    with pytest.raises(BackendBusyError):
+        backend.lock(key, ttl_s=30.0)

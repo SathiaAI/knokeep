@@ -252,7 +252,12 @@ def _flush_doc(kind, store, project, new_content, expect_hash=None, section=None
         not isinstance(section, str) or not section.strip() or "\n" in section or "\r" in section
     ):
         die(reason="invalid_section_name", section=str(section).replace("\r", " ").replace("\n", " "))
-    if section is not None and _ANY_H2_RE.search(new_content or ""):
+    # Scan the body on NORMALIZED line boundaries: a bare CR is a line ending
+    # for Markdown consumers (CommonMark: LF, CR or CRLF), so "x\r## y" would
+    # otherwise slip past a LF-only `^` and land a second level-2 heading.
+    if section is not None and _ANY_H2_RE.search(
+        (new_content or "").replace("\r\n", "\n").replace("\r", "\n")
+    ):
         die(reason="section_body_heading_injection", section=str(section))
 
     base_section = None

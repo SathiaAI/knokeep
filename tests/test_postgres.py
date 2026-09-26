@@ -723,3 +723,27 @@ def test_deadlock_sqlstate_maps_to_busy_and_create_vs_fenced_cas_never_raises(ba
         assert isinstance(results[1], (STALE, ERROR)), results   # absent or hash mismatch, or BUSY
         if isinstance(results[1], ERROR):
             assert results[1].kind is ErrorKind.BUSY
+
+
+def test_refuses_to_start_when_fence_table_name_collides_with_another_store():
+    """Two stores in one schema configured as `foo` and `foo_fence` would
+    share a relation; construction must refuse rather than silently reuse
+    an incompatible table (and vice versa)."""
+    schema = "knokeep_collide_" + uuid.uuid4().hex[:20]
+    first = PostgresBackend(dict(_PG_CONNECT_KWARGS), schema=schema, table="foo_fence")
+    try:
+        with pytest.raises(RuntimeError, match="REFUSING TO START"):
+            PostgresBackend(dict(_PG_CONNECT_KWARGS), schema=schema, table="foo")
+        # The existing store is unharmed and keeps working.
+        r = gate.persist(first, "k", b"v", ctx=create_ctx(), doc_type="system_state")
+        assert isinstance(r, OK)
+    finally:
+        first._conformance_teardown()
+
+    schema2 = "knokeep_collide2_" + uuid.uuid4().hex[:20]
+    foo = PostgresBackend(dict(_PG_CONNECT_KWARGS), schema=schema2, table="foo")
+    try:
+        with pytest.raises(RuntimeError, match="REFUSING TO START"):
+            PostgresBackend(dict(_PG_CONNECT_KWARGS), schema=schema2, table="foo_fence")
+    finally:
+        foo._conformance_teardown()

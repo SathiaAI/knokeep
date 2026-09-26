@@ -307,6 +307,45 @@ class _EnvelopeCorruptionError(ValueError):
     ERROR{CORRUPTION} rather than treat it as a foreign object."""
 
 
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _validate_envelope_header(header: dict, body: bytes, key: str) -> None:
+    """The complete header schema, checked on every read: a header that
+    merely parses is not enough -- e.g. `{}` with a non-empty body would
+    otherwise read as a PHANTOM (version_hash None), so read() would report
+    the stored value absent and a create-only write would overwrite it.
+    Anything missing, mistyped, of an unsupported schema version, or a
+    version_hash that does not describe the body is CORRUPTION."""
+    def _bad(what: str) -> "_EnvelopeCorruptionError":
+        return _EnvelopeCorruptionError(f"corrupt envelope at {key!r}: {what}")
+
+    if not isinstance(header, dict):
+        raise _bad("header is not an object")
+    if header.get("schema_version") != _ENVELOPE_SCHEMA_VERSION:
+        raise _bad(f"unsupported schema_version {header.get('schema_version')!r}")
+    required = ("owner_token", "owner_expiry", "owner_fence", "last_accepted_fence", "version_hash")
+    for field in required:
+        if field not in header:
+            raise _bad(f"missing {field}")
+    if header["owner_token"] is not None and not isinstance(header["owner_token"], str):
+        raise _bad("owner_token is not a string")
+    if isinstance(header["owner_expiry"], bool) or not isinstance(header["owner_expiry"], (int, float)):
+        raise _bad("owner_expiry is not a number")
+    for field in ("owner_fence", "last_accepted_fence"):
+        if isinstance(header[field], bool) or not isinstance(header[field], int) or header[field] < 0:
+            raise _bad(f"{field} is not a non-negative integer")
+    version_hash = header["version_hash"]
+    if version_hash is None:
+        if body:
+            raise _bad("version_hash is null but the body is not empty")
+        return
+    if not isinstance(version_hash, str) or not _HEX64.match(version_hash):
+        raise _bad("version_hash is not a 64-hex sha256")
+    if version_hash != sha256_hex(body):
+        raise _bad("version_hash does not match its body")
+
+
 def _decode_envelope(raw: bytes) -> Tuple[dict, bytes]:
     """Raises ValueError if `raw` is not a KnoKeep fence envelope (e.g. probe
     litter or another out-of-band object) — callers decide how to handle
@@ -854,11 +893,8 @@ class ObjectStoreBackend:
                     last_accepted_fence=0, version_hash=raw_hash, body=raw, etag=etag,
                 )
             raise
+        _validate_envelope_header(header, body, key)
         version_hash = header.get("version_hash")
-        if version_hash is not None and version_hash != sha256_hex(body):
-            raise _EnvelopeCorruptionError(
-                f"envelope version_hash does not match its body at {key!r}"
-            )
         return _Envelope(
             owner_token=header.get("owner_token"),
             owner_expiry=float(header.get("owner_expiry") or 0.0),

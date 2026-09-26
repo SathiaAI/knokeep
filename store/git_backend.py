@@ -441,13 +441,21 @@ class GitBackend:
     # sidecar is detected by `_advance_durable_fence` and never overwritten.
 
     _FENCE_NAMESPACE = ".knokeep-fence/"
+    # Exactly the paths lock() writes: a canonical sidecar is the prefix plus
+    # ONE segment `<sha256-hex>.fence`. Only these are hidden from list()/
+    # read(); a legacy logical key that a pre-reservation gate accepted under
+    # the same prefix (e.g. `.knokeep-fence/notes`) stays readable and
+    # listable, so an upgrade never hides stored data (the gate now refuses
+    # NEW writes anywhere under the prefix, so such a key can be read and
+    # migrated out but not extended in place).
+    _SIDECAR_RE = re.compile(r"^\.knokeep-fence/[0-9a-f]{64}\.fence$")
 
     def _fence_sidecar_path(self, key: str) -> str:
         name = hashlib.sha256(key.encode("utf-8")).hexdigest()
         return f"{self._FENCE_NAMESPACE}{name}.fence"
 
     def _is_internal_path(self, key: str) -> bool:
-        return key.startswith(self._FENCE_NAMESPACE)
+        return self._SIDECAR_RE.match(key) is not None
 
     def _encode_fence_sidecar(
         self, owner_token: Optional[str], owner_expiry: float, owner_fence: int,

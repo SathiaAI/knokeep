@@ -671,3 +671,26 @@ def test_renew_reports_false_when_another_instance_superseded_the_sidecar(tmp_pa
     assert theirs.fence > mine.fence
     assert a.renew(mine, ttl_s=300.0) is False
     assert _sidecar(a, key)[0] == theirs.token
+
+
+def test_legacy_logical_key_under_fence_prefix_stays_visible(tmp_path):
+    """Only canonical `<sha256>.fence` sidecars are internal. A logical key a
+    pre-reservation gate accepted under the same prefix must still be
+    listed and readable after the upgrade (it can be migrated out; the gate
+    just refuses NEW writes there)."""
+    backend = _make_backend(tmp_path, "legacy-prefix")
+    r0 = gate.persist(backend, "docs/a", b"a", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    backend.lock("docs/a", ttl_s=30)  # a real sidecar
+    head = backend._fetch_head()
+    commit = backend._build_commit(head, ".knokeep-fence/notes", b"legacy value")
+    ok, rejected, _ = backend._push(commit)
+    assert ok and not rejected
+
+    assert list(backend.list("")) == [".knokeep-fence/notes", "docs/a"]
+    assert backend.read(".knokeep-fence/notes").body == b"legacy value"
+    assert backend.read(backend._fence_sidecar_path("docs/a")) is None
+    assert not any(n.endswith(".fence") for n in backend.list(""))
+    # Still reserved for new writes.
+    r = gate.persist(backend, ".knokeep-fence/notes", b"update", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r, ERROR) and r.kind is ErrorKind.INVALID_ARGUMENT

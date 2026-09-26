@@ -322,12 +322,45 @@ class PostgresBackend:
             """
         )
         conn.commit()
+        # CREATE TABLE IF NOT EXISTS never checks an EXISTING relation's
+        # layout: two stores in one schema configured as e.g. `foo` and
+        # `foo_fence` would otherwise silently share a table (one's data
+        # table is the other's fence table) and fail later on a missing
+        # column. Refuse to start instead (contract §8 spirit: no degraded
+        # mode) when either relation is not what this adapter created.
+        self._verify_columns(
+            cur, self._table,
+            {"key", "body", "version_hash", "generation", "updated_at"}, "store",
+        )
+        self._verify_columns(
+            cur, self._fence_table,
+            {"key", "owner_token", "owner_expiry", "owner_fence", "last_accepted_fence"}, "fence",
+        )
+        conn.commit()
 
         # Contract §8: load-time capability probe against a reserved prefix,
         # cleaned up afterwards. "Wrong mapping or missing native
         # precondition -> REFUSE TO START. No degraded mode."
         if run_probe:
             self._run_capability_probe()
+
+    def _verify_columns(self, cur, table: str, expected: set, what: str) -> None:
+        cur.execute(
+            """
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema = %s AND table_name = %s
+            """,
+            (self._schema, table),
+        )
+        present = {row[0] for row in cur.fetchall()}
+        missing = expected - present
+        if missing:
+            raise RuntimeError(
+                f"PostgresBackend: {what} table \"{self._schema}\".\"{table}\" already exists "
+                f"with an incompatible layout (missing columns: {sorted(missing)}); it is not "
+                "a relation this adapter created -- another store's table probably collides "
+                "with this name. REFUSING TO START."
+            )
 
     # -- connection management ----------------------------------------------
 

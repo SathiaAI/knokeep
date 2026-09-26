@@ -740,3 +740,14 @@ def test_section_name_with_line_breaks_or_empty_is_rejected(tmp_path, bad_sectio
     assert list(backend.list(project + "/conflicts/")) == []
     body = backend.read(ks._key(project, "state")).body.decode("utf-8")
     assert body.count("\n## ") + body.startswith("## ") == 2, body  # still exactly the two headings
+
+
+@pytest.mark.parametrize("body", ["safe\r## Injected\nmore", "safe\r\n## Injected", "\r## Injected"])
+def test_section_body_heading_after_bare_carriage_return_is_rejected(tmp_path, body):
+    store = str(tmp_path)
+    project = "proj-inject-cr"
+    r0 = ks.flush_state(store, project, "## Active State\n\n## Notes\n\n")
+    with pytest.raises(SystemExit) as exc:
+        ks.flush_state(store, project, body, expect_hash=r0["version_hash"], section="Active State")
+    assert _die_payload(exc)["reason"] == "section_body_heading_injection"
+    assert list(ks._backend(store).list(project + "/conflicts/")) == []

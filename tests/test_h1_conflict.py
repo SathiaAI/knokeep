@@ -847,3 +847,30 @@ def test_get_section_and_replace_section_recognize_indented_headings():
     code = "## A\na\n    ## not-a-heading\n"
     assert ks._get_section(code, "not-a-heading") is None
     assert ks._ANY_H2_RE.search("    ## not-a-heading") is None
+
+
+@pytest.mark.parametrize("alias", ["{p}/conflicts/{tail}/../{last}", "{p}/conflicts//{tail}/{last}", "{p}/conflicts/{tail}/./{last}"])
+def test_resolve_conflict_rejects_noncanonical_alias_of_a_parked_key(tmp_path, alias):
+    """A non-canonical spelling of a real parked key reads the same file
+    through the backend but would mint a marker bootstrap() never matches
+    (the marker is hashed from the spelling); it is refused, no marker is
+    written, and the exact listed key still resolves."""
+    store = str(tmp_path)
+    project = "proj-resolve-alias"
+    r0 = ks.flush_state(store, project, "## Active State\n\n## Notes\n\n")
+    _direct_section_write(ks._persist, store, project, "Active State", "winner", r0["version_hash"])
+    with pytest.raises(SystemExit) as exc:
+        ks.flush_state(store, project, "loser", expect_hash=r0["version_hash"], section="Active State")
+    conflict_key = _die_payload(exc)["conflict_key"]
+    tail, last = conflict_key[len(project + "/conflicts/"):].rsplit("/", 1)
+    aliased = alias.format(p=project, tail=tail, last=last)
+    assert aliased != conflict_key
+
+    with pytest.raises(SystemExit) as e:
+        ks.resolve_conflict(store, project, aliased)
+    assert _die_payload(e)["reason"] in ("invalid_conflict_key", "unknown_conflict_key")
+    assert list(ks._backend(store).list(project + "/conflict-resolved/")) == []
+    assert ks.bootstrap(store, project)["conflict_count"] == 1
+
+    assert ks.resolve_conflict(store, project, conflict_key)["ok"] is True
+    assert ks.bootstrap(store, project)["conflict_count"] == 0

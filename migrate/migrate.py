@@ -682,6 +682,16 @@ def migrate(
     started_at = time.time()
     owner_id = uuid.uuid4().hex
     write_id = uuid.uuid4().hex
+    if source is target:
+        # The lease control doc is written to `target` before the source is
+        # frozen, so an aliased pair would durably modify the source while
+        # the report promises it was untouched. Refuse before any write.
+        return _abort(
+            reason="source and target are the same backend object -- refusing to migrate a store onto itself",
+            source_key_count=0, keys_scanned=0, keys_copied=0,
+            keys_already_present=0, keys_verified=0, aborted_key=None,
+            started_at=started_at,
+        )
     # Snapshot the target's keys BEFORE acquiring the lease, so bookkeeping this
     # migration itself creates on the target (the lease control doc, and any
     # backend-internal fence sidecar the lock materializes -- e.g. git's
@@ -704,6 +714,23 @@ def migrate(
             started_at=started_at,
         )
     try:
+        # Distinct adapter objects over the SAME store (a second instance,
+        # a different backend type on one root) cannot be told apart by
+        # identity; but our own control doc, just written to `target`, is
+        # now visible through `source` if and only if they alias. Fail
+        # closed before the source is frozen and before any data write.
+        try:
+            aliased = _parse_lease_doc(source.read(_MIGRATION_LEASE_KEY))
+        except Exception:  # noqa: BLE001 - an unreadable source is reported by _migrate_body
+            aliased = None
+        if aliased is not None and aliased.get("owner_id") == owner_id:
+            return _abort(
+                reason=("source and target alias the same store (this run's migration control "
+                        "doc is visible through the source) -- refusing to migrate a store onto itself"),
+                source_key_count=0, keys_scanned=0, keys_copied=0,
+                keys_already_present=0, keys_verified=0, aborted_key=None,
+                started_at=started_at,
+            )
         return _migrate_body(source, target, scanner=scanner,
                              started_at=started_at, lease=lease,
                              target_keys_before=target_keys_before)

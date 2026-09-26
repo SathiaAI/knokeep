@@ -605,15 +605,17 @@ def test_fence_sidecars_are_hidden_from_list_and_read(tmp_path):
     assert backend.read("docs/only-locked") is None
 
 
-@pytest.mark.parametrize("key", [".knokeep-fence/x", ".knokeep-fence/deadbeef.fence", ".knokeep-fence"])
-def test_fence_namespace_is_rejected_by_the_gate(tmp_path, key):
+@pytest.mark.parametrize("key", [".knokeep-fence/" + "0" * 64 + ".fence", ".knokeep-fence/" + "ab" * 32 + ".fence"])
+def test_fence_sidecar_shape_is_rejected_by_the_gate(tmp_path, key):
     backend = _make_backend(tmp_path, "reserved")
     r = gate.persist(backend, key, b"user data", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r, ERROR) and r.kind is ErrorKind.INVALID_ARGUMENT
     assert list(backend.list("")) == []
-    # Look-alikes that are NOT the reserved segment are still ordinary keys.
-    ok = gate.persist(backend, "knokeep-fence/x", b"fine", ctx=create_ctx(), doc_type="system_state")
-    assert isinstance(ok, OK)
+    # Anything else under the prefix is an ordinary key (pre-upgrade keys stay legal).
+    for legal in ("knokeep-fence/x", ".knokeep-fence/x", ".knokeep-fence/deadbeef.fence"):
+        ok = gate.persist(backend, legal, b"fine", ctx=create_ctx(), doc_type="system_state")
+        assert isinstance(ok, OK), legal
+    assert list(backend.list("")) == [".knokeep-fence/deadbeef.fence", ".knokeep-fence/x", "knokeep-fence/x"]
 
 
 def test_lock_refuses_to_overwrite_foreign_blob_at_sidecar_path(tmp_path):
@@ -691,9 +693,12 @@ def test_legacy_logical_key_under_fence_prefix_stays_visible(tmp_path):
     assert backend.read(".knokeep-fence/notes").body == b"legacy value"
     assert backend.read(backend._fence_sidecar_path("docs/a")) is None
     assert not any(n.endswith(".fence") for n in backend.list(""))
-    # Still reserved for new writes.
-    r = gate.persist(backend, ".knokeep-fence/notes", b"update", ctx=create_ctx(), doc_type="system_state")
-    assert isinstance(r, ERROR) and r.kind is ErrorKind.INVALID_ARGUMENT
+    # ...and can still be updated in place (only the canonical sidecar shape is reserved).
+    r = gate.persist(backend, ".knokeep-fence/notes", b"update",
+                     ctx=fenced_ctx(backend, ".knokeep-fence/notes", sha256_hex(b"legacy value")),
+                     doc_type="system_state")
+    assert isinstance(r, OK), r
+    assert backend.read(".knokeep-fence/notes").body == b"update"
 
 
 def test_legacy_user_blob_at_canonical_sidecar_path_stays_visible(tmp_path):

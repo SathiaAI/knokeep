@@ -401,15 +401,19 @@ def test_non_operation_context_ctx_is_invalid_argument_before_io():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("key", [".knokeep-fence", ".knokeep-fence/abc.fence", ".knokeep-fence/x/y"])
-def test_reserved_fence_namespace_key_is_invalid_argument_before_io(key):
+@pytest.mark.parametrize("key", [".knokeep-fence/" + "0" * 64 + ".fence", ".knokeep-fence/" + "ab" * 32 + ".fence"])
+def test_reserved_fence_sidecar_key_is_invalid_argument_before_io(key):
     backend = RecordingBackend()
     result = gate.persist(backend, key, b"body", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(result, ERROR) and result.kind is ErrorKind.INVALID_ARGUMENT
     assert backend.write_calls == 0
 
 
-@pytest.mark.parametrize("key", ["knokeep-fence/abc", "x/.knokeep-fence/abc", ".knokeep-fence2/abc", ".knokeep/probe/abc"])
+@pytest.mark.parametrize("key", [
+    "knokeep-fence/abc", "x/.knokeep-fence/abc", ".knokeep-fence2/abc", ".knokeep/probe/abc",
+    ".knokeep-fence/notes", ".knokeep-fence/abc.fence", ".knokeep-fence/x/y",       # legal pre-upgrade keys stay legal
+    ".knokeep-fence/" + "0" * 63 + ".fence", ".knokeep-fence/" + "0" * 64 + ".fenc",  # not the canonical shape
+])
 def test_non_reserved_lookalike_keys_still_accepted(key):
     backend = RecordingBackend()
     result = gate.persist(backend, key, b"body", ctx=create_ctx(), doc_type="system_state")
@@ -467,7 +471,7 @@ def test_validate_write_matches_persist_pre_io_checks():
         ("docs/k", b"body", "system_state", "nothex"),           # bad hash
         ("docs/k", b"body", 7, None),                             # doc_type not str
         ("../k", b"body", "system_state", None),                  # bad key
-        (".knokeep-fence/x", b"body", "system_state", None),      # reserved key
+        (".knokeep-fence/" + "0" * 64 + ".fence", b"body", "system_state", None),  # reserved sidecar key
         ("docs/k", "str-body", "system_state", None),             # body not bytes
         ("docs/k", b"no generation", "lease", None),              # non-STATE without generation
         ("docs/k", b"\x00nul", "system_state", None),             # text contract

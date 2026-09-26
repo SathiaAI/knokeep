@@ -694,7 +694,12 @@ def resolve_conflict(store, project, conflict_key):
     prefix = project + "/conflicts/"
     if not isinstance(conflict_key, str) or not conflict_key.startswith(prefix):
         die(reason="invalid_conflict_key", value=str(conflict_key))
-    if backend.read(conflict_key) is None:
+    # The marker is named from the key's spelling, and bootstrap() matches
+    # markers against the CANONICAL listing -- so the supplied key must be
+    # exactly one of the listed parked keys. A non-canonical alias (".."
+    # segments, doubled separators) can read the same file through the
+    # backend but would mint a marker bootstrap() never matches.
+    if not gate._valid_key_shape(conflict_key) or conflict_key not in set(backend.list(prefix)):
         die(reason="unknown_conflict_key", value=conflict_key)
     marker_key = _resolved_key(project, conflict_key)
     fm = {"schema_version": SCHEMA_VERSION, "project_id": project, "resolved_at": now()}

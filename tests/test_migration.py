@@ -1206,3 +1206,36 @@ def test_control_docs_written_by_this_module_and_its_predecessor_still_parse():
     legacy = json.dumps({"kind": "knokeep-migration-lease", "owner_id": "o", "write_id": "w",
                          "started_at": 1.0, "status": "held", "took_over_from": None}).encode()
     assert _parse_lease_doc(Blob(body=legacy, version_hash=sha256_hex(legacy)))["owner_id"] == "o"
+
+
+# ---------------------------------------------------------------------------
+# An aliased source/target must be refused before the source is modified.
+# ---------------------------------------------------------------------------
+
+
+def test_migrate_refuses_the_same_backend_object_as_source_and_target():
+    b = FakeBackend()
+    _put(b, "docs/a", b"alpha")
+    before = sorted(b.list(""))
+    report = migrate(b, b)
+    assert report.status == "aborted" and "onto itself" in report.reason
+    assert sorted(b.list("")) == before                 # not even a control doc was written
+    assert b.read(_MIGRATION_LEASE_KEY) is None
+
+
+def test_migrate_refuses_two_instances_over_the_same_store(tmp_path):
+    """Distinct adapter objects, one store: the target-side control doc shows
+    up through the source, which is the tell. Refused before the source is
+    frozen and before any data key is written."""
+    root = tmp_path / "shared"
+    a = LocalBackend(root)
+    b = LocalBackend(root)
+    _put(a, "docs/a", b"alpha")
+    report = migrate(a, b)
+    assert report.status == "aborted" and "alias the same store" in report.reason
+    assert report.keys_copied == 0 and report.keys_scanned == 0
+    assert sorted(k for k in a.list("") if k != _MIGRATION_LEASE_KEY) == ["docs/a"]
+    doc = json.loads(a.read(_MIGRATION_LEASE_KEY).body.decode("utf-8"))
+    assert doc["status"] == "released"                 # the lease it took was released again
+    a.close()
+    b.close()

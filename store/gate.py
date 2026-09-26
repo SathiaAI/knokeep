@@ -138,11 +138,15 @@ def verify_pair(scanned_key: object, scanned_body: object) -> bool:
 KEY_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 _MAX_KEY_LEN = 1024
 _MAX_SEGMENT_LEN = 255
-# Internal namespaces an adapter keeps INSIDE its logical keyspace (git has
-# no side-channel storage, so its per-key fence sidecars are committed tree
-# paths under `.knokeep-fence/`). Reserved at the one write door so no
-# logical key can ever alias an adapter's own bookkeeping.
-_RESERVED_TOP_SEGMENTS = frozenset({".knokeep-fence"})
+# Internal paths an adapter keeps INSIDE its logical keyspace (git has no
+# side-channel storage, so its per-key fence sidecars are committed tree
+# paths `.knokeep-fence/<sha256-hex>.fence`). Reserved at the one write
+# door so no logical key can alias an adapter's own bookkeeping -- but ONLY
+# that exact shape: any other key under the prefix (e.g. a pre-upgrade
+# `.knokeep-fence/notes`) was legal before and stays legal on every
+# backend, so nothing previously stored becomes un-updatable or
+# un-migratable.
+_RESERVED_KEY_RE = re.compile(r"^\.knokeep-fence/[0-9a-f]{64}\.fence$")
 
 _NTFS_RESERVED = (
     {"CON", "PRN", "AUX", "NUL"}
@@ -162,7 +166,7 @@ def _valid_key_shape(key: str) -> bool:
         return False
     if "//" in key or key.startswith("/") or key.endswith("/"):
         return False
-    if key.split("/", 1)[0] in _RESERVED_TOP_SEGMENTS:
+    if _RESERVED_KEY_RE.match(key):
         return False
     for segment in key.split("/"):
         if segment == "" or len(segment) > _MAX_SEGMENT_LEN:

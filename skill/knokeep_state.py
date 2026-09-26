@@ -267,6 +267,8 @@ def _flush_doc(kind, store, project, new_content, expect_hash=None, section=None
     res = None
 
     attempt = 0
+    busy_waits = 0
+    busy_deadline = time.monotonic() + _BUSY_WAIT_S
     while attempt < _MAX_CAS_ATTEMPTS:
         attempt += 1
         # D-006 / checklist #16: HOLD this key's lease across read->compute->
@@ -351,11 +353,19 @@ def _flush_doc(kind, store, project, new_content, expect_hash=None, section=None
                                persist_expect,
                                lease=(lease if persist_expect is not None else None))
         except BackendBusyError:
-            # Another writer holds this key's lease. Bounded retry, never an
-            # unbounded spin (checklist #11).
-            if attempt >= _MAX_CAS_ATTEMPTS:
+            # Another writer holds this key's lease across ITS read->compute->
+            # persist section. Waiting it out is not a CAS conflict, so it
+            # must not consume the _MAX_CAS_ATTEMPTS reapply budget: five
+            # 10-50ms backoffs (< 1s in total) are shorter than one fsync-heavy
+            # critical section on a slow disk, which parked perfectly good
+            # writes as "conflict_retry_exhausted". Bounded by wall-clock
+            # instead (_BUSY_WAIT_S, never an unbounded spin -- checklist
+            # #11); the backoff multiplier is capped.
+            if time.monotonic() >= busy_deadline:
                 break
-            time.sleep(random.uniform(0.01, 0.05) * attempt)
+            busy_waits += 1
+            attempt -= 1
+            time.sleep(random.uniform(0.01, 0.05) * min(busy_waits, 10))
             continue
 
         # --- lease released; act on the outcome outside any critical section ---
@@ -521,6 +531,11 @@ def _section_eq(a, b):
 
 
 _MAX_CAS_ATTEMPTS = 5
+# Total wall-clock a writer will wait for a competitor's held lease before
+# giving up (parking as retry-exhausted). A held section is milliseconds to
+# a second even on a slow disk; the advisory TTL (_LEASE_TTL_S) is the hard
+# ceiling behind it.
+_BUSY_WAIT_S = 5.0
 
 
 def _park_conflict(backend, store, project, session, losing_content, section,

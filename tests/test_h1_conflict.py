@@ -751,3 +751,55 @@ def test_section_body_heading_after_bare_carriage_return_is_rejected(tmp_path, b
         ks.flush_state(store, project, body, expect_hash=r0["version_hash"], section="Active State")
     assert _die_payload(exc)["reason"] == "section_body_heading_injection"
     assert list(ks._backend(store).list(project + "/conflicts/")) == []
+
+
+def test_flush_waits_out_a_competitors_held_lease_instead_of_parking(tmp_path):
+    """A competitor holding the state lease across a slow critical section
+    (over a second on a slow disk) must not make this writer burn its
+    conflict-retry budget and park a perfectly good write as
+    conflict_retry_exhausted: BUSY waits are bounded by wall-clock, not by
+    the CAS attempt count, and the write lands once the holder releases."""
+    import time as _time
+
+    store = str(tmp_path)
+    project = "proj-busy-wait"
+    r0 = ks.flush_state(store, project, "## Architecture\nv0\n")
+    key = ks._key(project, "state")
+    holder = ks._backend(store)
+    lease = holder.lock(key, ttl_s=30)
+
+    def _release_later():
+        _time.sleep(1.2)                     # longer than five 10-50ms backoffs could ever cover
+        holder.unlock(lease)
+
+    t = threading.Thread(target=_release_later)
+    t.start()
+    try:
+        t0 = _time.monotonic()
+        res = ks.flush_state(store, project, "## Architecture\nv1\n", expect_hash=r0["version_hash"])
+        elapsed = _time.monotonic() - t0
+    finally:
+        t.join()
+    assert res["ok"] is True, res
+    assert elapsed >= 1.0, "must have waited for the holder rather than exhausting instantly"
+    assert list(ks._backend(store).list(project + "/conflicts/")) == []
+    assert "v1" in ks._backend(store).read(key).body.decode("utf-8")
+
+
+def test_busy_wait_is_bounded_and_then_parks(tmp_path, monkeypatch):
+    """The wait is bounded: a lease held past _BUSY_WAIT_S parks the write
+    (fail closed, nothing lost) instead of spinning forever."""
+    monkeypatch.setattr(ks, "_BUSY_WAIT_S", 0.3)
+    store = str(tmp_path)
+    project = "proj-busy-bound"
+    r0 = ks.flush_state(store, project, "## Architecture\nv0\n")
+    key = ks._key(project, "state")
+    holder = ks._backend(store)
+    lease = holder.lock(key, ttl_s=30)
+    try:
+        with pytest.raises(SystemExit) as exc:
+            ks.flush_state(store, project, "## Architecture\nv1\n", expect_hash=r0["version_hash"])
+    finally:
+        holder.unlock(lease)
+    assert _die_payload(exc)["reason"] == "conflict_retry_exhausted"
+    assert len(list(ks._backend(store).list(project + "/conflicts/"))) == 1   # parked, never lost

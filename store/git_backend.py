@@ -467,11 +467,18 @@ class GitBackend:
         raw = self._read_blob_at(commit_sha, path)
         return raw is not None and self._parse_fence_sidecar(raw) is not None
 
+    # Every sidecar starts with this marker, so "parses as a sidecar" is an
+    # unambiguous, versioned test -- a legacy user blob that merely happens
+    # to hold four space-separated fields can never be mistaken for one.
+    _SIDECAR_MARKER = "KKF1"
+
     def _encode_fence_sidecar(
         self, owner_token: Optional[str], owner_expiry: float, owner_fence: int,
         last_accepted_fence: int,
     ) -> bytes:
-        return f"{owner_token} {owner_expiry!r} {owner_fence} {last_accepted_fence}".encode("ascii")
+        return (
+            f"{self._SIDECAR_MARKER} {owner_token} {owner_expiry!r} {owner_fence} {last_accepted_fence}"
+        ).encode("ascii")
 
     def _read_fence_sidecar(
         self, commit_sha: Optional[str], key: str
@@ -484,11 +491,13 @@ class GitBackend:
             return None
         return self._parse_fence_sidecar(raw)
 
-    @staticmethod
-    def _parse_fence_sidecar(raw: bytes) -> Optional[Tuple[Optional[str], float, int, int]]:
+    @classmethod
+    def _parse_fence_sidecar(cls, raw: bytes) -> Optional[Tuple[Optional[str], float, int, int]]:
         try:
-            token_s, expiry_s, owner_fence_s, last_accepted_s = raw.decode("ascii").split(" ")
+            marker, token_s, expiry_s, owner_fence_s, last_accepted_s = raw.decode("ascii").split(" ")
         except (UnicodeDecodeError, ValueError):
+            return None
+        if marker != cls._SIDECAR_MARKER:
             return None
         token: Optional[str] = None if token_s == "None" else token_s
         try:

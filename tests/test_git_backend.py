@@ -714,3 +714,31 @@ def test_legacy_user_blob_at_canonical_sidecar_path_stays_visible(tmp_path):
     assert list(backend.list("")) == [legacy_path, "docs/a"]
     assert backend.read(legacy_path).body == b"this is not a sidecar, it is user data"
     assert backend.read(backend._fence_sidecar_path("docs/a")) is None
+
+
+def test_sidecar_shaped_legacy_blob_is_not_a_sidecar(tmp_path):
+    """Only the versioned KKF1 marker makes a blob a sidecar: a legacy user
+    blob at a canonical path whose body merely has the same field shape
+    stays visible and is never overwritten by lock()."""
+    backend = _make_backend(tmp_path, "sidecar-shape")
+    r0 = gate.persist(backend, "docs/k", b"k", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    path = backend._fence_sidecar_path("docs/k")
+    head = backend._fetch_head()
+    commit = backend._build_commit(head, path, b"owner 1.0 2 3")   # four fields, no marker
+    ok, rejected, _ = backend._push(commit)
+    assert ok and not rejected
+
+    assert backend._parse_fence_sidecar(b"owner 1.0 2 3") is None
+    assert list(backend.list("")) == [path, "docs/k"]
+    assert backend.read(path).body == b"owner 1.0 2 3"
+    from store.backend import BackendBusyError
+
+    with pytest.raises(BackendBusyError, match="non-sidecar"):
+        backend.lock("docs/k", ttl_s=30)
+    assert backend._read_blob_at(backend._fetch_head(), path) == b"owner 1.0 2 3"
+    # A real sidecar round-trips through the marker.
+    lease = backend.lock("docs/other", ttl_s=30)
+    raw = backend._read_blob_at(backend._fetch_head(), backend._fence_sidecar_path("docs/other"))
+    assert raw.startswith(b"KKF1 ")
+    assert backend._parse_fence_sidecar(raw)[0] == lease.token

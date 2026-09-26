@@ -1215,3 +1215,22 @@ def test_malformed_envelope_header_is_corruption_never_a_phantom(backend, header
     assert obj["Body"].read() == raw, "a malformed envelope must never be overwritten"
     with pytest.raises(BackendBusyError):
         backend.lock(key, ttl_s=30.0)
+
+
+def test_legacy_object_whose_bytes_look_like_an_envelope_reads_back_verbatim(backend):
+    """The legacy rule (metadata == sha256(raw)) is checked before the KFE1
+    magic: a pre-envelope value whose body happens to be a well-formed
+    envelope byte string is returned exactly as stored, not re-parsed."""
+    from store.objectstore import _encode_envelope
+
+    inner = _encode_envelope(None, 0.0, 0, 0, sha256_hex(b"inner"), b"inner")   # valid KFE1 bytes
+    key = "legacy/looks-like-envelope"
+    _plant_legacy_object(backend, key, inner)
+    blob = backend.read(key)
+    assert blob.body == inner and blob.version_hash == sha256_hex(inner)
+    assert list(backend.list("legacy/")) == [key]
+    lease = backend.lock(key, ttl_s=30.0)                     # upgrade keeps the bytes
+    backend.unlock(lease)
+    assert backend.read(key).body == inner
+    r = gate.persist(backend, key, b"next", ctx=overwrite_ctx(sha256_hex(inner), lease), doc_type="system_state")
+    assert isinstance(r, OK)

@@ -883,16 +883,19 @@ class ObjectStoreBackend:
         if got is None:
             return None
         raw, etag, meta_hash = got
-        try:
-            header, body = _decode_envelope(raw)
-        except ValueError:
-            raw_hash = sha256_hex(raw)
-            if meta_hash is not None and meta_hash == raw_hash:
-                return _Envelope(
-                    owner_token=None, owner_expiry=0.0, owner_fence=0,
-                    last_accepted_fence=0, version_hash=raw_hash, body=raw, etag=etag,
-                )
-            raise
+        # LEGACY check FIRST, before trusting the magic: the previous adapter
+        # set the metadata to sha256(<raw object>), whereas an envelope's
+        # metadata is sha256(<logical body>) -- never the hash of the whole
+        # object. So `meta == sha256(raw)` identifies a legacy value even
+        # when its bytes happen to begin with a well-formed KFE1 header,
+        # and such a value is returned verbatim rather than re-parsed.
+        raw_hash = sha256_hex(raw)
+        if meta_hash is not None and meta_hash == raw_hash:
+            return _Envelope(
+                owner_token=None, owner_expiry=0.0, owner_fence=0,
+                last_accepted_fence=0, version_hash=raw_hash, body=raw, etag=etag,
+            )
+        header, body = _decode_envelope(raw)
         _validate_envelope_header(header, body, key)
         version_hash = header.get("version_hash")
         return _Envelope(

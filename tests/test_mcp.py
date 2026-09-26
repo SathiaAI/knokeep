@@ -610,8 +610,8 @@ def test_write_error_kinds_other_than_secret_blocked_are_also_isError(mcp_client
 
 
 def test_mcp_over_objectstore_smoke(tmp_path):
-    moto = pytest.importorskip("moto")
-    boto3 = pytest.importorskip("boto3")
+    pytest.importorskip("moto")
+    pytest.importorskip("boto3")
     from tests.moto_support import (
         DUMMY_ACCESS_KEY_ID,
         DUMMY_REGION,

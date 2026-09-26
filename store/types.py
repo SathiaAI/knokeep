@@ -7,7 +7,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Iterable, Optional, Tuple, Union
+from typing import Optional, Tuple, Union
 
 
 def sha256_hex(body: bytes) -> str:

@@ -897,7 +897,6 @@ class ObjectStoreBackend:
             )
         header, body = _decode_envelope(raw)
         _validate_envelope_header(header, body, key)
-        version_hash = header.get("version_hash")
         return _Envelope(
             owner_token=header.get("owner_token"),
             owner_expiry=float(header.get("owner_expiry") or 0.0),

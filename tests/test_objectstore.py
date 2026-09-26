@@ -21,7 +21,7 @@ import threading
 import time
 from dataclasses import replace as dc_replace
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Tuple
 
 import os
 import pytest

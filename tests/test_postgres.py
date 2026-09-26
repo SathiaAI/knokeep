@@ -36,7 +36,7 @@ pg8000 = pytest.importorskip("pg8000")
 from store import gate
 from store.backend import BackendBusyError
 from store.postgres import PostgresBackend, _extract_generation
-from store.types import ERROR, EXISTS, OK, STALE, ErrorKind, sha256_hex
+from store.types import ERROR, EXISTS, OK, STALE, ErrorKind
 from tests.ctx_helpers import create_ctx, fenced_ctx, overwrite_ctx
 
 _PG_CONNECT_KWARGS = {
@@ -515,7 +515,6 @@ def test_capability_probe_refuses_to_start_on_broken_cas_mapping(monkeypatch):
     to 1) regardless of whether it actually matched -- the probe's stale-CAS
     check must then fail and construction must raise, never silently start
     in a degraded mode."""
-    import store.postgres as postgres_module
 
     class _AlwaysMatchingCursor:
         """Wraps a real pg8000 cursor; every UPDATE against the store table

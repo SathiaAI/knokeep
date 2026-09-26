@@ -26,7 +26,7 @@ from typing import Callable, List, Optional, Sequence
 
 from .backend import Lock
 from .context import CreateOnly, OperationContext, Overwrite
-from .types import ERROR, OK, ErrorKind, STALE, EXISTS, WriteResult, sha256_hex
+from .types import ERROR, OK, ErrorKind, WriteResult
 
 # --------------------------------------------------------------------------
 # Runtime-opaque, immutable gate-typed values

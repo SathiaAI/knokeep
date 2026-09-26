@@ -692,7 +692,28 @@ def test_secret_in_losing_body_is_refused_not_parked(tmp_path):
     assert _park_events(store) == []
 
 
-def test_session_append_waits_out_a_briefly_held_journal_lease(tmp_path):
+def _count_busy_refusals(monkeypatch):
+    """Observe contention directly: count every BackendBusyError LocalBackend.lock
+    raises for the duration of the test (the skill constructs its own backend
+    instance, so the class method is the one shared seam)."""
+    from store.backend import BackendBusyError
+    from store.local import LocalBackend
+
+    counter = {"n": 0}
+    real_lock = LocalBackend.lock
+
+    def _lock(self, key, ttl_s):
+        try:
+            return real_lock(self, key, ttl_s)
+        except BackendBusyError:
+            counter["n"] += 1
+            raise
+
+    monkeypatch.setattr(LocalBackend, "lock", _lock)
+    return counter
+
+
+def test_session_append_waits_out_a_briefly_held_journal_lease(tmp_path, monkeypatch):
     """A concurrent appender (or a parking write) holds the journal lease
     across its read->append section. lock() refuses immediately, so without
     a backoff the 50-attempt budget burns through in milliseconds and the
@@ -711,16 +732,15 @@ def test_session_append_waits_out_a_briefly_held_journal_lease(tmp_path):
         _time.sleep(0.4)
         holder.unlock(lease)
 
+    busy = _count_busy_refusals(monkeypatch)
     t = threading.Thread(target=_release_later)
     t.start()
     try:
-        t0 = _time.monotonic()
         res = ks.session_append(store, project, sid, "cowork", "entry landed after the holder released")
-        elapsed = _time.monotonic() - t0
     finally:
         t.join()
     assert res == {"ok": True, "log": jkey}
-    assert elapsed >= 0.3, "must have waited for the holder rather than exhausting instantly"
+    assert busy["n"] >= 1, "the append must actually have been refused by the held lease before landing"
     body = ks._backend(store).read(jkey).body.decode("utf-8")
     assert "entry landed after the holder released" in body
 
@@ -753,7 +773,7 @@ def test_section_body_heading_after_bare_carriage_return_is_rejected(tmp_path, b
     assert list(ks._backend(store).list(project + "/conflicts/")) == []
 
 
-def test_flush_waits_out_a_competitors_held_lease_instead_of_parking(tmp_path):
+def test_flush_waits_out_a_competitors_held_lease_instead_of_parking(tmp_path, monkeypatch):
     """A competitor holding the state lease across a slow critical section
     (over a second on a slow disk) must not make this writer burn its
     conflict-retry budget and park a perfectly good write as
@@ -772,16 +792,15 @@ def test_flush_waits_out_a_competitors_held_lease_instead_of_parking(tmp_path):
         _time.sleep(1.2)                     # longer than five 10-50ms backoffs could ever cover
         holder.unlock(lease)
 
+    busy = _count_busy_refusals(monkeypatch)
     t = threading.Thread(target=_release_later)
     t.start()
     try:
-        t0 = _time.monotonic()
         res = ks.flush_state(store, project, "## Architecture\nv1\n", expect_hash=r0["version_hash"])
-        elapsed = _time.monotonic() - t0
     finally:
         t.join()
     assert res["ok"] is True, res
-    assert elapsed >= 1.0, "must have waited for the holder rather than exhausting instantly"
+    assert busy["n"] >= 1, "the flush must actually have been refused by the held lease before landing"
     assert list(ks._backend(store).list(project + "/conflicts/")) == []
     assert "v1" in ks._backend(store).read(key).body.decode("utf-8")
 

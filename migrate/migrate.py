@@ -628,6 +628,24 @@ class MigrationReport:
         return self.status == "success"
 
 
+def _looks_like_same_store(source, target, target_keys: set) -> bool:
+    """Read-only, adapter-agnostic aliasing hint (tool code may not import
+    adapters): same class, same configured identity as each adapter reports
+    it in health().detail, and the same key listing. Never raises; a False
+    here is not proof of distinctness, which is why migrate() also checks,
+    after acquiring the lease, whether its own control doc is visible through
+    the source."""
+    if type(source) is not type(target):
+        return False
+    try:
+        hs, ht = source.health(), target.health()
+        if not (hs.ok and ht.ok and hs.detail and hs.detail == ht.detail):
+            return False
+        return set(source.list("")) == set(target_keys)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _abort(
     *,
     reason: str,
@@ -705,6 +723,19 @@ def migrate(
             keys_already_present=0, keys_verified=0, aborted_key=None,
             started_at=started_at,
         )
+    if _looks_like_same_store(source, target, target_keys_before):
+        # Read-only detection BEFORE the lease control doc is written: two
+        # adapters of the same class reporting the same configured identity
+        # (health().detail: root path / remote+ref / endpoint+bucket /
+        # schema.table) and listing the same keys. Refusing here keeps the
+        # promise that an aborted run left the source untouched.
+        return _abort(
+            reason=("source and target appear to be the same store (same adapter class, same "
+                    "configured identity, same key listing) -- refusing to migrate a store onto itself"),
+            source_key_count=0, keys_scanned=0, keys_copied=0,
+            keys_already_present=0, keys_verified=0, aborted_key=None,
+            started_at=started_at,
+        )
     lease, lease_error = _acquire_migration_lease(target, owner_id, write_id, started_at)
     if lease is None:
         return _abort(
@@ -721,8 +752,14 @@ def migrate(
         # closed before the source is frozen and before any data write.
         try:
             aliased = _parse_lease_doc(source.read(_MIGRATION_LEASE_KEY))
-        except Exception:  # noqa: BLE001 - an unreadable source is reported by _migrate_body
-            aliased = None
+        except Exception as exc:  # noqa: BLE001 - fail closed: without this read, aliasing
+            # cannot be excluded, and a migration onto itself would report success.
+            return _abort(
+                reason=f"could not read the source's control key to exclude source/target aliasing: {exc!r}",
+                source_key_count=0, keys_scanned=0, keys_copied=0,
+                keys_already_present=0, keys_verified=0, aborted_key=None,
+                started_at=started_at,
+            )
         if aliased is not None and aliased.get("owner_id") == owner_id:
             return _abort(
                 reason=("source and target alias the same store (this run's migration control "

@@ -619,6 +619,21 @@ def _resolved_marker_name(conflict_key):
 def _resolved_key(project, conflict_key):
     return f"{project}/conflict-resolved/{_resolved_marker_name(conflict_key)}"
 
+def _is_resolved(backend, project, conflict_key):
+    """A conflict counts as settled only if its marker exists AND reads back
+    as a resolve_conflict() marker bound to this exact conflict key."""
+    try:
+        blob = backend.read(_resolved_key(project, conflict_key))
+    except Exception:
+        return False
+    if blob is None:
+        return False
+    try:
+        fm, _body = parse(blob.body.decode("utf-8"))
+    except Exception:
+        return False
+    return bool(fm) and fm.get("conflict_key") == conflict_key and fm.get("project_id") == project
+
 _BENIGN_STORE_FILES = {".ds_store", "thumbs.db", "desktop.ini"}
 
 def _audit_store(backend, project):
@@ -668,9 +683,7 @@ def bootstrap(store, project):
     # a reviewed+reapplied key stops being counted. Each key under
     # {project}/conflicts/ is one parked body; ASCII marker only (no emoji).
     parked = list(backend.list(project + "/conflicts/"))
-    resolved = {name.rsplit("/", 1)[-1]
-                for name in backend.list(project + "/conflict-resolved/")}
-    conflicts = [k for k in parked if _resolved_marker_name(k) not in resolved]
+    conflicts = [k for k in parked if not _is_resolved(backend, project, k)]
     conflict_count = len(conflicts)
     settled_count = len(parked) - conflict_count
     resume = f"resuming: {active or '(none)'} / next: {nxt or '(none)'} / v{(vh or '?')[:12]}"
@@ -702,7 +715,12 @@ def resolve_conflict(store, project, conflict_key):
     if not gate._valid_key_shape(conflict_key) or conflict_key not in set(backend.list(prefix)):
         die(reason="unknown_conflict_key", value=conflict_key)
     marker_key = _resolved_key(project, conflict_key)
-    fm = {"schema_version": SCHEMA_VERSION, "project_id": project, "resolved_at": now()}
+    # The marker names the FULL conflict key it resolves; bootstrap() reads it
+    # back and honours it only when that field matches the parked key exactly,
+    # so a marker-shaped value that merely has the right digest name (planted
+    # or written out of band) never silently settles a conflict.
+    fm = {"schema_version": SCHEMA_VERSION, "project_id": project, "resolved_at": now(),
+          "conflict_key": conflict_key}
     # CreateOnly: first resolve wins; a repeat is EXISTS -> already resolved (OK).
     res = _persist(backend, marker_key, "conflict", _bytes(fm, "resolved"), None)
     if isinstance(res, (OK, EXISTS)):

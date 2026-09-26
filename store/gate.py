@@ -147,6 +147,10 @@ _MAX_SEGMENT_LEN = 255
 # backend, so nothing previously stored becomes un-updatable or
 # un-migratable.
 _RESERVED_KEY_RE = re.compile(r"^\.knokeep-fence/[0-9a-f]{64}\.fence$")
+# The fence range every adapter can store durably: Postgres `bigint` and the
+# local journal's trailer are both 64-bit, bigint signed. A lease outside it
+# is refused before I/O rather than failing inside an adapter's encoder.
+_MAX_FENCE = (1 << 63) - 1
 
 _NTFS_RESERVED = (
     {"CON", "PRN", "AUX", "NUL"}
@@ -493,7 +497,7 @@ def _is_well_formed_lease(lease: object, key: object) -> bool:
         and bool(lease.token)
         and isinstance(lease.fence, int)
         and not isinstance(lease.fence, bool)
-        and lease.fence >= 0
+        and 0 <= lease.fence <= _MAX_FENCE
         and isinstance(lease.expiry_epoch, (int, float))
         and not isinstance(lease.expiry_epoch, bool)
     )

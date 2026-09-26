@@ -481,3 +481,25 @@ def test_validate_write_matches_persist_pre_io_checks():
         assert isinstance(err, ERROR) and err.kind is ErrorKind.INVALID_ARGUMENT, (key, body, doc_type, h)
     blocked = gate.validate_write("docs/k", b"AKIAIOSFODNN7EXAMPLE token", doc_type="system_state")
     assert isinstance(blocked, ERROR) and blocked.kind is ErrorKind.SECRET_BLOCKED
+
+
+@pytest.mark.parametrize("fence,accepted", [((1 << 63) - 1, True), (1 << 63, False), (1 << 64, False), (2 ** 70, False)])
+def test_lease_fence_outside_the_adapters_64_bit_range_is_invalid_argument(fence, accepted):
+    """Every adapter stores the fence in a 64-bit field (Postgres bigint, the
+    local journal trailer); an out-of-range fence is refused pre-I/O instead
+    of failing inside an adapter's encoder."""
+    from store.backend import Lock
+    from store.context import AuthContext, OperationContext, Overwrite
+
+    backend = RecordingBackend()
+    r0 = gate.persist(backend, "docs/k", b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    backend.write_calls = 0
+    lease = Lock(key="docs/k", token="t" * 32, expiry_epoch=4102444800.0, fence=fence)
+    ctx = OperationContext(auth=AuthContext(), precondition=Overwrite(r0.new_hash, lease))
+    result = gate.persist(backend, "docs/k", b"v1", ctx=ctx, doc_type="system_state")
+    if accepted:
+        assert isinstance(result, OK) and backend.write_calls == 1
+    else:
+        assert isinstance(result, ERROR) and result.kind is ErrorKind.INVALID_ARGUMENT
+        assert backend.write_calls == 0

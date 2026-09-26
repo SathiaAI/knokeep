@@ -103,7 +103,9 @@ class FakeBackend:
         return Caps(atomic=True, cas=True, lock=True, durable=False, remote=False, fence=True)
 
     def health(self) -> BackendHealth:
-        return BackendHealth(ok=True, detail="in-memory fake backend")
+        # Per-instance identity: two distinct fakes must never look like the
+        # same store to a caller comparing adapter identities (migrate()).
+        return BackendHealth(ok=True, detail=f"in-memory fake backend #{id(self):x}")
 
     def read(self, key: str) -> Optional[Blob]:
         with self._mutex:

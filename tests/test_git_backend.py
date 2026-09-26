@@ -747,3 +747,23 @@ def test_sidecar_shaped_legacy_blob_is_not_a_sidecar(tmp_path):
     raw = backend._read_blob_at(backend._fetch_head(), backend._fence_sidecar_path("docs/other"))
     assert raw.startswith(b"KKF1 ")
     assert backend._parse_fence_sidecar(raw)[0] == lease.token
+
+
+def test_lock_maps_a_push_timeout_to_busy(tmp_path, monkeypatch):
+    """A fence push that times out (or cannot start) surfaces as
+    BackendBusyError -- lock()'s one failure shape -- never a raw
+    GitBackendError that callers like the MCP write handler do not catch."""
+    from store.backend import BackendBusyError
+    from store.git_backend import GitBackendError
+
+    backend = _make_backend(tmp_path, "push-timeout")
+
+    def _timeout(sha):
+        raise GitBackendError("git push: timed out after 30s")
+
+    monkeypatch.setattr(backend, "_push", _timeout)
+    with pytest.raises(BackendBusyError, match="push failed"):
+        backend.lock("docs/k", ttl_s=30)
+    monkeypatch.undo()
+    lease = backend.lock("docs/k", ttl_s=30)          # remote back: acquisition works again
+    backend.unlock(lease)

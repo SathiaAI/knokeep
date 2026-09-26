@@ -1232,10 +1232,50 @@ def test_migrate_refuses_two_instances_over_the_same_store(tmp_path):
     b = LocalBackend(root)
     _put(a, "docs/a", b"alpha")
     report = migrate(a, b)
+    assert report.status == "aborted" and "same store" in report.reason
+    assert report.keys_copied == 0 and report.keys_scanned == 0
+    assert sorted(a.list("")) == ["docs/a"]             # detected BEFORE the lease: source untouched
+    assert a.read(_MIGRATION_LEASE_KEY) is None
+    a.close()
+    b.close()
+
+
+def test_migrate_backstop_detects_aliasing_the_identity_hint_cannot_see(tmp_path):
+    """When the read-only identity hint cannot tell (here: an adapter that
+    reports a different identity for the same root), the post-acquisition
+    check -- this run's own control doc visible through the source -- still
+    refuses before the source is frozen or any data key is written."""
+    from store.types import BackendHealth
+
+    class _OtherIdentity(LocalBackend):
+        def health(self):
+            return BackendHealth(ok=True, detail="pretends to be elsewhere")
+
+    root = tmp_path / "shared"
+    a = LocalBackend(root)
+    b = _OtherIdentity(root)
+    _put(a, "docs/a", b"alpha")
+    report = migrate(a, b)
     assert report.status == "aborted" and "alias the same store" in report.reason
     assert report.keys_copied == 0 and report.keys_scanned == 0
     assert sorted(k for k in a.list("") if k != _MIGRATION_LEASE_KEY) == ["docs/a"]
     doc = json.loads(a.read(_MIGRATION_LEASE_KEY).body.decode("utf-8"))
-    assert doc["status"] == "released"                 # the lease it took was released again
+    assert doc["status"] == "released"                 # the only trace: the lease it took, released again
     a.close()
     b.close()
+
+
+def test_migrate_aborts_when_the_alias_check_read_fails():
+    class _ControlReadFails(FakeBackend):
+        def read(self, key):
+            if key == _MIGRATION_LEASE_KEY:
+                raise RuntimeError("simulated transient read failure")
+            return super().read(key)
+
+    source = _ControlReadFails()
+    _put(source, "docs/a", b"alpha")
+    target = FakeBackend()
+    report = migrate(source, target)
+    assert report.status == "aborted" and "exclude source/target aliasing" in report.reason
+    assert report.keys_copied == 0
+    assert target.read("docs/a") is None

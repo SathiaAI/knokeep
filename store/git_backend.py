@@ -547,7 +547,13 @@ class GitBackend:
             scan_result = self._publish_checked(new_commit, head)
             if scan_result is not None:
                 raise BackendBusyError(f"lock({key!r}): fence sidecar failed secret scan")
-            ok, rejected, stderr = self._push(new_commit)
+            try:
+                ok, rejected, stderr = self._push(new_commit)
+            except GitBackendError as e:
+                # A push that timed out or could not start is a transient
+                # remote failure: lock()'s one failure shape, like every
+                # other acquisition failure above, never a raw exception.
+                raise BackendBusyError(f"lock({key!r}): fence commit push failed: {e}") from e
             if ok:
                 return new_fence
             if not rejected:

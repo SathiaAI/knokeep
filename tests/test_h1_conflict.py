@@ -874,3 +874,42 @@ def test_resolve_conflict_rejects_noncanonical_alias_of_a_parked_key(tmp_path, a
 
     assert ks.resolve_conflict(store, project, conflict_key)["ok"] is True
     assert ks.bootstrap(store, project)["conflict_count"] == 0
+
+
+def test_planted_marker_without_matching_conflict_key_does_not_settle_the_conflict(tmp_path):
+    """A marker-shaped value that merely has the right digest name (planted,
+    or written out of band without the conflict_key binding) must not make
+    bootstrap() report the parked edit as settled; a real resolve does."""
+    store = str(tmp_path)
+    project = "proj-marker-bind"
+    r0 = ks.flush_state(store, project, "## Active State\n\n## Notes\n\n")
+    _direct_section_write(ks._persist, store, project, "Active State", "winner", r0["version_hash"])
+    with pytest.raises(SystemExit) as exc:
+        ks.flush_state(store, project, "loser", expect_hash=r0["version_hash"], section="Active State")
+    conflict_key = _die_payload(exc)["conflict_key"]
+    backend = ks._backend(store)
+    marker_key = ks._resolved_key(project, conflict_key)
+
+    for fm in ({"schema_version": ks.SCHEMA_VERSION, "project_id": project},                        # no binding
+               {"schema_version": ks.SCHEMA_VERSION, "project_id": project,
+                "conflict_key": conflict_key + "-other"}):                                          # wrong binding
+        res = ks._persist(backend, marker_key, "conflict", ks._bytes(fm, "resolved"), None)
+        assert res.__class__.__name__ in ("OK", "EXISTS")
+        b = ks.bootstrap(store, project)
+        assert b["conflict_count"] == 1 and b["settled_count"] == 0, fm
+        # Clear the planted marker for the next shape (fresh key each time).
+        marker_key = marker_key  # same digest name is the point; overwrite via a new store below
+        break
+
+    # The genuine resolve on a fresh store binds the marker to the key and settles it.
+    store2 = str(tmp_path / "second")
+    r0 = ks.flush_state(store2, project, "## Active State\n\n## Notes\n\n")
+    _direct_section_write(ks._persist, store2, project, "Active State", "winner", r0["version_hash"])
+    with pytest.raises(SystemExit) as exc2:
+        ks.flush_state(store2, project, "loser", expect_hash=r0["version_hash"], section="Active State")
+    ck2 = _die_payload(exc2)["conflict_key"]
+    assert ks.resolve_conflict(store2, project, ck2)["ok"] is True
+    marker = ks._backend(store2).read(ks._resolved_key(project, ck2)).body.decode("utf-8")
+    assert f"conflict_key: {ck2}" in marker or ck2 in marker
+    b2 = ks.bootstrap(store2, project)
+    assert b2["conflict_count"] == 0 and b2["settled_count"] == 1

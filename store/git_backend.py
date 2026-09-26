@@ -551,35 +551,38 @@ class GitBackend:
             return expected_hash
         return sha256_hex(raw) if raw is not None else None
 
-    def _renew_durable_fence(self, key: str, token: str, new_expiry: float) -> None:
-        """Best-effort: extend the durable sidecar's owner_expiry (fence
-        unchanged) to match a renewed advisory lock. Bounded retry on
-        non-fast-forward, same shape as `_advance_durable_fence`; gives up
-        silently (renew() itself still reports the advisory-lock success it
-        already determined) rather than raising, since a caller calling
-        renew() does not expect it to fail the way lock() can."""
+    def _renew_durable_fence(self, key: str, token: str, new_expiry: float) -> bool:
+        """Extend the durable sidecar's owner_expiry (fence unchanged) to
+        match a renewed advisory lock. Bounded retry on non-fast-forward,
+        same shape as `_advance_durable_fence`. Returns True only once the
+        extension is confirmed pushed; never raises (a fetch/build/scan/push
+        failure, exhausted retries, or a sidecar now owned by another token
+        all report False)."""
         path = self._fence_sidecar_path(key)
         for _attempt in range(self._FENCE_COMMIT_RETRY_ATTEMPTS):
             try:
                 head = self._fetch_head()
             except GitBackendError:
-                return
+                return False
             existing = self._read_fence_sidecar(head, key)
             if existing is None or existing[0] != token:
-                return  # nothing to extend, or already superseded
+                return False  # nothing to extend, or already superseded
             _, _, owner_fence, last_accepted_fence = existing
             sidecar = self._encode_fence_sidecar(token, new_expiry, owner_fence, last_accepted_fence)
             try:
                 new_commit = self._build_commit(head, path, sidecar)
             except GitBackendError:
-                return
+                return False
             scan_result = self._publish_checked(new_commit, head)
             if scan_result is not None:
-                return
+                return False
             ok, rejected, _stderr = self._push(new_commit)
-            if ok or not rejected:
-                return
+            if ok:
+                return True
+            if not rejected:
+                return False
             continue
+        return False
 
     # -- pre-publish scan: the entire to-be-uploaded object set (§4.3) ------
 
@@ -899,8 +902,13 @@ class GitBackend:
             if token != lock.token or expiry <= time.time():
                 return False
             new_expiry = time.time() + ttl_s
+            # The DURABLE sidecar is what write() enforces the fence against,
+            # so a renew whose durable half did not land reports False and
+            # leaves the in-memory entry unchanged -- contract: renew
+            # "succeeds ONLY if this token still owns".
+            if not self._renew_durable_fence(lock.key, token, new_expiry):
+                return False
             self._locks[lock.key] = (token, new_expiry)
-            self._renew_durable_fence(lock.key, token, new_expiry)
             return True
 
 

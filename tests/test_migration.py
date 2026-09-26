@@ -813,8 +813,11 @@ class _FakeClock:
 
 class _SlowCopyTarget(FakeBackend):
     """A target whose renew() succeeds for the first `ok_renewals` heartbeat
-    calls and then returns False forever -- simulating the migration lease
-    being taken over mid-copy (#18 item 4) -- and whose data-key writes
+    calls and then simulates the migration lease having been TAKEN OVER
+    mid-copy (#18 item 4): another owner holds the durable fence and has
+    rewritten the control doc, exactly what a crash-takeover by a second
+    process leaves behind -- so renew() is False and the run's next fenced
+    control-doc write finds the doc no longer its own. Data-key writes
     advance the injected clock. Records every renew call so the test can
     assert the heartbeat cadence and the lock/TTL it was fed."""
 
@@ -827,6 +830,15 @@ class _SlowCopyTarget(FakeBackend):
     def renew(self, lock, ttl_s):
         self.renew_calls.append((lock, ttl_s))
         if len(self.renew_calls) > self._ok_renewals:
+            with self._mutex:                                 # the takeover, as another process would leave it
+                fs = self._fence.setdefault(lock.key, {})
+                fs["owner_token"] = "taker-" + lock.token[:8]
+                fs["owner_fence"] = int(fs.get("owner_fence", 0)) + 1
+                fs["owner_expiry"] = time.time() + 300.0
+                taken = json.dumps({"kind": "knokeep-migration-lease", "owner_id": "taker",
+                                    "write_id": "w", "started_at": 0.0, "status": "held",
+                                    "expires_at": time.time() + 300.0}, sort_keys=True).encode("utf-8")
+                self._store[lock.key] = (taken, sha256_hex(taken))
             return False
         return super().renew(lock, ttl_s)
 
@@ -861,7 +873,7 @@ def test_heartbeat_renew_failure_mid_copy_aborts_and_writes_no_further_keys(monk
     boundary = 8                                              # index of the key at the failed heartbeat
     assert report.status == "aborted"
     assert report.ok is False
-    assert "lease" in report.reason.lower() and "renew" in report.reason.lower()
+    assert "lease lost during copy" in report.reason and "another migration took the lease" in report.reason
     assert report.aborted_key == keys[boundary]
     assert report.cutover_signaled is False
     assert report.source_key_count == n_keys
@@ -955,15 +967,19 @@ def test_control_key_on_source_and_target_is_excluded_from_manifest_and_unexpect
     source = FakeBackend()
     _put(source, "docs/a", b"alpha")
     _put(source, "docs/b", b"beta")
+    # Docs in the shape the pre-expiry version of this module wrote (no
+    # expires_at/heartbeat_at/prior_owner/released_at): still recognized.
     stale_source_doc = json.dumps({"kind": "knokeep-migration-lease",
-                                  "owner_id": "stale-source-owner",
-                                  "status": "held"}, sort_keys=True).encode("utf-8")
+                                  "owner_id": "stale-source-owner", "write_id": "w-src",
+                                  "started_at": 1.0, "status": "held",
+                                  "took_over_from": None}, sort_keys=True).encode("utf-8")
     _put(source, _MIGRATION_LEASE_KEY, stale_source_doc)
 
     target = FakeBackend()
     prior_target_doc = json.dumps({"kind": "knokeep-migration-lease",
-                                  "owner_id": "prior-target-owner",
-                                  "status": "held"}, sort_keys=True).encode("utf-8")  # no expires_at: lapsed
+                                  "owner_id": "prior-target-owner", "write_id": "w-tgt",
+                                  "started_at": 1.0, "status": "held",
+                                  "took_over_from": None}, sort_keys=True).encode("utf-8")  # no expires_at: lapsed
     _put(target, _MIGRATION_LEASE_KEY, prior_target_doc)
 
     report = migrate(source, target)
@@ -1143,3 +1159,50 @@ def test_lock_raising_a_non_busy_error_aborts_with_a_report_not_an_exception():
     assert report.status == "aborted"
     assert "lock() raised" in report.reason and "RuntimeError" in report.reason
     assert target.read("docs/a") is None and target.read(_MIGRATION_LEASE_KEY) is None
+
+
+# ---------------------------------------------------------------------------
+# Round-3 review: a control doc is recognized only by its COMPLETE schema.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", [
+    b'{"kind": "knokeep-migration-lease", "payload": "a real user document"}',
+    b'{"kind": "knokeep-migration-lease", "owner_id": "x", "write_id": "w", "started_at": 1, "status": "held", "notes": "mine"}',
+    b'{"kind": "knokeep-migration-lease", "owner_id": 7, "write_id": "w", "started_at": 1, "status": "held"}',
+    b'{"kind": "knokeep-migration-lease", "owner_id": "x", "write_id": "w", "started_at": "yesterday", "status": "held"}',
+    b'{"kind": "knokeep-migration-lease", "owner_id": "x", "write_id": "w", "started_at": 1, "status": "weird"}',
+    b'["knokeep-migration-lease"]',
+], ids=["kind-plus-payload", "extra-field", "wrong-type", "str-started_at", "bad-status", "not-an-object"])
+def test_user_value_carrying_the_kind_tag_is_not_a_control_doc(value):
+    from migrate.migrate import _parse_lease_doc
+
+    assert _parse_lease_doc(Blob(body=value, version_hash=sha256_hex(value))) is None
+
+    # On the TARGET: refused, value untouched.
+    source = FakeBackend()
+    _put(source, "docs/a", b"alpha")
+    target = FakeBackend()
+    _put(target, _MIGRATION_LEASE_KEY, value)
+    report = migrate(source, target)
+    assert report.status == "aborted" and "holds real data" in report.reason
+    assert target.read(_MIGRATION_LEASE_KEY).body == value
+    assert target.read("docs/a") is None
+
+    # On the SOURCE: abort before any upload, never silently omitted.
+    source2 = FakeBackend()
+    _put(source2, "docs/a", b"alpha")
+    _put(source2, _MIGRATION_LEASE_KEY, value)
+    report2 = migrate(source2, FakeBackend())
+    assert report2.status == "aborted" and "collides with the migration control key" in report2.reason
+
+
+def test_control_docs_written_by_this_module_and_its_predecessor_still_parse():
+    from migrate.migrate import _lease_doc_body, _parse_lease_doc
+
+    current = _lease_doc_body(owner_id="o", write_id="w", started_at=1.0, status="held",
+                              expires_at=2.0, heartbeat_at=1.5, prior_owner=None, took_over_from="p")
+    assert _parse_lease_doc(Blob(body=current, version_hash=sha256_hex(current)))["owner_id"] == "o"
+    legacy = json.dumps({"kind": "knokeep-migration-lease", "owner_id": "o", "write_id": "w",
+                         "started_at": 1.0, "status": "held", "took_over_from": None}).encode()
+    assert _parse_lease_doc(Blob(body=legacy, version_hash=sha256_hex(legacy)))["owner_id"] == "o"

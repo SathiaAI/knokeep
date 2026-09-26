@@ -677,11 +677,12 @@ def test_renew_returns_false_for_wrong_released_expired_and_unknown_tokens(backe
 
 
 def test_renew_leaves_durable_record_alone_when_superseded_by_another_owner(backend):
-    """The durable extension is best-effort and owner-scoped: if another
-    process (a second adapter instance on the same bucket) has already
-    advanced the fence, our renew() still reports its own advisory success
-    but must NOT rewrite the envelope now owned by someone else — and our
-    lease is then fence-rejected by write()."""
+    """The durable envelope is the truth and the extension is owner-scoped:
+    if another process (a second adapter instance on the same bucket) has
+    already advanced the fence, our renew() must report False (contract:
+    succeeds ONLY if this token still owns), must NOT rewrite the envelope
+    now owned by someone else, and must leave our in-memory expiry
+    unchanged — our lease is then fence-rejected by write()."""
     key = "renew/superseded"
     r0 = gate.persist(backend, key, b"v0", ctx=create_ctx(), doc_type="system_state")
     assert isinstance(r0, OK)
@@ -700,7 +701,9 @@ def test_renew_leaves_durable_record_alone_when_superseded_by_another_owner(back
     assert header_theirs["owner_token"] == theirs.token
 
     puts0 = backend._client.put_count
-    assert backend.renew(mine, ttl_s=300.0) is True
+    local_before = backend._locks[key]
+    assert backend.renew(mine, ttl_s=300.0) is False
+    assert backend._locks[key] == local_before, "a failed durable renew must not extend the in-memory lease"
     assert backend._client.put_count == puts0, "superseded owner must not PUT over the new owner's envelope"
     assert _oracle_envelope_header(backend, key) == header_theirs
 
@@ -747,9 +750,12 @@ def test_renew_survives_transport_failure_on_durable_reread(backend, monkeypatch
         raise _ObjectStoreTransportError("simulated GET failure during renew")
 
     monkeypatch.setattr(backend._client, "get_with_etag", _boom)
-    assert backend.renew(lease, ttl_s=300.0) is True  # advisory success is still reported
+    local_before = backend._locks[key]
+    assert backend.renew(lease, ttl_s=300.0) is False  # durable half did not land -> not renewed, never raised
+    assert backend._locks[key] == local_before
     monkeypatch.undo()
-    assert _oracle_envelope_header(backend, key) == before  # durable record untouched, never raised
+    assert _oracle_envelope_header(backend, key) == before  # durable record untouched
+    assert backend.renew(lease, ttl_s=300.0) is True  # transport back -> the same lease renews
 
 
 # ---------------------------------------------------------------------------

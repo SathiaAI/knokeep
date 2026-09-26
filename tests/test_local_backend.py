@@ -871,3 +871,58 @@ def test_lock_fsyncs_fence_owner_directory_after_replace(tmp_path, monkeypatch):
     assert backend._fence_alloc_dir in synced, "renew() rewrites the owner file and must fsync its directory too"
     backend.unlock(lease)
     backend.close()
+
+
+# ---------------------------------------------------------------------------
+# lock() may not advance a key's fence owner while a write() that already
+# passed its fence check is still committing (both are serialized on cas.lock).
+# ---------------------------------------------------------------------------
+
+
+def test_lock_waits_for_an_in_flight_fenced_write_to_commit(tmp_path):
+    import threading
+
+    root = tmp_path / "store-root"
+    writer = LocalBackend(root)
+    other = LocalBackend(root)          # a second process, sharing the directory
+    key = "serialize/k"
+    r0 = gate.persist(writer, key, b"v0", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    lease = writer.lock(key, ttl_s=30)
+    writer.unlock(lease)                 # released-but-unexpired: still the fence owner
+
+    in_commit = threading.Event()
+    proceed = threading.Event()
+    real_commit = writer._commit
+
+    def _slow_commit(*args, **kwargs):
+        in_commit.set()                  # past _fence_ok(), cas.lock held, not yet durable
+        assert proceed.wait(10)
+        return real_commit(*args, **kwargs)
+
+    writer._commit = _slow_commit
+    results = {}
+    t_write = threading.Thread(target=lambda: results.update(
+        w=gate.persist(writer, key, b"v1", ctx=overwrite_ctx(r0.new_hash, lease), doc_type="system_state")))
+    t_write.start()
+    assert in_commit.wait(10)
+
+    lock_done = threading.Event()
+    t_lock = threading.Thread(target=lambda: (results.update(l=other.lock(key, ttl_s=30)), lock_done.set()))
+    t_lock.start()
+    # The competing lock() must NOT complete while the fenced write is mid-commit.
+    assert not lock_done.wait(0.6), "lock() advanced the fence owner underneath an in-flight fenced write"
+    proceed.set()
+    t_write.join(10)
+    t_lock.join(10)
+    assert isinstance(results["w"], OK), results
+    assert lock_done.is_set()
+
+    # Ordering held: the write landed under its (then-current) fence, and the
+    # new lease now supersedes it.
+    replay = gate.persist(writer, key, b"v2-replay", ctx=overwrite_ctx(results["w"].new_hash, lease), doc_type="system_state")
+    assert isinstance(replay, STALE) and replay.reason == "FENCE"
+    fresh = gate.persist(other, key, b"v2", ctx=overwrite_ctx(results["w"].new_hash, results["l"]), doc_type="system_state")
+    assert isinstance(fresh, OK)
+    writer.close()
+    other.close()

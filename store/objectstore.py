@@ -1258,22 +1258,28 @@ class ObjectStoreBackend:
             if token != lock.token or expiry <= time.time():
                 return False
             new_expiry = time.time() + ttl_s
+            # The DURABLE envelope is what write() enforces the fence against,
+            # so a renew whose durable half did not land (transport failure,
+            # retries exhausted, or the token no longer owns the envelope
+            # because another instance/process lock()'d the key) reports
+            # False and leaves the in-memory entry unchanged -- contract:
+            # renew "succeeds ONLY if this token still owns".
+            if not self._renew_durable_fence(lock.key, token, new_expiry):
+                return False
             self._locks[lock.key] = (token, new_expiry)
-            self._renew_durable_fence(lock.key, token, new_expiry)
             return True
 
-    def _renew_durable_fence(self, key: str, token: str, new_expiry: float) -> None:
-        """Best-effort: extend the canonical envelope's owner_expiry (fence
-        unchanged) to match a renewed advisory lock. Bounded retry on a 412;
-        gives up silently (renew() itself already reports the advisory-lock
-        success it determined) rather than raising."""
+    def _renew_durable_fence(self, key: str, token: str, new_expiry: float) -> bool:
+        """Extend the canonical envelope's owner_expiry (fence unchanged) to
+        match a renewed advisory lock. Bounded retry on a 412. Returns True
+        only once the extension is confirmed landed; never raises."""
         for _attempt in range(self._FENCE_RETRY_ATTEMPTS):
             try:
                 env = self._read_envelope(key)
             except (ValueError, _PreSendNetworkError, _PostSendAckLostError, _ObjectStoreTransportError):
-                return
+                return False
             if env is None or env.owner_token != token:
-                return  # nothing to extend, or already superseded
+                return False  # nothing to extend, or already superseded
             new_envelope = _encode_envelope(
                 token, new_expiry, env.owner_fence, env.last_accepted_fence, env.version_hash, env.body,
             )
@@ -1282,12 +1288,13 @@ class ObjectStoreBackend:
                     key, new_envelope, precondition={"If-Match": env.etag}, meta_hash=(env.version_hash or "")
                 )
             except (_PreSendNetworkError, _PostSendAckLostError):
-                return
+                return False
             if status in (200, 201):
-                return
+                return True
             if status == 412:
                 continue
-            return
+            return False
+        return False
 
 
 def _new_token() -> str:

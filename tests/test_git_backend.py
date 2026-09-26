@@ -639,3 +639,35 @@ def test_lock_refuses_to_overwrite_foreign_blob_at_sidecar_path(tmp_path):
     # Other keys are unaffected.
     lease = backend.lock("docs/other", ttl_s=30)
     backend.unlock(lease)
+
+
+def test_renew_reports_false_when_durable_sidecar_push_fails(tmp_path, monkeypatch):
+    """A renew whose sidecar update never reached the remote must report
+    False and leave the local expiry unchanged; once the remote is reachable
+    again the same lease renews normally."""
+    backend = _make_backend(tmp_path, "renew-push-fails")
+    key = "renew/push"
+    lease = backend.lock(key, ttl_s=30.0)
+    before_local = backend._locks[key]
+    before_sidecar = _sidecar(backend, key)
+
+    monkeypatch.setattr(backend, "_push", lambda sha: (False, False, "simulated remote outage"))
+    assert backend.renew(lease, ttl_s=300.0) is False
+    assert backend._locks[key] == before_local
+    monkeypatch.undo()
+    assert _sidecar(backend, key) == before_sidecar
+    assert backend.renew(lease, ttl_s=300.0) is True
+    assert _sidecar(backend, key)[1] > before_sidecar[1] + 200.0
+
+
+def test_renew_reports_false_when_another_instance_superseded_the_sidecar(tmp_path):
+    remote = tmp_path / "remote-shared.git"
+    _init_bare(remote)
+    a = GitBackend(tmp_path / "work-a", remote)
+    b = GitBackend(tmp_path / "work-b", remote)
+    key = "renew/shared"
+    mine = a.lock(key, ttl_s=30.0)
+    theirs = b.lock(key, ttl_s=30.0)
+    assert theirs.fence > mine.fence
+    assert a.renew(mine, ttl_s=300.0) is False
+    assert _sidecar(a, key)[0] == theirs.token

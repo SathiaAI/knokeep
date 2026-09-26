@@ -689,3 +689,37 @@ def test_fence_table_name_never_narrows_the_accepted_table_name_range():
         assert isinstance(r1, OK)
     finally:
         backend._conformance_teardown()
+
+
+def test_deadlock_sqlstate_maps_to_busy_and_create_vs_fenced_cas_never_raises(backend):
+    """Both write paths lock the store row before the fence row, so a
+    create-only racing a fenced CAS-update on the same key cannot deadlock;
+    and should the server ever report 40P01 it is BUSY, never an exception."""
+    from store.postgres import _BUSY_SQLSTATES
+
+    assert "40P01" in _BUSY_SQLSTATES
+    for i in range(12):
+        key = f"race/create-vs-cas-{i}"
+        lease = backend.lock(key, ttl_s=30)   # phantom fence row exists, no store row yet
+        backend.unlock(lease)
+        barrier = threading.Barrier(2)
+        results = [None, None]
+
+        def creator():
+            barrier.wait()
+            results[0] = gate.persist(backend, key, b"created", ctx=create_ctx(), doc_type="system_state")
+
+        def updater():
+            barrier.wait()
+            results[1] = gate.persist(backend, key, b"updated", ctx=overwrite_ctx("0" * 64, lease), doc_type="system_state")
+
+        ts = [threading.Thread(target=creator), threading.Thread(target=updater)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(15)
+        assert all(not t.is_alive() for t in ts)
+        assert isinstance(results[0], OK), results
+        assert isinstance(results[1], (STALE, ERROR)), results   # absent or hash mismatch, or BUSY
+        if isinstance(results[1], ERROR):
+            assert results[1].kind is ErrorKind.BUSY

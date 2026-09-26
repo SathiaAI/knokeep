@@ -947,13 +947,27 @@ class LocalBackend:
             # instances can never both compute the same "next" fence — this
             # closes the exact collision the in-process-only Phase 1
             # allocator left open.
-            owner_path = self._fence_owner_path(key)
-            existing_owner = self._read_fence_owner(owner_path)
-            durable_alloc = existing_owner[2] if existing_owner is not None else 0
-            with self._fence_lock:
-                last_accepted = self._last_accepted_fence.get(key, 0)
-            new_fence = max(durable_alloc, last_accepted) + 1
-            self._write_fence_owner(owner_path, token, expiry, new_fence)
+            #
+            # Advancing the OWNER is additionally serialized with write()'s
+            # own critical section by taking cas.lock here (lock order is
+            # always advisory.lock -> cas.lock; write() never takes
+            # advisory.lock, so there is no cycle): otherwise a write() that
+            # has already passed _fence_ok() but not yet committed could be
+            # overtaken by this lock() and land under a fence that was
+            # superseded before its commit. Bounded, like every lock here.
+            cas_lock = _FileLock(self._cas_lock_path)
+            if not cas_lock.acquire(self._lock_timeout_s):
+                raise BackendBusyError("advisory lock bookkeeping is busy (a write is in progress)")
+            try:
+                owner_path = self._fence_owner_path(key)
+                existing_owner = self._read_fence_owner(owner_path)
+                durable_alloc = existing_owner[2] if existing_owner is not None else 0
+                with self._fence_lock:
+                    last_accepted = self._last_accepted_fence.get(key, 0)
+                new_fence = max(durable_alloc, last_accepted) + 1
+                self._write_fence_owner(owner_path, token, expiry, new_fence)
+            finally:
+                cas_lock.release()
 
             self._write_advisory(path, token, expiry)
             return token, expiry, new_fence

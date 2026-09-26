@@ -214,10 +214,30 @@ _monotonic = time.monotonic
 _wall = time.time
 
 
+# The control doc's complete schema. A value under the control key is
+# recognized as this tool's bookkeeping ONLY if it carries exactly these
+# fields (every required one, no unknown ones) with these types -- a
+# `kind` tag alone is caller-controlled text and would let an ordinary JSON
+# document that happens to contain it be overwritten (target) or omitted
+# (source). Docs written by earlier versions of this module carry the
+# required fields and a subset of the optional ones, so they still parse.
+_NUM = (int, float)
+_LEASE_DOC_REQUIRED = {
+    "kind": (str,), "owner_id": (str,), "write_id": (str,), "started_at": _NUM, "status": (str,),
+}
+_LEASE_DOC_OPTIONAL = {
+    "expires_at": _NUM + (type(None),), "heartbeat_at": _NUM + (type(None),),
+    "prior_owner": (str, type(None)), "took_over_from": (str, type(None)),
+    "released_at": _NUM + (type(None),),
+}
+_LEASE_DOC_STATUSES = ("held", "released")
+
+
 def _parse_lease_doc(blob: Optional[Blob]) -> Optional[dict]:
     """The control doc as a dict if `blob` IS a migration-lease control doc
-    (this tool's own bookkeeping), else None -- meaning the control key holds
-    a REAL data value that must never be repurposed or silently dropped."""
+    (this tool's own bookkeeping, validated against the complete schema
+    above), else None -- meaning the control key holds a REAL data value
+    that must never be repurposed or silently dropped."""
     if blob is None:
         return None
     try:
@@ -225,6 +245,16 @@ def _parse_lease_doc(blob: Optional[Blob]) -> Optional[dict]:
     except Exception:
         return None
     if not isinstance(doc, dict) or doc.get("kind") != _MIGRATION_LEASE_DOC_KIND:
+        return None
+    keys = set(doc)
+    if not set(_LEASE_DOC_REQUIRED) <= keys or not keys <= set(_LEASE_DOC_REQUIRED) | set(_LEASE_DOC_OPTIONAL):
+        return None
+    for field, types in {**_LEASE_DOC_REQUIRED, **_LEASE_DOC_OPTIONAL}.items():
+        if field in doc:
+            value = doc[field]
+            if isinstance(value, bool) or not isinstance(value, types):
+                return None
+    if doc["status"] not in _LEASE_DOC_STATUSES:
         return None
     return doc
 
@@ -340,11 +370,16 @@ class _MigrationLease:
         if _monotonic() - self.last_heartbeat < _MIGRATION_HEARTBEAT_INTERVAL_S:
             return None
         try:
-            renewed = self.target.renew(self.lock, _MIGRATION_LEASE_TTL_S)
+            self.target.renew(self.lock, _MIGRATION_LEASE_TTL_S)
         except Exception as exc:  # noqa: BLE001
             return f"heartbeat renew raised: {exc!r}"
-        if not renewed:
-            return "heartbeat renew failed"
+        # A False renew means the durable fence owner is no longer this lease
+        # (superseded by a contender's lock(), or lapsed). That alone does
+        # not decide ownership -- the CONTROL DOC does: the fenced write below
+        # is refused on FENCE, and _write_doc then either re-acquires the
+        # fence (doc hash still ours: nobody took the lease) or reports the
+        # loss (doc rewritten by another run). Either way no data key is
+        # written under a lease whose ownership was not just re-proven.
         err = self._write_doc(status="held")
         if err is not None:
             return err

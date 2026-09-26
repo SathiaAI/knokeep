@@ -237,7 +237,11 @@ def _fence_table_name(table: str) -> str:
 # Postgres SQLSTATEs that mean "couldn't get the row lock / ran past our own
 # timeout" — definitely-not-committed, never an outcome-unknown kind
 # (JUDGMENT CALL 3).
-_BUSY_SQLSTATES = frozenset({"55P03", "57014"})  # lock_not_available, query_canceled
+# 40P01 (deadlock_detected) is included defensively: Postgres aborts one of
+# the two transactions, so it is definitely-not-committed and retryable --
+# though write() takes its row locks in one fixed order (store row, then
+# fence row) on every path precisely so it never deadlocks with itself.
+_BUSY_SQLSTATES = frozenset({"55P03", "57014", "40P01"})  # lock_not_available, query_canceled, deadlock_detected
 
 
 def _sqlstate(exc: BaseException) -> Optional[str]:
@@ -579,14 +583,23 @@ class PostgresBackend:
             # --- CAS-update ---
             # H1 Increment 2, Phase 2: ownership/fence FIRST, checked under
             # the SAME transaction's row locks (SELECT ... FOR UPDATE) as
-            # the hash/generation check and the eventual UPDATE -- Postgres's
-            # own row lock is the linearization point for this whole
-            # check-then-act sequence (the module docstring's existing
-            # rationale for the plain hash CAS, extended here to cover
-            # fence: no other writer can change either row while we hold
-            # both locks, so the two-step "check under lock, then plain
-            # UPDATE" below is exactly as atomic as folding everything into
-            # one UPDATE's WHERE clause would have been).
+            # the hash check and the eventual UPDATE -- Postgres's own row
+            # lock is the linearization point for this whole check-then-act
+            # sequence (the module docstring's existing rationale for the
+            # plain hash CAS, extended here to cover fence: no other writer
+            # can change either row while we hold both locks).
+            # ROW-LOCK ORDER: store row first, then fence row -- the same
+            # order the create-only path above takes (INSERT store, then
+            # upsert fence), so a create racing a fenced CAS on the same key
+            # can never deadlock (each would otherwise hold the row the other
+            # needs). The fence is still EVALUATED first.
+            cur.execute(
+                f"SELECT version_hash, generation FROM {self._qualified_table} WHERE key = %s FOR UPDATE",
+                (k,),
+            )
+            srow = cur.fetchone()
+            current_hash = srow[0] if srow else None
+
             cur.execute(
                 f"""
                 SELECT owner_token, owner_expiry, last_accepted_fence
@@ -604,13 +617,6 @@ class PostgresBackend:
                 and owner_expiry > time.time()
                 and precondition_lease.fence >= last_accepted_fence
             )
-
-            cur.execute(
-                f"SELECT version_hash, generation FROM {self._qualified_table} WHERE key = %s FOR UPDATE",
-                (k,),
-            )
-            srow = cur.fetchone()
-            current_hash = srow[0] if srow else None
 
             if not fence_ok:
                 # Release the row locks FIRST (the racer holding the current

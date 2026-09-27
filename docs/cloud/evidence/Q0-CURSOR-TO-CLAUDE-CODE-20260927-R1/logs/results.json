@@ -1,0 +1,109 @@
+{
+ "head": "be48e86408ff93290e2e750ac04ee2a5bd49e094",
+ "manifest": [
+  {
+   "member": "data/q0cursor/session_log",
+   "bytes": 144,
+   "sha256": "1a51ab6d7d3b9addf7281929b1f76611257de482ce27df06fbf0ac154c563453",
+   "ok": true
+  },
+  {
+   "member": "data/q0cursor/sessions/q0harness",
+   "bytes": 85,
+   "sha256": "5e298f81719c8ad2c0243fec0d3078c5516f96d4f43c91a69ae40e1a801a2c19",
+   "ok": true
+  },
+  {
+   "member": "data/q0cursor/system_state",
+   "bytes": 151,
+   "sha256": "49303af1359672b679c7d62e995f676dde0717842e9dd8a279639ac26cda30a3",
+   "ok": true
+  },
+  {
+   "member": "journal/journal.log",
+   "bytes": 882,
+   "sha256": "aa03c35aca4906491f3055cb6b2570b6a4ed9090a1c206af2f17694284ee905c",
+   "ok": true
+  },
+  {
+   "member": ".knokeep-eval/events.jsonl",
+   "bytes": 315,
+   "sha256": "b82ec376d3865fbc2612e6a948eaf98382e7b23e1b92569cf3449a91b84192e9",
+   "ok": true
+  },
+  {
+   "member": "locks/advisory.lock",
+   "bytes": 0,
+   "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "ok": true
+  },
+  {
+   "member": "locks/cas.lock",
+   "bytes": 0,
+   "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "ok": true
+  },
+  {
+   "member": "locks/fence-alloc/117e3930debd88238c5872c8bc9ef7e209c2de559e6b24dee6a0120bbdcca405.fence",
+   "bytes": 52,
+   "sha256": "3d0e3c030dce781ad1d8a70ccba6af3b3000d52eb6b33248af40cfc73500995b",
+   "ok": true
+  },
+  {
+   "member": "_probe_body.md",
+   "bytes": 47,
+   "sha256": "03ad30ce1f0f6be558f3cedf09dcbab2f672c79aec377d730d2aab38f54cf4eb",
+   "ok": true
+  }
+ ],
+ "manifest_failures": [],
+ "bootstrap_result": {
+  "version_hash": "49303af1359672b679c7d62e995f676dde0717842e9dd8a279639ac26cda30a3",
+  "revision": 2,
+  "log_hash": "1a51ab6d7d3b9addf7281929b1f76611257de482ce27df06fbf0ac154c563453",
+  "active": "## Next Step",
+  "next": "",
+  "conflicts": [],
+  "conflict_count": 0,
+  "settled_count": 0,
+  "resume_line": "resuming: ## Next Step / next: (none) / v49303af13596"
+ },
+ "reads": {
+  "q0cursor/system_state": {
+   "version_hash": "49303af1359672b679c7d62e995f676dde0717842e9dd8a279639ac26cda30a3",
+   "export_sha256": "49303af1359672b679c7d62e995f676dde0717842e9dd8a279639ac26cda30a3",
+   "bytes_equal_export": true,
+   "body": "---\nschema_version: 1\nproject_id: q0cursor\nclient: cowork\nrevision: 2\nupdated: 2026-09-27T22:48:38Z\n---\n## Q0 probe\nq0-cursor-cloud-probe-marker-alpha\n"
+  },
+  "q0cursor/session_log": {
+   "version_hash": "1a51ab6d7d3b9addf7281929b1f76611257de482ce27df06fbf0ac154c563453",
+   "export_sha256": "1a51ab6d7d3b9addf7281929b1f76611257de482ce27df06fbf0ac154c563453",
+   "bytes_equal_export": true,
+   "body": "---\nschema_version: 1\nproject_id: q0cursor\nrevision: 1\nupdated: 2026-09-27T22:48:38Z\n---\n## Completed & Verified\n\n## Active State\n\n## Next Step\n"
+  },
+  "q0cursor/sessions/q0harness": {
+   "version_hash": "5e298f81719c8ad2c0243fec0d3078c5516f96d4f43c91a69ae40e1a801a2c19",
+   "export_sha256": "5e298f81719c8ad2c0243fec0d3078c5516f96d4f43c91a69ae40e1a801a2c19",
+   "bytes_equal_export": true,
+   "body": "## Journal\n[2026-09-27T22:48:38Z] q0-cursor-cloud-probe-marker-alpha via mcp harness\n"
+  }
+ },
+ "listed_keys": [
+  "q0cursor/session_log",
+  "q0cursor/sessions/q0harness",
+  "q0cursor/system_state"
+ ],
+ "scratch_telemetry_appended": true,
+ "checks": {
+  "head_matches": true,
+  "manifest_hash_and_size": true,
+  "strict_verifier_exit_0": true,
+  "bootstrap_exit_0": true,
+  "independent_read_bytes_equal_export": true,
+  "bootstrap_version_hash_equals_export_sha256": true,
+  "bootstrap_log_hash_equals_export_sha256": true,
+  "fixture_bytes_unchanged": true,
+  "fixture_git_diff_clean": true
+ },
+ "all_passed": true
+}

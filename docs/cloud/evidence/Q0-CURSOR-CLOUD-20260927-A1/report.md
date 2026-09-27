@@ -66,11 +66,11 @@ Original probe store path (ephemeral): `receipts/probe_store_path.txt` (under `/
 | Track | Status |
 |---|---|
 | Fresh-session retrieval | **PENDING** — see `continuation.md` |
-| Store transfer via git fixtures | **PASS** (committed export intended) |
-| Commit | *pending this push* |
-| Branch push | *pending this push* |
-| Draft PR | **PENDING** — dispatcher disabled auto-PR; coordinator opens draft |
-| Remote manifest verification | *pending post-push* |
+| Store transfer via git fixtures | **PASS** |
+| Commit | **PASS** — `ac4ac22d27ec1f8b2236b5f63f5e768df79ab5a5` |
+| Branch push | **PASS** — `origin/q0/cursor-cloud/20260927-a1` |
+| Draft PR | **PENDING** — dispatcher disabled auto-PR; coordinator opens draft to `docs/cloud-handoff-2026-09-27` |
+| Remote manifest verification | **PASS** — `receipts/remote_verification.json` |
 
 ## Secret scanning
 

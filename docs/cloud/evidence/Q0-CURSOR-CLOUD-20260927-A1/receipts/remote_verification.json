@@ -1,0 +1,8 @@
+{
+  "verified_at_utc": "2026-09-27T22:50:00Z",
+  "remote_branch": "q0/cursor-cloud/20260927-a1",
+  "remote_head": "ac4ac22d27ec1f8b2236b5f63f5e768df79ab5a5",
+  "method": "git archive origin/q0/cursor-cloud/20260927-a1 + sha256 per MANIFEST.sha256",
+  "manifest_members_ok": 9,
+  "github_fetch_report_md": "PASS"
+}

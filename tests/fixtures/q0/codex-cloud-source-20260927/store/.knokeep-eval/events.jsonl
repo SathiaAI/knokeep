@@ -1,0 +1,6 @@
+{"ts": "2026-09-27T20:29:44Z", "project": "q0-codex-cloud-synthetic", "op": "bootstrap", "decision": "allow", "ok": null}
+{"ts": "2026-09-27T20:29:44Z", "project": "q0-codex-cloud-synthetic", "op": "flush-state", "decision": "allow", "ok": true}
+{"ts": "2026-09-27T20:29:45Z", "project": "q0-codex-cloud-synthetic", "op": "flush-log", "decision": "allow", "ok": true}
+{"ts": "2026-09-27T20:29:45Z", "project": "q0-codex-cloud-synthetic", "op": "session-append", "decision": "block", "reasons": ["high-entropy token"]}
+{"ts": "2026-09-27T20:29:56Z", "project": "q0-codex-cloud-synthetic", "op": "session-append", "decision": "allow", "ok": true}
+{"ts": "2026-09-27T20:29:56Z", "project": "q0-codex-cloud-synthetic", "op": "bootstrap", "decision": "allow", "ok": null}

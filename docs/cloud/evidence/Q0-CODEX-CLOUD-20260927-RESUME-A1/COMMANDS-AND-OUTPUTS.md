@@ -8,7 +8,7 @@ Commands are listed in execution order. `$RESTORE` resolved to `/tmp/knokeep-q0-
 git rev-parse HEAD && cat tests/fixtures/q0/codex-cloud-source-20260927/CONTINUE.md
 ```
 
-```text
+````text
 5637ba7e6f5b980368cdc80a77562c832df0a3d6
 # Separate-session continuation coordinates
 
@@ -28,7 +28,7 @@ python skill/knokeep_state.py bootstrap \
 ```
 
 Record the command output and session identity. Do not read the evidence report before recording the retrieved result. Do not write to the committed fixture.
-```
+````
 
 ## 2. Restore and bootstrap
 

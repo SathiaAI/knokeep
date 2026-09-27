@@ -1,0 +1,11 @@
+## Architecture
+Synthetic Q0 fixture project "lantern-ledger" (not a real project). A CLI that totals lantern oil receipts. Single module ledger.py with a parse() and total() function.
+
+## Path & Variable Directory
+- ledger.py: synthetic module, parse() and total()
+- LANTERN_LEDGER_TOKEN (reference only, value not stored)
+- input checkout: 49e4c1cc6ad75113c97de856a069a670bf0696df
+
+## Hard Constraints
+- Q0 marker: Q0-CLAUDE-CODE-20260927-A1 / canary lantern-7f3a
+- Totals must be computed in integer cents, never floats (decision D-1, replaces rejected float approach).

@@ -1,0 +1,228 @@
+{
+ "backend": "LocalBackend (persistent, explicit --store)",
+ "bootstrap_post": {
+  "active": "- Synthetic: total() rewrite to integer cents is in progress; uncommitted in the fixture.",
+  "conflict_count": 0,
+  "conflicts": [],
+  "log_hash": "3e9baf6bafaf23c50037d747378e24633e28267a761af8fb45cb34add97d046e",
+  "next": "- Synthetic: add a test for negative receipt amounts, then finish total().",
+  "resume_line": "resuming: - Synthetic: total() rewrite to integer cents is in progress; uncommitted in the fixture. / next: - Synthetic: add a test for negative receipt amounts, then finish total(). / v8c4197fde5bb",
+  "revision": 2,
+  "settled_count": 0,
+  "version_hash": "8c4197fde5bbf0a62b9d8124b8d27f2983986d934b120602fafc2c0bdf7f5a29"
+ },
+ "cli": {
+  "exits": {
+   "flush_log": 0,
+   "flush_state": 0,
+   "session_append": 0
+  },
+  "flush_log": {
+   "ok": true,
+   "revision": 2,
+   "version_hash": "3e9baf6bafaf23c50037d747378e24633e28267a761af8fb45cb34add97d046e"
+  },
+  "flush_state": {
+   "ok": true,
+   "revision": 2,
+   "version_hash": "8c4197fde5bbf0a62b9d8124b8d27f2983986d934b120602fafc2c0bdf7f5a29"
+  },
+  "session_append": {
+   "log": "q0-claude-code-a1/sessions/q0-cc-a1-s1",
+   "ok": true
+  }
+ },
+ "client_identity": {
+  "actual_runtime": "claude-code (Claude Code print runtime)",
+  "persisted": {
+   "q0-claude-code-a1-mcp/system_state": [
+    "(no client field)"
+   ],
+   "q0-claude-code-a1/session_log": [
+    "(no client field)"
+   ],
+   "q0-claude-code-a1/sessions/q0-cc-a1-s1": [
+    "client: claude-code"
+   ],
+   "q0-claude-code-a1/system_state": [
+    "client: cowork"
+   ]
+  }
+ },
+ "independent_read": {
+  "comparison": {
+   "q0-claude-code-a1-mcp/system_state": {
+    "reader_sha256_body == raw_file_sha256": true,
+    "version_hash == raw_file_sha256": true
+   },
+   "q0-claude-code-a1/session_log": {
+    "reader_sha256_body == raw_file_sha256": true,
+    "version_hash == raw_file_sha256": true
+   },
+   "q0-claude-code-a1/sessions/q0-cc-a1-s1": {
+    "reader_sha256_body == raw_file_sha256": true,
+    "version_hash == raw_file_sha256": true
+   },
+   "q0-claude-code-a1/system_state": {
+    "reader_sha256_body == raw_file_sha256": true,
+    "version_hash == raw_file_sha256": true
+   }
+  },
+  "raw_files": {
+   "q0-claude-code-a1-mcp/system_state": {
+    "bytes": 573,
+    "sha256_file": "85d9804cc08014a99e8ba8bee381419842e8e2e10c34b8bcc9225b72e5127bf4"
+   },
+   "q0-claude-code-a1/session_log": {
+    "bytes": 385,
+    "sha256_file": "3e9baf6bafaf23c50037d747378e24633e28267a761af8fb45cb34add97d046e"
+   },
+   "q0-claude-code-a1/sessions/q0-cc-a1-s1": {
+    "bytes": 327,
+    "sha256_file": "1b0934c7618a946bbabbc2e152653fef8a50a63912711646de7f8f0b4a4f43b6"
+   },
+   "q0-claude-code-a1/system_state": {
+    "bytes": 686,
+    "sha256_file": "8c4197fde5bbf0a62b9d8124b8d27f2983986d934b120602fafc2c0bdf7f5a29"
+   }
+  },
+  "reader": {
+   "q0-claude-code-a1-mcp/system_state": {
+    "bytes": 573,
+    "head": [
+     "## Architecture",
+     "Synthetic Q0 fixture project \"lantern-ledger\" (not a real project). A CLI that totals lantern oil receipts. Single module ledger.py with a parse() and total() function.",
+     "",
+     "## Path & Variable Directory",
+     "- ledger.py: synthetic module, parse() and total()",
+     "- LANTERN_LEDGER_TOKEN (reference only, value not stored)",
+     "- input checkout: 49e4c1cc6ad75113c97de856a069a670bf0696df",
+     ""
+    ],
+    "sha256_body": "85d9804cc08014a99e8ba8bee381419842e8e2e10c34b8bcc9225b72e5127bf4",
+    "version_hash": "85d9804cc08014a99e8ba8bee381419842e8e2e10c34b8bcc9225b72e5127bf4"
+   },
+   "q0-claude-code-a1/session_log": {
+    "bytes": 385,
+    "head": [
+     "---",
+     "schema_version: 1",
+     "project_id: q0-claude-code-a1",
+     "revision: 2",
+     "updated: 2026-09-27T22:53:39Z",
+     "---",
+     "## Completed & Verified",
+     "- Synthetic: parse() handles blank lines (Q0 marker lantern-7f3a)."
+    ],
+    "sha256_body": "3e9baf6bafaf23c50037d747378e24633e28267a761af8fb45cb34add97d046e",
+    "version_hash": "3e9baf6bafaf23c50037d747378e24633e28267a761af8fb45cb34add97d046e"
+   },
+   "q0-claude-code-a1/sessions/q0-cc-a1-s1": {
+    "bytes": 327,
+    "head": [
+     "---",
+     "schema_version: 1",
+     "project_id: q0-claude-code-a1",
+     "session_id: q0-cc-a1-s1",
+     "client: claude-code",
+     "updated: 2026-09-27T22:53:40Z",
+     "---",
+     "## Journal"
+    ],
+    "sha256_body": "1b0934c7618a946bbabbc2e152653fef8a50a63912711646de7f8f0b4a4f43b6",
+    "version_hash": "1b0934c7618a946bbabbc2e152653fef8a50a63912711646de7f8f0b4a4f43b6"
+   },
+   "q0-claude-code-a1/system_state": {
+    "bytes": 686,
+    "head": [
+     "---",
+     "schema_version: 1",
+     "project_id: q0-claude-code-a1",
+     "client: cowork",
+     "revision: 2",
+     "updated: 2026-09-27T22:53:39Z",
+     "---",
+     "## Architecture"
+    ],
+    "sha256_body": "8c4197fde5bbf0a62b9d8124b8d27f2983986d934b120602fafc2c0bdf7f5a29",
+    "version_hash": "8c4197fde5bbf0a62b9d8124b8d27f2983986d934b120602fafc2c0bdf7f5a29"
+   }
+  }
+ },
+ "inputs": {
+  "docs/cloud/evidence/Q0-CLAUDE-CODE-20260927-A1/inputs/journal_entry.txt": {
+   "bytes": 162,
+   "sha256": "a8cbd5f694c3ac5c5d2f13a268487ab8a17de655e7a763661825d540f6bb68fb"
+  },
+  "docs/cloud/evidence/Q0-CLAUDE-CODE-20260927-A1/inputs/session_log.md": {
+   "bytes": 287,
+   "sha256": "a01007fc2f41ac52075981a67645818cc9d6c42a1a082cadf518f5977c94928a"
+  },
+  "docs/cloud/evidence/Q0-CLAUDE-CODE-20260927-A1/inputs/system_state.md": {
+   "bytes": 573,
+   "sha256": "85d9804cc08014a99e8ba8bee381419842e8e2e10c34b8bcc9225b72e5127bf4"
+  }
+ },
+ "job": "Q0-CLAUDE-CODE-20260927-A1",
+ "mcp_harness": {
+  "exit": 0,
+  "responses": [
+   {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+     "capabilities": {
+      "tools": {}
+     },
+     "protocolVersion": "2024-11-05",
+     "serverInfo": {
+      "name": "knokeep-mcp",
+      "version": "0.1.0"
+     }
+    }
+   },
+   {
+    "id": 2,
+    "jsonrpc": "2.0",
+    "result": {
+     "tool_names": [
+      "knokeep_read",
+      "knokeep_list",
+      "knokeep_write",
+      "knokeep_reconcile",
+      "knokeep_health"
+     ]
+    }
+   },
+   {
+    "id": 3,
+    "jsonrpc": "2.0",
+    "result": {
+     "content": [
+      {
+       "text": "{\"commit_class\": \"committed\", \"new_hash\": \"85d9804cc08014a99e8ba8bee381419842e8e2e10c34b8bcc9225b72e5127bf4\", \"status\": \"OK\"}",
+       "type": "text"
+      }
+     ],
+     "isError": false
+    }
+   },
+   {
+    "id": 4,
+    "jsonrpc": "2.0",
+    "result": {
+     "text_sha256": "234c26cd5e8a2842bc7e760d34b1baf51da30879c583a033f5f20cd362e05fb1",
+     "truncated_for_log": true
+    }
+   }
+  ]
+ },
+ "project": "q0-claude-code-a1",
+ "secret_gate_negative_control": {
+  "exit": 1,
+  "expected": "rejected",
+  "result": null,
+  "value_logged": false
+ },
+ "store": "$REPO/.q0-run/store"
+}

@@ -1,0 +1,72 @@
+{
+ "job": "Q0-CLAUDE-CODE-20260927-A1",
+ "project": "q0-claude-code-a1",
+ "source": "$REPO/.q0-run/store",
+ "export": "tests/fixtures/q0/Q0-CLAUDE-CODE-20260927-A1/store",
+ "members": [
+  {
+   "path": ".knokeep-eval/events.jsonl",
+   "bytes": 951,
+   "sha256": "8614bf77e83bbd9a0616c1537bf27af87d85b38fb74ecc27d349ed89734809a6",
+   "copy_matches": true
+  },
+  {
+   "path": "data/q0-claude-code-a1-mcp/system_state",
+   "bytes": 573,
+   "sha256": "85d9804cc08014a99e8ba8bee381419842e8e2e10c34b8bcc9225b72e5127bf4",
+   "copy_matches": true
+  },
+  {
+   "path": "data/q0-claude-code-a1/session_log",
+   "bytes": 385,
+   "sha256": "3e9baf6bafaf23c50037d747378e24633e28267a761af8fb45cb34add97d046e",
+   "copy_matches": true
+  },
+  {
+   "path": "data/q0-claude-code-a1/sessions/q0-cc-a1-s1",
+   "bytes": 327,
+   "sha256": "1b0934c7618a946bbabbc2e152653fef8a50a63912711646de7f8f0b4a4f43b6",
+   "copy_matches": true
+  },
+  {
+   "path": "data/q0-claude-code-a1/system_state",
+   "bytes": 686,
+   "sha256": "8c4197fde5bbf0a62b9d8124b8d27f2983986d934b120602fafc2c0bdf7f5a29",
+   "copy_matches": true
+  },
+  {
+   "path": "journal/journal.log",
+   "bytes": 2848,
+   "sha256": "7c2c86ea1039d521c1543520893fa0a540be0132b2a8d03730331debd2482220",
+   "copy_matches": true
+  },
+  {
+   "path": "locks/fence-alloc/096673f867b03c5aa7b5e2214535d66167c5767eadb42cba751b937eaa49e9ac.fence",
+   "bytes": 53,
+   "sha256": "1b06f7a2d068050bd4e6a2b20ef7952dbca98490c986e831190b2b73296b2641",
+   "copy_matches": true
+  },
+  {
+   "path": "locks/fence-alloc/a0fb7d2bca039278e70e2538c8402b7384f7c66c94804aefe5f28370447ff9da.fence",
+   "bytes": 53,
+   "sha256": "9e0add31074c2889c0e1bc6341b88362d37672c768f263f40968eca39642795c",
+   "copy_matches": true
+  },
+  {
+   "path": "locks/fence-alloc/a96db41d54131b5059d90bdc651c3dabcbebf71c998a6dfd4b9d81b62f2aa298.fence",
+   "bytes": 52,
+   "sha256": "56d702355e39c0e89bd14d57d43e3404ea3d36b58e3dee65f5490a112ab89dd6",
+   "copy_matches": true
+  }
+ ],
+ "omitted_transient": [
+  {
+   "path": "locks/advisory.lock",
+   "bytes": 1
+  },
+  {
+   "path": "locks/cas.lock",
+   "bytes": 1
+  }
+ ]
+}

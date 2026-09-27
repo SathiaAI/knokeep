@@ -1,0 +1,77 @@
+RUN_ID=q0-codex-cloud-20260927T202943Z-9730d654cca4
+STARTED_AT=2026-09-27T20:29:44Z
+CHECKOUT_COMMIT=49e4c1cc6ad75113c97de856a069a670bf0696df
+BRANCH=work
+RUNTIME_KERNEL=Linux 6.18.44 x86_64 GNU/Linux
+PYTHON=Python 3.12.13
+NODE=v20.20.2
+PROJECT=q0-codex-cloud-synthetic
+STORE=/tmp/knokeep-q0-codex-cloud-20260927T202943Z-9730d654cca4
+$ python skill/knokeep_state.py bootstrap --store "$STORE" --project "$PROJECT"
+{"version_hash": null, "revision": null, "log_hash": null, "active": "", "next": "", "conflicts": [], "conflict_count": 0, "settled_count": 0, "resume_line": "resuming: (none) / next: (none) / v?"}
+$ python skill/knokeep_state.py flush-state --store "$STORE" --project "$PROJECT" --client codex-cloud --body-file <synthetic-state>
+{"ok": true, "revision": 1, "version_hash": "87164697d7b3b601b59df5c38c30dc4ea3dacc336f122c864231bc37c990f53f"}
+$ python skill/knokeep_state.py flush-log --store "$STORE" --project "$PROJECT" --client codex-cloud --body-file <synthetic-log>
+{"ok": true, "revision": 1, "version_hash": "fa80e5a2262bca138a5ff159cb548e30c84a654c361a09acea0b42fc6d83384e"}
+$ python skill/knokeep_state.py session-append --store "$STORE" --project "$PROJECT" --client codex-cloud --session-id "$RUN_ID" --entry <synthetic-entry>
+NOTE: first session-append was correctly blocked by the secret gate because the synthetic entry contained high-entropy identifiers; no journal write occurred.
+$ python skill/knokeep_state.py session-append ... --entry <revised-low-entropy-entry>
+{"ok": true, "log": "q0-codex-cloud-synthetic/sessions/q0codexcloudone"}
+$ python skill/knokeep_state.py bootstrap --store "$STORE" --project "$PROJECT"
+{"version_hash": "87164697d7b3b601b59df5c38c30dc4ea3dacc336f122c864231bc37c990f53f", "revision": 1, "log_hash": "fa80e5a2262bca138a5ff159cb548e30c84a654c361a09acea0b42fc6d83384e", "active": "Q0 Codex cloud smoke test evidence collection.", "next": "In a genuinely separate Codex cloud session, bootstrap this exact store and report marker violet-orbit-7319 before reading this evidence report.", "conflicts": [], "conflict_count": 0, "settled_count": 0, "resume_line": "resuming: Q0 Codex cloud smoke test evidence collection. / next: In a genuinely separate Codex cloud session, bootstrap this exact store and report marker violet-orbit-7319 before reading this evidence report. / v87164697d7b3"}
+$ find "$STORE" -type f -printf "%P %s bytes\\n" | sort
+.knokeep-eval/events.jsonl 767 bytes
+data/q0-codex-cloud-synthetic/session_log 453 bytes
+data/q0-codex-cloud-synthetic/sessions/q0codexcloudone 292 bytes
+data/q0-codex-cloud-synthetic/system_state 434 bytes
+journal/journal.log 1469 bytes
+locks/advisory.lock 0 bytes
+locks/cas.lock 0 bytes
+locks/fence-alloc/3e004db5d5a596204cf382b60d65da06c6cba8ec2719f854a7271d58c35326c0.fence 53 bytes
+locks/fence-alloc/4ff973e95ea1b1b80ab9a1268a096cdba578b974e4161375e26be5283ea77f14.fence 51 bytes
+locks/fence-alloc/78ebb9f9ef75cb96812baac6eec7bba8dceb4190056124bc3bfdcb3f2e8e1e6b.fence 53 bytes
+locks/fence-alloc/f254dc343ea96d28c9259ec1c699d16590f027a8075a7328dc718064dd4810df.fence 53 bytes
+$ sha256sum <all store files>
+3013bd65c3ee8409b5d2b1559fb1644069270e87fcb3f4871b309ea703edab07  /tmp/knokeep-q0-codex-cloud-20260927T202943Z-9730d654cca4/.knokeep-eval/events.jsonl
+fa80e5a2262bca138a5ff159cb548e30c84a654c361a09acea0b42fc6d83384e  /tmp/knokeep-q0-codex-cloud-20260927T202943Z-9730d654cca4/data/q0-codex-cloud-synthetic/session_log
+77692f66feb86a79f3e7c2791e3e74df1a4538ac5c7077f6dd40cf3090273399  /tmp/knokeep-q0-codex-cloud-20260927T202943Z-9730d654cca4/data/q0-codex-cloud-synthetic/sessions/q0codexcloudone
+87164697d7b3b601b59df5c38c30dc4ea3dacc336f122c864231bc37c990f53f  /tmp/knokeep-q0-codex-cloud-20260927T202943Z-9730d654cca4/data/q0-codex-cloud-synthetic/system_state
+feb4770f2b9db767c089da37c66a965b00e69da82875601d306605eca15fc0a8  /tmp/knokeep-q0-codex-cloud-20260927T202943Z-9730d654cca4/journal/journal.log
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  /tmp/knokeep-q0-codex-cloud-20260927T202943Z-9730d654cca4/locks/advisory.lock
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  /tmp/knokeep-q0-codex-cloud-20260927T202943Z-9730d654cca4/locks/cas.lock
+ce669b693c66a5e9b4d2f057faf019342bd421b034e42b9cac787254a2583aa3  /tmp/knokeep-q0-codex-cloud-20260927T202943Z-9730d654cca4/locks/fence-alloc/3e004db5d5a596204cf382b60d65da06c6cba8ec2719f854a7271d58c35326c0.fence
+91ad17524a5bf7ab5684f13635bf4686e213f045fa95f45b14d4a0eb02b93d7c  /tmp/knokeep-q0-codex-cloud-20260927T202943Z-9730d654cca4/locks/fence-alloc/4ff973e95ea1b1b80ab9a1268a096cdba578b974e4161375e26be5283ea77f14.fence
+104210ba1550cb67b81b2c6f7ae6bb69cdd3ce477a48d1aab313512f92601080  /tmp/knokeep-q0-codex-cloud-20260927T202943Z-9730d654cca4/locks/fence-alloc/78ebb9f9ef75cb96812baac6eec7bba8dceb4190056124bc3bfdcb3f2e8e1e6b.fence
+855b1bdc2c8de0d9a607c78ac2583839bfd57a45cc5eb3eede9a05e7427293c8  /tmp/knokeep-q0-codex-cloud-20260927T202943Z-9730d654cca4/locks/fence-alloc/f254dc343ea96d28c9259ec1c699d16590f027a8075a7328dc718064dd4810df.fence
+$ curl network checks (headers only)
+github_status=000 remote_ip=172.31.1.157 tls_verify=0
+NOTE: shell HTTPS egress check returned proxy HTTP 403 and stopped before PyPI because curl --fail behavior was inherited from set -e.
+$ getent ahostsv4 github.com | head -1
+$ curl -sS ... https://pypi.org/
+pypi_status=000 remote_ip=172.31.1.157 tls_verify=0
+FINISHED_AT=2026-09-27T20:30:04Z
+$ KNOKEEP_STORE=<disposable-store> python <JSON-RPC harness that launches python -m mcp.server and sends initialize, tools/list, knokeep_write, knokeep_read>
+{"id": 1, "jsonrpc": "2.0", "result": {"capabilities": {"tools": {}}, "protocolVersion": "2024-11-05", "serverInfo": {"name": "knokeep-mcp", "version": "0.1.0"}}}
+{"id": 2, "tool_names": ["knokeep_read", "knokeep_list", "knokeep_write", "knokeep_reconcile", "knokeep_health"]}
+{"error": {"code": -32600, "message": "tools/call received before initialization completed ('notifications/initialized' not yet received)"}, "id": 3, "jsonrpc": "2.0"}
+{"error": {"code": -32600, "message": "tools/call received before initialization completed ('notifications/initialized' not yet received)"}, "id": 4, "jsonrpc": "2.0"}
+exit_code= 0
+stderr=
+$ sha256sum <MCP probe stored file>
+NOTE: first MCP harness correctly rejected calls before notifications/initialized; retry includes the required notification.
+$ KNOKEEP_STORE=<disposable-store> python <corrected JSON-RPC harness>
+{"id": 1, "jsonrpc": "2.0", "result": {"capabilities": {"tools": {}}, "protocolVersion": "2024-11-05", "serverInfo": {"name": "knokeep-mcp", "version": "0.1.0"}}}
+{"id": 2, "jsonrpc": "2.0", "result": {"content": [{"text": "{\"commit_class\": \"committed\", \"new_hash\": \"a6f9d7a732af6adb07cc99e59691da0f771c69d71d3177824bff610377a2b48b\", \"status\": \"OK\"}", "type": "text"}], "isError": false}}
+{"id": 3, "jsonrpc": "2.0", "result": {"content": [{"text": "{\"body_b64\": \"U3ludGhldGljIE1DUCBwcm90b2NvbCBtYXJrZXI6IGFtYmVyIG1lYWRvdy4=\", \"found\": true, \"text\": \"Synthetic MCP protocol marker: amber meadow.\", \"version_hash\": \"a6f9d7a732af6adb07cc99e59691da0f771c69d71d3177824bff610377a2b48b\"}", "type": "text"}], "isError": false}}
+exit_code= 0
+stderr=
+$ sha256sum <MCP probe stored file>
+NOTE: the prior corrected-protocol harness still used the server default fake backend, so its successful read was in-memory and is NOT durable evidence. Retry explicitly selects the local backend.
+$ KNOKEEP_STORE=<disposable-store> python <JSON-RPC harness launching python -m mcp.server --backend local>
+{"id": 1, "jsonrpc": "2.0", "result": {"capabilities": {"tools": {}}, "protocolVersion": "2024-11-05", "serverInfo": {"name": "knokeep-mcp", "version": "0.1.0"}}}
+{"id": 2, "jsonrpc": "2.0", "result": {"content": [{"text": "{\"commit_class\": \"committed\", \"new_hash\": \"a6f9d7a732af6adb07cc99e59691da0f771c69d71d3177824bff610377a2b48b\", \"status\": \"OK\"}", "type": "text"}], "isError": false}}
+{"id": 3, "jsonrpc": "2.0", "result": {"content": [{"text": "{\"body_b64\": \"U3ludGhldGljIE1DUCBwcm90b2NvbCBtYXJrZXI6IGFtYmVyIG1lYWRvdy4=\", \"found\": true, \"text\": \"Synthetic MCP protocol marker: amber meadow.\", \"version_hash\": \"a6f9d7a732af6adb07cc99e59691da0f771c69d71d3177824bff610377a2b48b\"}", "type": "text"}], "isError": false}}
+exit_code= 0
+stderr=
+$ sha256sum <MCP probe stored file>
+a6f9d7a732af6adb07cc99e59691da0f771c69d71d3177824bff610377a2b48b  /tmp/knokeep-q0-codex-cloud-20260927T202943Z-9730d654cca4/data/q0-codex-cloud-synthetic/mcp_probe

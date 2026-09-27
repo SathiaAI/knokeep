@@ -1,0 +1,14 @@
+---
+schema_version: 1
+project_id: q0-codex-cloud-synthetic
+revision: 1
+updated: 2026-09-27T20:29:45Z
+---
+## Completed & Verified
+Read the cloud handoff packet and saved disposable synthetic state through the existing KnoKeep CLI.
+
+## Active State
+Q0 Codex cloud smoke test evidence collection.
+
+## Next Step
+In a genuinely separate Codex cloud session, bootstrap this exact store and report marker violet-orbit-7319 before reading this evidence report.

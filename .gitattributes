@@ -1,3 +1,5 @@
 * text=auto eol=lf 
 *.py text eol=lf 
 *.md text eol=lf
+# Preserve the Q0 evidence fixture byte-for-byte across checkout platforms.
+tests/fixtures/q0/codex-cloud-source-20260927/** -text

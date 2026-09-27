@@ -1,0 +1,27 @@
+FILE .knokeep-eval/events.jsonl sha256=75f7869413cf21a98888e21f608ee014e65966b1d3615dc8f0a323fe05817b31 bytes=854
+FILE data/q0-cowork-cloud-a1-plan/session_log sha256=b24a2fe7a1532d2b43905b5e6e9e578af97f815020f53266b3cecae8598cec60 bytes=361
+FILE data/q0-cowork-cloud-a1-plan/sessions/q0-a1-fp sha256=50444da6ff279f0d826e87db52f7785a952534c09f1b522fa6d5a056f4a3f390 bytes=387
+FILE data/q0-cowork-cloud-a1-plan/sessions/q0-a1-mcp-harness sha256=db085a5f44e6d29df685f29c769249f24bb139ea63e87cfef168885127bfe40e bytes=119
+FILE data/q0-cowork-cloud-a1-plan/sessions/q0-a1-s1 sha256=c822546a0058dad41a13cc588707082f493148f6db291f8fb9ce395b4a2561de bytes=337
+FILE data/q0-cowork-cloud-a1-plan/system_state sha256=50bc28e1a8ff0fad007609847d71a1344eb103a9a55ea6f4be25713049e5d898 bytes=759
+FILE journal/journal.log sha256=8aad12fc7d96b4c3171b2cb875f862cbb3f0e1e91671d28e0700a33e3dc316d9 bytes=2992
+FILE locks/advisory.lock sha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 bytes=0
+FILE locks/cas.lock sha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 bytes=0
+FILE locks/fence-alloc/1821de71212279fbde1ccfdacce9d681c44f406d2d3623e48f4a55eb2c686f88.fence sha256=f174ad85ea171820d41d36428f34e8000cf3731153bba4f0fae9121bc84e2bc7 bytes=53
+FILE locks/fence-alloc/5d589d3202b552b9fe16456903bcba70130d89365297c93aeb9d66b8f9549dc9.fence sha256=9d999e55dd83f7c8d301d15a5c313ecd03ed0aba28ec6900b310411d497071be bytes=53
+FILE locks/fence-alloc/7b2e591253c9f74c7e82e6b1c84ebdb6eea66e784782d6d0ac206f5b2900594a.fence sha256=bcd824a6f0f90a7ff6873197bcfcca664fe78959af2599dc6be1e3b35d5d997e bytes=52
+FILE locks/fence-alloc/c4c2c7d076ad65fbdf7be5ce234cf40764a2971c6f85e89c9eb7f944f0feda61.fence sha256=d6df4dc10624cb3768afc819f2bf994a889965ddfc3adb5b51011bb5928ab44f bytes=53
+KEY q0-cowork-cloud-a1-plan/session_log version_hash=b24a2fe7a1532d2b43905b5e6e9e578af97f815020f53266b3cecae8598cec60 sha256(read)=b24a2fe7a1532d2b43905b5e6e9e578af97f815020f53266b3cecae8598cec60 bytes=361 on_disk=['data/q0-cowork-cloud-a1-plan/session_log'] match=True client=[]
+KEY q0-cowork-cloud-a1-plan/sessions/q0-a1-fp version_hash=50444da6ff279f0d826e87db52f7785a952534c09f1b522fa6d5a056f4a3f390 sha256(read)=50444da6ff279f0d826e87db52f7785a952534c09f1b522fa6d5a056f4a3f390 bytes=387 on_disk=['data/q0-cowork-cloud-a1-plan/sessions/q0-a1-fp'] match=True client=['cowork-cloud']
+KEY q0-cowork-cloud-a1-plan/sessions/q0-a1-mcp-harness version_hash=db085a5f44e6d29df685f29c769249f24bb139ea63e87cfef168885127bfe40e sha256(read)=db085a5f44e6d29df685f29c769249f24bb139ea63e87cfef168885127bfe40e bytes=119 on_disk=['data/q0-cowork-cloud-a1-plan/sessions/q0-a1-mcp-harness'] match=True client=[]
+KEY q0-cowork-cloud-a1-plan/sessions/q0-a1-s1 version_hash=c822546a0058dad41a13cc588707082f493148f6db291f8fb9ce395b4a2561de sha256(read)=c822546a0058dad41a13cc588707082f493148f6db291f8fb9ce395b4a2561de bytes=337 on_disk=['data/q0-cowork-cloud-a1-plan/sessions/q0-a1-s1'] match=True client=['cowork-cloud']
+KEY q0-cowork-cloud-a1-plan/system_state version_hash=50bc28e1a8ff0fad007609847d71a1344eb103a9a55ea6f4be25713049e5d898 sha256(read)=50bc28e1a8ff0fad007609847d71a1344eb103a9a55ea6f4be25713049e5d898 bytes=759 on_disk=['data/q0-cowork-cloud-a1-plan/system_state'] match=True client=['cowork']
+RECEIPT 01b-cli-bootstrap-pre.out addde3b571aa41016c71ead8b4c7663406fc18b0b3be1050a3aa75c0d73c4ada on_disk=False
+RECEIPT 01b-cli-bootstrap-pre.out b8da241acaaeecf1693afd82c7a067154c2377934691fbc78974610a6c6e7025 on_disk=False
+RECEIPT 02-cli-flush-state.out 50bc28e1a8ff0fad007609847d71a1344eb103a9a55ea6f4be25713049e5d898 on_disk=True
+RECEIPT 03-cli-flush-log.out b24a2fe7a1532d2b43905b5e6e9e578af97f815020f53266b3cecae8598cec60 on_disk=True
+RECEIPT 06-cli-bootstrap.out 50bc28e1a8ff0fad007609847d71a1344eb103a9a55ea6f4be25713049e5d898 on_disk=True
+RECEIPT 06-cli-bootstrap.out b24a2fe7a1532d2b43905b5e6e9e578af97f815020f53266b3cecae8598cec60 on_disk=True
+RECEIPT 07-mcp-harness.out 50bc28e1a8ff0fad007609847d71a1344eb103a9a55ea6f4be25713049e5d898 on_disk=True
+RECEIPT 07-mcp-harness.out db085a5f44e6d29df685f29c769249f24bb139ea63e87cfef168885127bfe40e on_disk=True
+VERIFY_RESULT PASS

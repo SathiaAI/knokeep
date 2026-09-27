@@ -1,0 +1,1 @@
+python3 skill/knokeep_state.py session-append --store $STORE --project q0-cowork-cloud-a1-plan --session-id q0-a1-fp --client cowork-cloud --entry-file docs/cloud/evidence/Q0-COWORK-CLOUD-20260927-A1/inputs/fp_probe_entry.txt 

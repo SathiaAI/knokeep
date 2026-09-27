@@ -1,0 +1,1 @@
+MCP harness write (shell-created stdio harness, LocalBackend): synthetic note that plan-v2.md is the current artifact.

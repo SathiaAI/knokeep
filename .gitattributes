@@ -1,3 +1,5 @@
 * text=auto eol=lf 
 *.py text eol=lf 
 *.md text eol=lf
+# Q0-COWORK-CLOUD-20260927-A1: preserve exported store bytes verbatim (evidence-only rule)
+tests/fixtures/q0/Q0-COWORK-CLOUD-20260927-A1/** -text

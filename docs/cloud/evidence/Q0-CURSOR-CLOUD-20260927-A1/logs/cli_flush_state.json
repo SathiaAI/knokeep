@@ -1,0 +1,6 @@
+{
+  "cmd": "flush-state",
+  "exit_code": 0,
+  "stderr": "",
+  "stdout": "{\"ok\": true, \"revision\": 2, \"version_hash\": \"49303af1359672b679c7d62e995f676dde0717842e9dd8a279639ac26cda30a3\"}"
+}

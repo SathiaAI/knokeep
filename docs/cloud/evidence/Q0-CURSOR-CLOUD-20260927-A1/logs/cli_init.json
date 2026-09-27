@@ -1,0 +1,6 @@
+{
+  "cmd": "init",
+  "exit_code": 0,
+  "stderr": "",
+  "stdout": "{\"ok\": true, \"base\": \"/tmp/q0_cursor_probe_vz7fb0hm/data/q0cursor\"}"
+}

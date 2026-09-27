@@ -1,0 +1,6 @@
+{
+  "cmd": "bootstrap",
+  "exit_code": 0,
+  "stderr": "",
+  "stdout": "{\"version_hash\": \"9743f48a9cbd7e9a2a3981e1add473f2b5b8b3676eecf7af1e9a5c9c02872bb6\", \"revision\": 1, \"log_hash\": \"1a51ab6d7d3b9addf7281929b1f76611257de482ce27df06fbf0ac154c563453\", \"active\": \"## Next Step\", \"next\": \"\", \"conflicts\": [], \"conflict_count\": 0, \"settled_count\": 0, \"resume_line\": \"resuming: ## Next Step / next: (none) / v9743f48a9cbd\"}"
+}

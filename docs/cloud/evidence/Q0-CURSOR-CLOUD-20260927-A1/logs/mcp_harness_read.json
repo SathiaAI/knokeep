@@ -1,0 +1,9 @@
+{
+  "isError": false,
+  "payload": {
+    "body_b64": "IyMgSm91cm5hbApbMjAyNi0wOS0yN1QyMjo0ODozOFpdIHEwLWN1cnNvci1jbG91ZC1wcm9iZS1tYXJrZXItYWxwaGEgdmlhIG1jcCBoYXJuZXNzCg==",
+    "found": true,
+    "text": "## Journal\n[2026-09-27T22:48:38Z] q0-cursor-cloud-probe-marker-alpha via mcp harness\n",
+    "version_hash": "5e298f81719c8ad2c0243fec0d3078c5516f96d4f43c91a69ae40e1a801a2c19"
+  }
+}

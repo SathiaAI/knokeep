@@ -1,0 +1,3 @@
+{"ts": "2026-09-27T22:48:38Z", "project": "q0cursor", "op": "init", "decision": "allow", "ok": true}
+{"ts": "2026-09-27T22:48:38Z", "project": "q0cursor", "op": "bootstrap", "decision": "allow", "ok": null}
+{"ts": "2026-09-27T22:48:38Z", "project": "q0cursor", "op": "flush-state", "decision": "allow", "ok": true}

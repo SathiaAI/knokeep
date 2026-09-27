@@ -1,0 +1,8 @@
+{"ts": "2026-09-27T22:53:39Z", "project": "q0-claude-code-a1", "op": "init", "decision": "allow", "ok": true}
+{"ts": "2026-09-27T22:53:39Z", "project": "q0-claude-code-a1", "op": "bootstrap", "decision": "allow", "ok": null}
+{"ts": "2026-09-27T22:53:39Z", "project": "q0-claude-code-a1", "op": "flush-state", "decision": "allow", "ok": true}
+{"ts": "2026-09-27T22:53:39Z", "project": "q0-claude-code-a1", "op": "flush-log", "decision": "allow", "ok": true}
+{"ts": "2026-09-27T22:53:40Z", "project": "q0-claude-code-a1", "op": "session-append", "decision": "allow", "ok": true}
+{"ts": "2026-09-27T22:53:40Z", "project": "q0-claude-code-a1", "op": "bootstrap", "decision": "allow", "ok": null}
+{"ts": "2026-09-27T22:53:40Z", "project": "q0-claude-code-a1", "op": "flush-state", "decision": "block", "reasons": ["AWS access key"]}
+{"ts": "2026-09-27T22:53:40Z", "project": "q0-claude-code-a1", "op": "bootstrap", "decision": "allow", "ok": null}

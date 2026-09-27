@@ -1,0 +1,9 @@
+---
+schema_version: 1
+project_id: q0-claude-code-a1
+session_id: q0-cc-a1-s1
+client: claude-code
+updated: 2026-09-27T22:53:40Z
+---
+## Journal
+[2026-09-27T22:53:40Z] Q0 source journal entry from Claude Code print runtime, job Q0-CLAUDE-CODE-20260927-A1, marker lantern-7f3a. Decision D-1: integer cents; float approach rejected.

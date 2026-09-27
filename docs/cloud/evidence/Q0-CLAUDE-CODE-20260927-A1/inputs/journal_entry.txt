@@ -1,0 +1,1 @@
+Q0 source journal entry from Claude Code print runtime, job Q0-CLAUDE-CODE-20260927-A1, marker lantern-7f3a. Decision D-1: integer cents; float approach rejected.

@@ -1,0 +1,23 @@
+FILE .knokeep-eval/events.jsonl sha256=935ffdc60e6e3d02330e0596048eecf409efa9e2e3c6acbb38c4d53ee63c7901 bytes=971
+FILE data/q0-cowork-cloud-a1-plan/session_log sha256=25224f23eaf7936b87e09b555e3ea8bcb77c506739b76fcdc1aa4e6df7f07278 bytes=159
+FILE data/q0-cowork-cloud-a1-plan/sessions/q0-a1-fp sha256=65e55dd4e5eb97beb5dba14f4c1f276f535eaea083824ba603c9ffa16c827507 bytes=387
+FILE data/q0-cowork-cloud-a1-plan/sessions/q0-a1-mcp-harness sha256=db085a5f44e6d29df685f29c769249f24bb139ea63e87cfef168885127bfe40e bytes=119
+FILE data/q0-cowork-cloud-a1-plan/sessions/q0-a1-s1 sha256=591ffef54e198789e944a4b2e66f50aeaf17a407448615840bfdf15bc56fae14 bytes=337
+FILE data/q0-cowork-cloud-a1-plan/system_state sha256=4bd3136707e5e657dab73642bfce792e4d0bfb9aaf365ab97210217bbff3ff9b bytes=204
+FILE journal/journal.log sha256=f78148b7bb7afb27cfb6ebb633d24c1565340abcbc7e22ac6bd118d1298fe3d8 bytes=1689
+FILE locks/advisory.lock sha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 bytes=0
+FILE locks/cas.lock sha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 bytes=0
+FILE locks/fence-alloc/1821de71212279fbde1ccfdacce9d681c44f406d2d3623e48f4a55eb2c686f88.fence sha256=7995295ef3fbc94019eb8a51539acbaf9209420d36615ccbdfc718218b1ca559 bytes=53
+FILE locks/fence-alloc/5d589d3202b552b9fe16456903bcba70130d89365297c93aeb9d66b8f9549dc9.fence sha256=7ed2b103189e9c9de59a1a709c34475fabf1bd9f4e8d5d44abafce25ee9a25b8 bytes=53
+FILE locks/fence-alloc/7b2e591253c9f74c7e82e6b1c84ebdb6eea66e784782d6d0ac206f5b2900594a.fence sha256=0d34b6dfdbe6ab6161d4a0b741ae00cb5ebcbb0a7882d4079d18aaab59b3e8df bytes=53
+FILE locks/fence-alloc/c4c2c7d076ad65fbdf7be5ce234cf40764a2971c6f85e89c9eb7f944f0feda61.fence sha256=6d8eee1ad31faf9724e4ee77dfdee7d20ebd3b47ff8e4fa046056435e4072638 bytes=53
+KEY q0-cowork-cloud-a1-plan/session_log version_hash=25224f23eaf7936b87e09b555e3ea8bcb77c506739b76fcdc1aa4e6df7f07278 sha256(read)=25224f23eaf7936b87e09b555e3ea8bcb77c506739b76fcdc1aa4e6df7f07278 bytes=159 on_disk=['data/q0-cowork-cloud-a1-plan/session_log'] match=True client=[]
+KEY q0-cowork-cloud-a1-plan/sessions/q0-a1-fp version_hash=65e55dd4e5eb97beb5dba14f4c1f276f535eaea083824ba603c9ffa16c827507 sha256(read)=65e55dd4e5eb97beb5dba14f4c1f276f535eaea083824ba603c9ffa16c827507 bytes=387 on_disk=['data/q0-cowork-cloud-a1-plan/sessions/q0-a1-fp'] match=True client=['cowork-cloud']
+KEY q0-cowork-cloud-a1-plan/sessions/q0-a1-mcp-harness version_hash=db085a5f44e6d29df685f29c769249f24bb139ea63e87cfef168885127bfe40e sha256(read)=db085a5f44e6d29df685f29c769249f24bb139ea63e87cfef168885127bfe40e bytes=119 on_disk=['data/q0-cowork-cloud-a1-plan/sessions/q0-a1-mcp-harness'] match=True client=[]
+KEY q0-cowork-cloud-a1-plan/sessions/q0-a1-s1 version_hash=591ffef54e198789e944a4b2e66f50aeaf17a407448615840bfdf15bc56fae14 sha256(read)=591ffef54e198789e944a4b2e66f50aeaf17a407448615840bfdf15bc56fae14 bytes=337 on_disk=['data/q0-cowork-cloud-a1-plan/sessions/q0-a1-s1'] match=True client=['cowork-cloud']
+KEY q0-cowork-cloud-a1-plan/system_state version_hash=4bd3136707e5e657dab73642bfce792e4d0bfb9aaf365ab97210217bbff3ff9b sha256(read)=4bd3136707e5e657dab73642bfce792e4d0bfb9aaf365ab97210217bbff3ff9b bytes=204 on_disk=['data/q0-cowork-cloud-a1-plan/system_state'] match=True client=['cowork']
+RECEIPT 06-cli-bootstrap.out 25224f23eaf7936b87e09b555e3ea8bcb77c506739b76fcdc1aa4e6df7f07278 on_disk=True
+RECEIPT 06-cli-bootstrap.out 4bd3136707e5e657dab73642bfce792e4d0bfb9aaf365ab97210217bbff3ff9b on_disk=True
+RECEIPT 07-mcp-harness.out 4bd3136707e5e657dab73642bfce792e4d0bfb9aaf365ab97210217bbff3ff9b on_disk=True
+RECEIPT 07-mcp-harness.out db085a5f44e6d29df685f29c769249f24bb139ea63e87cfef168885127bfe40e on_disk=True
+VERIFY_RESULT PASS

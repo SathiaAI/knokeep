@@ -1,0 +1,1 @@
+Q0 cowork-cloud source run: changed D1 from weekly to fortnightly; marked the Sunday-coverage claim obsolete; Saturday staffing left unresolved. Synthetic fixture only.

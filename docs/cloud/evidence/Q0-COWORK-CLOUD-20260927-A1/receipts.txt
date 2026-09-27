@@ -1,0 +1,8 @@
+# Write receipts vs saved bytes (current keys)
+# key | receipt source | receipt sha256 | on-disk sha256 | bytes | match
+system_state | 02-cli-flush-state.out | 50bc28e1a8ff0fad007609847d71a1344eb103a9a55ea6f4be25713049e5d898 | 50bc28e1a8ff0fad007609847d71a1344eb103a9a55ea6f4be25713049e5d898 | 759 | MATCH
+session_log | 09-cli-flush-log-corrected.out | c9b3b1a9a1b8fdd90cf55d36852bcb9191200bec039412cf65372fe65ff215a7 | c9b3b1a9a1b8fdd90cf55d36852bcb9191200bec039412cf65372fe65ff215a7 | 378 | MATCH
+sessions/q0-a1-mcp-harness | 07-mcp-harness.out | db085a5f44e6d29df685f29c769249f24bb139ea63e87cfef168885127bfe40e | db085a5f44e6d29df685f29c769249f24bb139ea63e87cfef168885127bfe40e | 119 | MATCH
+sessions/q0-a1-s1 | 04-cli-session-append.out | NONE (CLI session-append returns {ok,log} only; no hash in receipt) | c822546a0058dad41a13cc588707082f493148f6db291f8fb9ce395b4a2561de 337 | read-back verified by 11-verify-final
+sessions/q0-a1-fp | 05-cli-fp-probe.out | NONE (same) | 50444da6ff279f0d826e87db52f7785a952534c09f1b522fa6d5a056f4a3f390 387 | read-back verified by 11-verify-final
+# superseded (pre-CAS-update) hashes not on disk by design: b8da241a.. (init state), addde3b5.. (init log), b24a2fe7.. (step-03 log, replaced by step 09)

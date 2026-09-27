@@ -1,0 +1,23 @@
+---
+schema_version: 1
+project_id: q0-cowork-cloud-a1-plan
+client: cowork
+revision: 2
+updated: 2026-09-27T23:00:28Z
+---
+# Q0 synthetic planning project: Orchard Library volunteer rota
+
+SYNTHETIC FIXTURE. All names, dates and facts are invented for the KnoKeep Q0 probe.
+
+## Goal
+Publish a one-page volunteer rota plan for the fictional Orchard Library reading room.
+
+## Decisions
+- D1 (CHANGED during source run): rota cadence is fortnightly, replacing the earlier weekly draft.
+- D2: the plan document is plan-v2.md; plan-v1.md is superseded.
+
+## Obsolete claims
+- OBSOLETE: "the rota must cover Sundays" was withdrawn by the fictional coordinator Ada Example.
+
+## Constraints
+- No personal contact details are stored; volunteers are referenced by role only.

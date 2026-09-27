@@ -106,3 +106,14 @@ Draft PR creation via API is therefore not available on this route; not attempte
 ## Publication
 
 (results appended after commit/push)
+
+| Step | Status | Detail |
+|---|---|---|
+| Local commit | PASS | `c5447ac09beabe6b464e0898b9c0acc86ec88a26` (evidence + export); this section added in a follow-up commit on the same branch |
+| Branch push | **BLOCKED** (2 attempts) | git proxy 403: repository not in this session's authorized repository set; fixing requires adding the repo to session sources = new permission, not taken. `logs/14-push.out` |
+| Draft PR | **BLOCKED / NOT ATTEMPTED** | no pushed branch; api.github.com 403 for this repo |
+| Remote verification | **BLOCKED** | nothing published |
+| Delivery | **DELIVERY BLOCKED** | full branch delivered to the coordinator as a git bundle (`q0-cowork-cloud-20260927-a1.bundle`) plus tarball, verified from a clean clone of the bundle. Any later push/PR is **coordinator publication**, not Cowork publication. |
+| Fresh-session retrieval | PENDING | Codex must publish, verify, then start a different task |
+
+Elapsed: 22:58:59Z → ~23:05Z (≈6 min, within the 20-minute cap). Usage/cost: UNAVAILABLE.

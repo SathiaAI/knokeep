@@ -1,0 +1,45 @@
+{
+  "job_id": "Q0-CURSOR-CLOUD-20260927-A1",
+  "attempt_generation": 1,
+  "recorded_at_utc": "2026-09-27T22:47:04Z",
+  "git": {
+    "input_commit_required": "49e4c1cc6ad75113c97de856a069a670bf0696df",
+    "head_at_start": "49e4c1cc6ad75113c97de856a069a670bf0696df",
+    "branch_at_start": "q0/cursor-cloud/20260927-a1",
+    "checkout_blocked": false
+  },
+  "cursor_cloud": {
+    "bc_id": "bc-6d5ec32a-49dd-4673-9444-b5ba89a0533f",
+    "run_url": "https://cursor.com/agents/bc-6d5ec32a-49dd-4673-9444-b5ba89a0533f",
+    "source": "api",
+    "original_model": "composer-2.5",
+    "dispatcher_pinned_source_ref": "49e4c1cc6ad75113c97de856a069a670bf0696df",
+    "dispatcher_target_branch": "q0/cursor-cloud/20260927-a1"
+  },
+  "runtime": {
+    "os": "Linux cursor 6.12.94+ x86_64",
+    "python": "3.12.3",
+    "node": "v22.14.0",
+    "memory_total": "15Gi",
+    "memory_available_at_start": "6.8Gi"
+  },
+  "authentication_mode": "Cursor Cloud managed session (no credentials recorded)",
+  "egress": {
+    "restricted": false,
+    "note": "from cursor-cloud environment-info"
+  },
+  "dynamic_mcp_namespaces_observed": [
+    "KnoTrack",
+    "Github",
+    "cursor-cloud",
+    "cursor",
+    "Playwright",
+    "Vercel",
+    "Supabase",
+    "others per host catalog"
+  ],
+  "knokeep_native_mcp_tools_observed": false,
+  "usage_cost": "UNAVAILABLE",
+  "billing_pool": "UNVERIFIED",
+  "cancellation_stop_probe": "NOT_RUN (bounded job time; stop semantics documented as pending coordinator probe per brief)"
+}

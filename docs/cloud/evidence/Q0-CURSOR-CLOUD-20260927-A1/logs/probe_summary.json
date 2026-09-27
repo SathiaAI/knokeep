@@ -1,0 +1,67 @@
+{
+  "cli_system_state_hash": "49303af1359672b679c7d62e995f676dde0717842e9dd8a279639ac26cda30a3",
+  "job": "Q0-CURSOR-CLOUD-20260927-A1",
+  "probe_finished_at": "2026-09-27T22:48:38Z",
+  "results": [
+    {
+      "exit_code": 0,
+      "reason": "",
+      "status": "PASS",
+      "step": "cli_init"
+    },
+    {
+      "reason": "",
+      "status": "PASS",
+      "step": "cli_bootstrap",
+      "version_hash": "9743f48a9cbd7e9a2a3981e1add473f2b5b8b3676eecf7af1e9a5c9c02872bb6"
+    },
+    {
+      "reason": "",
+      "status": "PASS",
+      "step": "cli_flush_state",
+      "version_hash": "49303af1359672b679c7d62e995f676dde0717842e9dd8a279639ac26cda30a3"
+    },
+    {
+      "expected_hash": "49303af1359672b679c7d62e995f676dde0717842e9dd8a279639ac26cda30a3",
+      "independent": {
+        "body_len": 151,
+        "found": true,
+        "marker_present": true,
+        "version_hash": "49303af1359672b679c7d62e995f676dde0717842e9dd8a279639ac26cda30a3"
+      },
+      "reason": "",
+      "status": "PASS",
+      "step": "independent_read_after_cli"
+    },
+    {
+      "key": "q0cursor/sessions/q0harness",
+      "reason": "",
+      "status": "PASS",
+      "step": "mcp_protocol_harness_write",
+      "version_hash": "5e298f81719c8ad2c0243fec0d3078c5516f96d4f43c91a69ae40e1a801a2c19"
+    },
+    {
+      "found": true,
+      "reason": "",
+      "status": "PASS",
+      "step": "mcp_protocol_harness_read",
+      "version_hash": "5e298f81719c8ad2c0243fec0d3078c5516f96d4f43c91a69ae40e1a801a2c19"
+    },
+    {
+      "blocked": true,
+      "note": "legitimate synthetic marker may be false positive if rejected",
+      "reason": "",
+      "status": "PASS",
+      "step": "secret_gate_synthetic"
+    },
+    {
+      "fake_write_ok": true,
+      "reason": "",
+      "selected_backend": "LocalBackend",
+      "status": "PASS",
+      "step": "fake_backend_not_selected",
+      "store_root": "/tmp/q0_cursor_probe_vz7fb0hm"
+    }
+  ],
+  "store_root": "/tmp/q0_cursor_probe_vz7fb0hm"
+}

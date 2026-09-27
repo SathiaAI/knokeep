@@ -1,0 +1,12 @@
+{
+  "initialize_server": {
+    "name": "knokeep-mcp",
+    "version": "0.1.0"
+  },
+  "write_status": "OK",
+  "write_new_hash": "04b553886dea2b3264dedc5f0d011d740b8334e6e613520d0c4b116f367286ad",
+  "read_found": true,
+  "read_hash": "04b553886dea2b3264dedc5f0d011d740b8334e6e613520d0c4b116f367286ad",
+  "store_root": "/tmp/q0_stdio_mcp_2dle7H",
+  "exit_code": 0
+}

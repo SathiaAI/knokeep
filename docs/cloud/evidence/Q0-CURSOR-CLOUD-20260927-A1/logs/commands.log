@@ -1,0 +1,15 @@
+# Sanitized command log — Q0-CURSOR-CLOUD-20260927-A1
+git rev-parse HEAD
+# 49e4c1cc6ad75113c97de856a069a670bf0696df
+
+python3 docs/cloud/evidence/Q0-CURSOR-CLOUD-20260927-A1/probe_q0.py
+# exit 0 — see logs/probe_summary.json
+
+cd docs/cloud/evidence/Q0-CURSOR-CLOUD-20260927-A1 && ./probe_stdio_mcp.sh
+# exit 0 — see logs/stdio_mcp_harness.log
+
+cd docs/cloud/evidence/Q0-CURSOR-CLOUD-20260927-A1 && ./export_store.sh
+# exported store-export + MANIFEST.sha256
+
+curl -sS -o /dev/null -w "http_code=%{http_code}\n" https://api.github.com/zen
+curl -sS -o /dev/null -w "http_code=%{http_code}\n" https://github.com/SathiaAI/knokeep

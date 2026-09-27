@@ -1,0 +1,2 @@
+# MCP harness write (synthetic)
+Written through the bundled KnoKeep MCP server over stdio JSON-RPC, local backend.

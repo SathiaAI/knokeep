@@ -1,0 +1,21 @@
+-> initialize
+<- {"id": 1, "jsonrpc": "2.0", "result": {"capabilities": {"tools": {}}, "protocolVersion": "2024-11-05", "serverInfo": {"name": "knokeep-mcp", "version": "0.1.0"}}}
+
+-> tools/list
+<- {"id": 2, "jsonrpc": "2.0", "result": {"tools": [{"description": "Read a blob by key. Returns its bytes verbatim (base64) plus its version_hash, or found=false if the key does not exist. Never follows a URL/path/ref or resolves a pointer to a live secret \u2014 bytes are returned exactly as stored.", "inputSchema": {"additionalProperties": false, "properties": {"key": {"type": "string"}}, "required": ["key"], "type": "object"}, "name": "knokeep_read"}, {"description": "List stored keys matching a prefix.", "inputSchema": {"additionalProperties": false, "properties": {"prefix": {"default": "", "type": "string"}}, "type": "object"}, "name": "knokeep_list"}, {"description": "Write a blob through the secret gate (store.gate.persist) \u2014 never a raw adapter write. Provide exactly one of 'bod
+
+tools: ['knokeep_read', 'knokeep_list', 'knokeep_write', 'knokeep_reconcile', 'knokeep_health'] 
+
+-> tools/call
+<- {"error": {"code": -32600, "message": "tools/call received before initialization completed ('notifications/initialized' not yet received)"}, "id": 3, "jsonrpc": "2.0"}
+
+-> tools/call
+<- {"error": {"code": -32600, "message": "tools/call received before initialization completed ('notifications/initialized' not yet received)"}, "id": 4, "jsonrpc": "2.0"}
+
+-> tools/call
+<- {"error": {"code": -32600, "message": "tools/call received before initialization completed ('notifications/initialized' not yet received)"}, "id": 5, "jsonrpc": "2.0"}
+
+-> tools/call
+<- {"error": {"code": -32600, "message": "tools/call received before initialization completed ('notifications/initialized' not yet received)"}, "id": 6, "jsonrpc": "2.0"}
+
+[server exit] 0

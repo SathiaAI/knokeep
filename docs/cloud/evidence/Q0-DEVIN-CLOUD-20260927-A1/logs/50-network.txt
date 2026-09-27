@@ -1,0 +1,5 @@
+GET https://github.com -> http_code=200 curl_exit=0
+GET https://api.github.com -> http_code=403 curl_exit=0
+GET https://pypi.org -> http_code=200 curl_exit=0
+GET https://api.devin.ai -> http_code=404 curl_exit=0
+GET https://example.com -> http_code=200 curl_exit=0

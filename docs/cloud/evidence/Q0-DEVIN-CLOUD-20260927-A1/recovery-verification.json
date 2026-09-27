@@ -1,0 +1,34 @@
+{
+  "job": "Q0-DEVIN-RECOVERY-20260927-A1",
+  "source_receipt": "logs/33-store-file-hashes-final.txt",
+  "recovery_archive_sha256": "5fe76cd12150c219de3ba0708948cae2b12cdf728f92fa60d4a78b6b1f23e6dc",
+  "recovered_original_members": [
+    {
+      "path": ".knokeep-eval/events.jsonl",
+      "bytes": 1893,
+      "sha256": "051aedf4ac107fe3fed4725f4ca960e8306735005835c2039ad8be1a0288dfb6"
+    },
+    {
+      "path": "locks/fence-alloc/c1e73bbc52530a54aa5893c06d28b968350777b5682e10c2cf63ce3403c595df.fence",
+      "bytes": 53,
+      "sha256": "aa4016fcaed6f62a4b3f3290febc2a843e4306e97e8ea004816ff76922c13e3a"
+    },
+    {
+      "path": "locks/fence-alloc/ac3c9c19679d172b9d2edbfcdfc54ad136213fc4ec6371914be0e57dcf70d10c.fence",
+      "bytes": 53,
+      "sha256": "048548fd24c9d98cc7f77168b3f81d3c52316063ecea5dacb91410815d3d6d3b"
+    },
+    {
+      "path": "locks/fence-alloc/816d4724bd5e86090abbbab070335a3f4e453bc455ad0d8b861945ceb2eb3a1e.fence",
+      "bytes": 53,
+      "sha256": "fc97cd96e5f45ae838b2f572981862ff0cdd0bbb6ab84d35e8e966e5049db205"
+    }
+  ],
+  "combined_members": 9,
+  "all_match_original_final_receipt": true,
+  "omitted_transient_zero_byte_files": [
+    "locks/advisory.lock",
+    "locks/cas.lock"
+  ],
+  "reconstructed_files": 0
+}

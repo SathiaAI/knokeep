@@ -1,0 +1,16 @@
+-> initialize {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "q0-devin-cloud-harness", "version": "1"}}
+<- {"id": 1, "jsonrpc": "2.0", "result": {"capabilities": {"tools": {}}, "protocolVersion": "2024-11-05", "serverInfo": {"name": "knokeep-mcp", "version": "0.1.0"}}}
+
+-> tools/call {"name": "knokeep_health", "arguments": {}}
+<- {"id": 2, "jsonrpc": "2.0", "result": {"content": [{"text": "{\"detail\": \"local filesystem backend at /home/ubuntu/q0-store/Q0-DEVIN-CLOUD-20260927-A1\", \"ok\": true}", "type": "text"}], "isError": false}}
+
+-> tools/call {"name": "knokeep_write", "arguments": {"key": "q0-devin-cloud-20260927-a1/mcp_harness_note", "body": "# MCP harness write (synthetic)\nWritten through the bundled KnoKeep MCP server over stdio JSON-R
+<- {"id": 3, "jsonrpc": "2.0", "result": {"content": [{"text": "{\"commit_class\": \"committed\", \"new_hash\": \"df856c8291d13c2a6173f132473ee2a4b7877a32fa763f44cb6ee8cb116a5636\", \"status\": \"OK\"}", "type": "text"}], "isError": false}}
+
+-> tools/call {"name": "knokeep_read", "arguments": {"key": "q0-devin-cloud-20260927-a1/mcp_harness_note"}}
+<- {"id": 4, "jsonrpc": "2.0", "result": {"content": [{"text": "{\"body_b64\": \"IyBNQ1AgaGFybmVzcyB3cml0ZSAoc3ludGhldGljKQpXcml0dGVuIHRocm91Z2ggdGhlIGJ1bmRsZWQgS25vS2VlcCBNQ1Agc2VydmVyIG92ZXIgc3RkaW8gSlNPTi1SUEMsIGxvY2FsIGJhY2tlbmQuCg==\", \"found\": true, \"text\": \"# MCP harness write (synthetic)\\nWritten through the bundled KnoKeep MCP server over stdio JSON-RPC, local backend.\\n\", \"version_hash\": \"df856c8291d13c2a6173f132473ee2a4b7877a32fa763f44cb6ee8cb116a5636\"}", "type": "text"}], "isError": false}}
+
+-> tools/call {"name": "knokeep_list", "arguments": {"prefix": "q0-devin-cloud"}}
+<- {"id": 5, "jsonrpc": "2.0", "result": {"content": [{"text": "{\"keys\": [\"q0-devin-cloud-20260927-a1/mcp_harness_note\", \"q0-devin-cloud-20260927-a1/session_log\", \"q0-devin-cloud-20260927-a1/sessions/Q0-DEVIN-CLOUD-20260927-A1\", \"q0-devin-cloud-20260927-a1/system_state\"]}", "type": "text"}], "isError": false}}
+
+[server exit] 0

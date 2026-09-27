@@ -32,4 +32,14 @@ For a mechanical Q0 restore, public fixtures and reports can be used if exposure
 
 [Draft evidence PR #5](https://github.com/SathiaAI/knokeep/pull/5) contains the original report and abbreviated command log. The coordinator published it after checking the two-file diff. The initial GitHub head was `b6fb90908cf87f9a78290c9d60588d5f1c9c0c16`; the source task's local commit label was `48feda1`. Publication changed the Git commit identifier, so verify the remote head rather than assuming the sandbox SHA exists on GitHub.
 
-The source task was given a bounded follow-up, `Q0-CODEX-CLOUD-20260927-EXPORT-A1`, to preserve the original synthetic store and provide a reproducible continuation. Its completion and a new-task retrieval must be recorded separately. Overall Q0 remains incomplete until the missing observations exist. See the [coordinator review](q0-codex-cloud-review.md).
+The source task completed follow-up `Q0-CODEX-CLOUD-20260927-EXPORT-A1`. After correcting an ignored-file omission and two unsuccessful platform publication attempts, the coordinator published the original store at `5637ba7e6f5b980368cdc80a77562c832df0a3d6` in PR #5. Independent manifest/receipt/restore checks passed, and GitHub file identities matched the reviewed export. A new cloud-task retrieval remains a separate pending result. Overall Q0 remains incomplete until the missing observations exist. See the [coordinator review](q0-codex-cloud-review.md).
+
+## Independent review reconciliation
+
+Claude Cowork reviewed PRs #5 and #6 on September 27, 2026. The revised briefs address its six findings: ignored-file delivery, Cowork's bridge/push/PR boundaries, Claude Code's local subscription route, Hermes launch flags and provider isolation, Cursor/Devin dispatch controls, and [the client-provenance defect, issue #7](https://github.com/SathiaAI/knokeep/issues/7).
+
+Do not add a broad fixture exception to `.gitignore`: review and stage exact ignored synthetic manifest members instead, preserve bytes with a job-scoped attribute rule, and check the published commit from a clean copy. The source commit remains pinned to 49e4c1cc; these revised briefs are delivered separately, and allowed evidence-only configuration changes occur on each output branch.
+
+Local Hermes help was verified. Provider documentation supports Cursor v0 branch/stop controls and Devin v3's `max_acu_limit`. Account billing, cap enforcement, fresh-session credentials and memory isolation still require runtime evidence. `--run-budget` in Hermes is a duration, not a money limit. Do not turn the reviewer's account observations into a new worker's verified capabilities.
+
+PRs #5 and #6 are intentionally based on the documentation branch. Testing can use the pinned input without merging. If these PRs are later merged, integrate PR #4 first and retarget the dependent PRs as needed; merging is not part of this dispatch.

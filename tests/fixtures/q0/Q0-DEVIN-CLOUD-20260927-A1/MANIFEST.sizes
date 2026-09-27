@@ -1,5 +1,9 @@
+1893	./.knokeep-eval/events.jsonl
 115	./data/q0-devin-cloud-20260927-a1/mcp_harness_note
 162	./data/q0-devin-cloud-20260927-a1/session_log
 237	./data/q0-devin-cloud-20260927-a1/sessions/Q0-DEVIN-CLOUD-20260927-A1
 522	./data/q0-devin-cloud-20260927-a1/system_state
 1744	./journal/journal.log
+53	./locks/fence-alloc/816d4724bd5e86090abbbab070335a3f4e453bc455ad0d8b861945ceb2eb3a1e.fence
+53	./locks/fence-alloc/ac3c9c19679d172b9d2edbfcdfc54ad136213fc4ec6371914be0e57dcf70d10c.fence
+53	./locks/fence-alloc/c1e73bbc52530a54aa5893c06d28b968350777b5682e10c2cf63ce3403c595df.fence

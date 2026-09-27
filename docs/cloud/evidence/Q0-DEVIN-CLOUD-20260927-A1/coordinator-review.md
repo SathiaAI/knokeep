@@ -11,3 +11,9 @@ Source reviewed: remote commit `c29070970798594756cb343547d4ec0124f167ec`. This 
 - **Public metadata correction.** The original worker report included account/organization and private session identifiers while claiming it contained no private account record. Those fields were removed from the current report. Earlier commits may still retain them; this edit is not an erasure claim. No credential value was identified in those fields.
 
 The independent review also identified a separate section-parser defect: an empty `Active State` section can return the literal next heading. The failed log write exposed that defect on the initial template; it did not cause it. Product code changes remain outside this evidence PR.
+
+## Original metadata recovery — issue #22
+
+The original source task still held its store. Claude coordinated a read-only recovery; Codex independently decoded the delivered archive and compared the four recovered members against the source run's already-published **final** receipt, `logs/33-store-file-hashes-final.txt`. All four match exactly: the telemetry file and three durable fence files. The retained five files still match the same final receipt. No source record was rewritten or reconstructed.
+
+The manifest now covers all nine retained/durable files; only the two documented zero-byte transient lock files are omitted. `recovery-verification.json` records the archive hash, recovered sizes/hashes and comparison result. The earlier incomplete-export finding above describes the initial publication and is now resolved for those omitted original files. This does not turn the unsuccessful flush-log invocation into a pass, establish native MCP enrollment or prove fresh-session continuity.

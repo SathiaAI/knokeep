@@ -3,19 +3,35 @@
 
 Runs ONE child command with a hard wall-clock limit and records, independently
 of anything the child prints:
-  - os_exit_code: the operating-system return code (None only if never started)
-  - outcome: "exited" | "timeout_killed" | "launch_error"
-  - elapsed_s, start/end UTC, and whether the whole process tree was cleaned up
+  - os_exit_code: the child's real OS return code, or null if it never started
+    or could not be reaped after cleanup
+  - outcome: "exited" | "timeout_killed" (termination confirmed) |
+    "timeout_cleanup_failed" | "timeout_cleanup_unknown" | "launch_error"
+  - cleanup: what the tree kill did and whether termination was confirmed
 stdout/stderr go byte-for-byte to files; model text is never parsed for status.
-No retries: one launch per invocation.
+One launch per invocation, no retries. The output directory must NOT exist:
+an existing directory is refused before any child is launched, so earlier
+evidence can never be overwritten.
 
-usage: run_bounded.py --timeout SECONDS --out DIR [--cwd DIR] -- CMD [ARGS...]
-Exit status of this script: 0 if the record was written (regardless of child
-outcome), 2 on usage error. Read the JSON record for the child's result.
+usage: run_bounded.py --timeout SECONDS --out NEW_DIR [--cwd DIR] -- CMD [ARGS...]
+Exit status of this script: 0 when a record was written (read run.json for the
+child's result), 3 when the output directory already exists (nothing launched),
+2 on usage error.
+
+Limits: descendants that leave the child's process group (POSIX setsid) or
+break away from it on Windows are not tracked; liveness checks are PID-based.
 """
 import argparse, datetime, json, os, signal, subprocess, sys, time
 
 WIN = os.name == "nt"
+_NOWIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)          # hide Windows console windows
+_HAS_PROC = os.path.isdir("/proc/self")
+KILL_TIMEOUT_S = 15      # bound on the cleanup command itself
+REAP_TIMEOUT_S = 10      # how long to wait for the child after cleanup
+
+
+class OutputExists(Exception):
+    pass
 
 
 def _utc():
@@ -23,16 +39,19 @@ def _utc():
 
 
 def _alive(pid):
+    """True if pid is running. Linux: a zombie counts as not running. Other
+    POSIX systems without /proc fall back to kill(pid, 0), which cannot tell a
+    zombie from a live process."""
     if WIN:
-        r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True)
+        r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True,
+                           timeout=KILL_TIMEOUT_S, creationflags=_NOWIN)
         return str(pid) in r.stdout
-    try:
-        with open(f"/proc/{pid}/stat") as f:          # Linux: a killed-but-unreaped zombie is not alive
-            return f.read().rsplit(")", 1)[1].split()[0] != "Z"
-    except FileNotFoundError:
-        return False
-    except OSError:
-        pass
+    if _HAS_PROC:
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+        except FileNotFoundError:
+            return False
     try:
         os.kill(pid, 0)
         return True
@@ -42,26 +61,42 @@ def _alive(pid):
         return True
 
 
-def _kill_tree(proc):
-    """Kill the child and every descendant. Returns a short description."""
-    if WIN:
-        r = subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, text=True)
-        return f"taskkill /T /F rc={r.returncode}"
+def _kill_tree(proc, kill_timeout=KILL_TIMEOUT_S, kill_cmd=None):
+    """Kill the child and its descendants. Returns {method, ok, detail}. ok is
+    True only if the kill command itself reported success in time."""
+    if kill_cmd is None and not WIN:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)               # child leads its own session/group
+            return {"method": "killpg SIGKILL", "ok": True, "detail": None}
+        except ProcessLookupError:
+            return {"method": "killpg SIGKILL", "ok": True, "detail": "group already gone"}
+        except OSError as e:
+            return {"method": "killpg SIGKILL", "ok": False, "detail": f"{type(e).__name__}: {e}"}
+    cmd = kill_cmd or ["taskkill", "/PID", str(proc.pid), "/T", "/F"]
     try:
-        os.killpg(proc.pid, signal.SIGKILL)       # child was started in its own session/group
-        return "killpg SIGKILL"
-    except ProcessLookupError:
-        return "group already gone"
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=kill_timeout, creationflags=_NOWIN)
+        return {"method": " ".join(cmd[:1] + cmd[-2:]) if kill_cmd is None else "override",
+                "ok": r.returncode == 0, "detail": f"rc={r.returncode}"}
+    except subprocess.TimeoutExpired:
+        return {"method": "taskkill /T /F" if kill_cmd is None else "override", "ok": False,
+                "detail": f"kill command exceeded {kill_timeout}s"}
+    except OSError as e:
+        return {"method": "taskkill /T /F" if kill_cmd is None else "override", "ok": False,
+                "detail": f"{type(e).__name__}: {e}"}
 
 
-def run(cmd, timeout, out, cwd=None):
-    os.makedirs(out, exist_ok=True)
+def run(cmd, timeout, out, cwd=None, kill_timeout=KILL_TIMEOUT_S, reap_timeout=REAP_TIMEOUT_S, _kill_cmd=None):
+    """_kill_cmd is a test hook that replaces the real cleanup command."""
+    try:
+        os.makedirs(out)                                  # fails if it exists: never overwrite evidence
+    except FileExistsError:
+        raise OutputExists(out)
     so, se = os.path.join(out, "stdout.bin"), os.path.join(out, "stderr.bin")
     rec = {"command": cmd, "timeout_s": timeout, "start_utc": _utc(), "os_exit_code": None,
-           "outcome": None, "tree_kill": None, "platform": sys.platform}
+           "outcome": None, "cleanup": None, "platform": sys.platform}
     t0 = time.monotonic()
-    kw = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if WIN else {"start_new_session": True}
-    with open(so, "wb") as fo, open(se, "wb") as fe:
+    kw = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | _NOWIN} if WIN else {"start_new_session": True})
+    with open(so, "xb") as fo, open(se, "xb") as fe:
         try:
             p = subprocess.Popen(cmd, stdout=fo, stderr=fe, stdin=subprocess.DEVNULL, cwd=cwd, **kw)
         except OSError as e:
@@ -73,17 +108,24 @@ def run(cmd, timeout, out, cwd=None):
                 rec["os_exit_code"] = p.wait(timeout=timeout)
                 rec["outcome"] = "exited"
             except subprocess.TimeoutExpired:
-                rec["outcome"] = "timeout_killed"
-                rec["tree_kill"] = _kill_tree(p)
+                kill = _kill_tree(p, kill_timeout, _kill_cmd)
                 try:
-                    rec["os_exit_code"] = p.wait(timeout=30)   # the killed child's real OS code
+                    rec["os_exit_code"] = p.wait(timeout=reap_timeout)   # the killed child's real OS code
+                    reaped = True
                 except subprocess.TimeoutExpired:
-                    rec["os_exit_code"] = None
-                    rec["error"] = "child did not exit 30 s after tree kill"
+                    reaped = False
+                if kill["ok"] and reaped:
+                    status, outcome = "confirmed", "timeout_killed"
+                elif not reaped:
+                    status, outcome = "failed", "timeout_cleanup_failed"          # child still running
+                else:
+                    status, outcome = "unknown", "timeout_cleanup_unknown"        # child gone, tree kill not confirmed
+                rec["outcome"] = outcome
+                rec["cleanup"] = dict(kill, status=status, child_reaped=reaped)
     rec["elapsed_s"] = round(time.monotonic() - t0, 3)
     rec["end_utc"] = _utc()
     rec["stdout_bytes"], rec["stderr_bytes"] = os.path.getsize(so), os.path.getsize(se)
-    with open(os.path.join(out, "run.json"), "w", encoding="utf-8") as f:
+    with open(os.path.join(out, "run.json"), "x", encoding="utf-8") as f:
         json.dump(rec, f, indent=2)
     return rec
 
@@ -98,7 +140,11 @@ def main(argv=None):
     cmd = a.cmd[1:] if a.cmd[:1] == ["--"] else a.cmd
     if not cmd or a.timeout <= 0:
         ap.error("need a positive --timeout and a command after --")
-    print(json.dumps(run(cmd, a.timeout, a.out, a.cwd)))
+    try:
+        print(json.dumps(run(cmd, a.timeout, a.out, a.cwd)))
+    except OutputExists:
+        print(json.dumps({"outcome": "refused_existing_output", "out": a.out, "launched": False}))
+        return 3
     return 0
 
 

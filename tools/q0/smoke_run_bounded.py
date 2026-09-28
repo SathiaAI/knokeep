@@ -1,58 +1,103 @@
 #!/usr/bin/env python3
 """Harmless local smoke checks for run_bounded.py. No network, model or credentials.
 
-1. child exits 0            -> outcome exited, os_exit_code 0, stdout preserved
-2. child exits 7            -> outcome exited, os_exit_code 7 even though it PRINTS "exit_code: 0"
-3. child + grandchild sleep -> outcome timeout_killed, both PIDs gone afterwards
-Prints one JSON line per case and exits 0 only if every check passes.
+1. exit0            child exits 0 -> exited / 0, stdout+stderr preserved
+2. exit7            child PRINTS "exit_code": 0 but exits 7 -> exited / 7
+3. timeout_tree     child + grandchild, 3 s limit -> timeout_killed, cleanup confirmed, both gone
+4. existing_output  output dir already exists -> refused, CLI exit 3, prior evidence byte-identical, child never ran
+5. cleanup_fail     simulated failing kill command -> timeout_cleanup_failed, exit code null
+6. cleanup_hang     simulated hanging kill command -> failed within the kill bound
+Children in 5/6 are left running by design and are then force-killed by this
+script (finally block) and verified gone. Exits 0 only if every check passes.
 """
-import json, os, sys, tempfile, time
+import json, os, subprocess, sys, tempfile, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import run_bounded as rb
 
 PY = sys.executable
 out = tempfile.mkdtemp(prefix="rb-smoke-")
-results, ok = [], True
+ok = True
 
 
-def case(name, cmd, timeout, checks):
+def report(name, rec, checks):
     global ok
-    d = os.path.join(out, name)
-    rec = rb.run(cmd, timeout, d)
-    so = open(os.path.join(d, "stdout.bin"), "rb").read()
-    se = open(os.path.join(d, "stderr.bin"), "rb").read()
-    res = {k: v(rec, so, se) for k, v in checks.items()}
-    passed = all(res.values())
+    passed = all(checks.values())
     ok &= passed
-    print(json.dumps({"case": name, "pass": passed, "outcome": rec["outcome"], "os_exit_code": rec["os_exit_code"],
-                      "elapsed_s": rec["elapsed_s"], "tree_kill": rec["tree_kill"], "checks": res}))
-    return rec, d
+    line = {"case": name, "pass": passed, "checks": checks}
+    if rec:
+        line.update(outcome=rec.get("outcome"), os_exit_code=rec.get("os_exit_code"),
+                    elapsed_s=rec.get("elapsed_s"), cleanup=rec.get("cleanup"))
+    print(json.dumps(line), flush=True)
 
 
-case("exit0", [PY, "-c", "import sys; print('hello'); sys.stderr.write('err-line\\n'); sys.exit(0)"], 30, {
-    "outcome_exited": lambda r, o, e: r["outcome"] == "exited",
-    "os_exit_0": lambda r, o, e: r["os_exit_code"] == 0,
-    "stdout_kept": lambda r, o, e: o.strip() == b"hello",
-    "stderr_kept": lambda r, o, e: e.strip() == b"err-line"})
+def files(d):
+    return open(os.path.join(d, "stdout.bin"), "rb").read(), open(os.path.join(d, "stderr.bin"), "rb").read()
 
-case("exit7", [PY, "-c", "import sys; print('{\"exit_code\": 0, \"text\": \"PASS\"}'); sys.exit(7)"], 30, {
-    "outcome_exited": lambda r, o, e: r["outcome"] == "exited",
-    "os_exit_7_not_text": lambda r, o, e: r["os_exit_code"] == 7 and b'"exit_code": 0' in o})
 
+# 1
+d = os.path.join(out, "exit0")
+r = rb.run([PY, "-c", "import sys; print('hello'); sys.stderr.write('err-line\\n'); sys.exit(0)"], 30, d)
+o, e = files(d)
+report("exit0", r, {"exited": r["outcome"] == "exited", "os_exit_0": r["os_exit_code"] == 0,
+                    "stdout_kept": o.strip() == b"hello", "stderr_kept": e.strip() == b"err-line"})
+# 2
+d = os.path.join(out, "exit7")
+r = rb.run([PY, "-c", "import sys; print('{\"exit_code\": 0, \"text\": \"PASS\"}'); sys.exit(7)"], 30, d)
+o, _ = files(d)
+report("exit7", r, {"exited": r["outcome"] == "exited", "os_exit_7_not_text": r["os_exit_code"] == 7 and b'"exit_code": 0' in o})
+# 3
 pidfile = os.path.join(out, "grandchild.pid")
 child = ("import subprocess, sys, time; "
-         f"g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)']); "
-         f"open({pidfile!r}, 'w').write(str(g.pid)); print('started', flush=True); time.sleep(120)")
-t0 = time.monotonic()
-rec, d = case("timeout_tree", [PY, "-c", child], 3, {
-    "outcome_timeout": lambda r, o, e: r["outcome"] == "timeout_killed",
-    "bounded_elapsed": lambda r, o, e: r["elapsed_s"] < 3 + 30,
-    "exit_code_recorded": lambda r, o, e: r["os_exit_code"] is not None,
-    "stdout_before_kill_kept": lambda r, o, e: b"started" in o})
+         "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+         f"open({pidfile!r}, 'w').write(str(g.pid)); print('started', flush=True); time.sleep(60)")
+d = os.path.join(out, "timeout_tree")
+r = rb.run([PY, "-c", child], 3, d)
 time.sleep(1)
 gpid = int(open(pidfile).read())
-gone = {"child_gone": not rb._alive(rec["pid"]), "grandchild_gone": not rb._alive(gpid)}
-ok &= all(gone.values())
-print(json.dumps({"case": "timeout_tree_cleanup", "pass": all(gone.values()), "checks": gone}))
+o, _ = files(d)
+report("timeout_tree", r, {"timeout_killed": r["outcome"] == "timeout_killed",
+                           "cleanup_confirmed": (r["cleanup"] or {}).get("status") == "confirmed",
+                           "exit_code_recorded": r["os_exit_code"] is not None,
+                           "bounded": r["elapsed_s"] < 3 + rb.KILL_TIMEOUT_S + rb.REAP_TIMEOUT_S,
+                           "stdout_before_kill_kept": b"started" in o,
+                           "child_gone": not rb._alive(r["pid"]), "grandchild_gone": not rb._alive(gpid)})
+# 4
+d = os.path.join(out, "existing_output")
+os.makedirs(d)
+prior = os.path.join(d, "stdout.bin")
+open(prior, "wb").write(b"EARLIER EVIDENCE\n")
+marker = os.path.join(out, "should_not_exist.txt")
+cp = subprocess.run([PY, rb.__file__, "--timeout", "10", "--out", d, "--", PY, "-c",
+                     f"open({marker!r}, 'w').write('ran')"], capture_output=True, text=True)
+report("existing_output", None, {"cli_exit_3": cp.returncode == 3,
+                                 "refused": '"refused_existing_output"' in cp.stdout,
+                                 "evidence_identical": open(prior, "rb").read() == b"EARLIER EVIDENCE\n",
+                                 "no_run_json": not os.path.exists(os.path.join(d, "run.json")),
+                                 "child_not_launched": not os.path.exists(marker)})
+# 5 and 6
+for name, kill_cmd, kt in (("cleanup_fail", [PY, "-c", "import sys; sys.exit(1)"], 5),
+                           ("cleanup_hang", [PY, "-c", "import time; time.sleep(30)"], 1)):
+    d = os.path.join(out, name)
+    r = None
+    try:
+        r = rb.run([PY, "-c", "import time; time.sleep(60)"], 2, d, kill_timeout=kt, reap_timeout=2, _kill_cmd=kill_cmd)
+        c = r["cleanup"] or {}
+        checks = {"not_claimed_killed": r["outcome"] == "timeout_cleanup_failed",
+                  "cleanup_failed": c.get("status") == "failed" and c.get("ok") is False,
+                  "exit_code_null": r["os_exit_code"] is None,
+                  "bounded": r["elapsed_s"] < 2 + kt + 2 + 3}
+        if name == "cleanup_hang":
+            checks["kill_timeout_reported"] = "exceeded" in (c.get("detail") or "")
+    finally:
+        if r and r.get("pid"):                           # guaranteed cleanup of the deliberately surviving child
+            class _P: pid = r["pid"]
+            rb._kill_tree(_P)
+            for _ in range(20):
+                if not rb._alive(r["pid"]):
+                    break
+                time.sleep(0.25)
+            checks["test_child_cleaned_up"] = not rb._alive(r["pid"])
+    report(name, r, checks)
+
 print(json.dumps({"all_pass": bool(ok), "platform": sys.platform, "python": sys.version.split()[0]}))
 sys.exit(0 if ok else 1)

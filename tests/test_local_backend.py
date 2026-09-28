@@ -625,22 +625,95 @@ def test_lock_fails_closed_when_fence_owner_replace_exhausted(tmp_path, monkeypa
     key = "lease/exhausted"
     assert isinstance(gate.persist(backend, key, b"v0", ctx=create_ctx(), doc_type="system_state"), OK)
     holder = backend.lock(key, ttl_s=30)
-    _flaky_replace_into(monkeypatch, ".fence", failures=10**6)
+    # Release the advisory slot so lock() reaches the injected replacement.
+    # The prior durable fence remains until a successful new allocation.
+    assert backend.unlock(holder)
+    calls = _flaky_replace_into(monkeypatch, ".fence", failures=10**6)
 
     with pytest.raises(BackendBusyError):
         backend.lock(key, ttl_s=30)
+    assert calls["n"] == 3
     # No new lease was issued: the durable owner is still the old holder,
     # the data is untouched, and no temp file leaked.
     owner = backend._read_fence_owner(backend._fence_owner_path(key))
     assert owner[0] == holder.token and owner[2] == holder.fence
     assert backend.read(key).body == b"v0"
     assert list((root / "locks" / "fence-alloc").glob("tmp*")) == []
-    # renew() needs the same durable rewrite, so it reports False honestly.
-    assert backend.renew(holder, ttl_s=30) is False
     monkeypatch.undo()
     r = gate.persist(backend, key, b"v1", ctx=overwrite_ctx(sha256_hex(b"v0"), holder), doc_type="system_state")
     assert isinstance(r, OK)
+    held = backend.lock(key, ttl_s=30)
+    prior_owner = backend._read_fence_owner(backend._fence_owner_path(key))
+    calls = _flaky_replace_into(monkeypatch, ".fence", failures=10**6)
+    assert backend.renew(held, ttl_s=30) is False
+    assert calls["n"] == 3
+    assert backend._read_fence_owner(backend._fence_owner_path(key)) == prior_owner
     backend.close()
+
+
+def test_advisory_replace_exhaustion_never_issues_a_lease(tmp_path, monkeypatch):
+    backend = LocalBackend(tmp_path / "store-root", replace_retry_attempts=3, replace_retry_backoff_s=0.001)
+    key = "lease/advisory-exhausted"
+    assert isinstance(gate.persist(backend, key, b"v0", ctx=create_ctx(), doc_type="system_state"), OK)
+    old = backend.lock(key, ttl_s=30)
+    assert backend.unlock(old)
+    calls = _flaky_replace_into(monkeypatch, ".lock", failures=10**6)
+    with pytest.raises(BackendBusyError):
+        backend.lock(key, ttl_s=30)
+    assert calls["n"] == 3
+    # Allocation can supersede the old fence before advisory publication
+    # fails. No lease is returned and an old writer must not regain rights.
+    owner = backend._read_fence_owner(backend._fence_owner_path(key))
+    assert owner[2] > old.fence
+    assert backend.read(key).body == b"v0"
+    monkeypatch.undo()
+    monkeypatch.setattr(LocalBackend, "_FENCE_LOSS_SETTLE_MAX_S", 0)
+    assert isinstance(gate.persist(backend, key, b"bad", ctx=overwrite_ctx(sha256_hex(b"v0"), old), doc_type="system_state"), STALE)
+    recovered = backend.lock(key, ttl_s=30)
+    assert isinstance(gate.persist(backend, key, b"v1", ctx=overwrite_ctx(sha256_hex(b"v0"), recovered), doc_type="system_state"), OK)
+    assert list(backend._locks_dir.rglob("tmp*")) == []
+    backend.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows open-file replacement semantics")
+def test_real_open_fence_handle_replacement_recovers(tmp_path, monkeypatch):
+    import threading
+    backend = LocalBackend(tmp_path / "store-root", replace_retry_attempts=20, replace_retry_backoff_s=0.01)
+    key = "lease/real-sharing"
+    old = backend.lock(key, ttl_s=30)
+    assert backend.unlock(old)
+    path = backend._fence_owner_path(key)
+    reader = path.open("rb")
+    release = threading.Event()
+    errors = []
+    real_replace = os.replace
+
+    def observed_replace(src, dst):
+        try:
+            return real_replace(src, dst)
+        except PermissionError:
+            if str(dst) == str(path):
+                errors.append("actual PermissionError on fence replacement")
+                release.set()
+            raise
+
+    def close_reader():
+        release.wait(2)
+        reader.close()
+
+    worker = threading.Thread(target=close_reader)
+    worker.start()
+    monkeypatch.setattr(os, "replace", observed_replace)
+    try:
+        lease = backend.lock(key, ttl_s=30)
+        assert errors, "Windows did not demonstrate the assumed sharing violation"
+        assert lease.fence > old.fence
+        assert backend._read_fence_owner(path)[0] == lease.token
+    finally:
+        release.set()
+        worker.join(3)
+        reader.close()
+        backend.close()
 
 
 def test_fence_loss_settle_tolerates_transient_owner_read_denial(tmp_path, monkeypatch):

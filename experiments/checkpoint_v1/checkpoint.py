@@ -15,6 +15,7 @@ import sys
 from typing import Any, Dict, List, Optional
 
 from store import gate
+from store.backend import BackendBusyError
 from store.context import AuthContext, CreateOnly, OperationContext, Overwrite
 from store.local import LocalBackend
 from store.types import EXISTS, OK, STALE
@@ -55,6 +56,7 @@ def _canon(obj: Any) -> bytes:
 
 
 def _strict_loads(raw: bytes) -> Any:
+    _need(len(raw) <= MAX_OBJECT_BYTES, 'JSON exceeds checkpoint size limit')
     def hook(pairs):
         d = {}
         for k, v in pairs:
@@ -80,7 +82,14 @@ def _need(cond: bool, msg: str) -> None:
 
 
 def _is_id(v: Any) -> bool:
-    return isinstance(v, str) and bool(_ID_RE.match(v))
+    return (isinstance(v, str) and bool(_ID_RE.fullmatch(v))
+            and gate.validate_write(v, b'', doc_type='journal') is None)
+
+
+def _reference(ref):
+    _need(isinstance(ref, dict) and set(ref) == {'milestone_id','sha256'}, 'reference shape')
+    _need(_is_id(ref['milestone_id']), 'reference milestone invalid')
+    _need(isinstance(ref['sha256'], str) and bool(_HEX64.fullmatch(ref['sha256'])), 'reference hash invalid')
 
 
 def _id_list(v: Any, name: str) -> List[str]:
@@ -99,10 +108,7 @@ def validate_proposal(p: Any) -> None:
     _need(_is_id(p["writer"]), "writer invalid")
     pred = p["predecessor"]
     if pred is not None:
-        _need(isinstance(pred, dict) and set(pred) == {"milestone_id", "sha256"}, "predecessor shape")
-        _need(_is_id(pred["milestone_id"]), "predecessor.milestone_id invalid")
-        _need(isinstance(pred["sha256"], str) and bool(_HEX64.match(pred["sha256"])),
-              "predecessor.sha256 invalid")
+        _reference(pred)
     for f in ("state", "log"):
         _need(isinstance(p[f], str), f"{f} must be a string")
         _need(p[f + "_sha256"] == _sha(p[f].encode("utf-8")), f"{f}_sha256 mismatch")
@@ -112,23 +118,30 @@ def validate_proposal(p: Any) -> None:
     _need(isinstance(oq, list) and len(oq) <= MAX_LIST, "open_questions: bounded list")
     texts = [p["state"], p["log"], p["writer"]]
     affected = set()
+    question_ids = set()
     for q in oq:
         _need(isinstance(q, dict) and set(q) == {"id", "question", "affected_action_ids"},
               "open_question shape")
         _need(_is_id(q["id"]), "open_question.id invalid")
-        _need(isinstance(q["question"], str), "open_question.question must be string")
+        _need(q['id'] not in question_ids, 'duplicate open question id')
+        question_ids.add(q['id'])
+        _need(isinstance(q["question"], str) and bool(q['question'].strip()), "open_question.question must be nonempty string")
         texts.append(q["question"])
         affected.update(_id_list(q["affected_action_ids"], "affected_action_ids"))
     done = set(_id_list(p["completed_actions"], "completed_actions"))
-    _id_list(p["resolves_staged"], "resolves_staged")
+    refs = p['resolves_staged']
+    _need(isinstance(refs, list) and len(refs) <= MAX_LIST, 'resolves_staged must be bounded references')
+    for ref in refs:
+        _reference(ref)
+    _need(len({r['milestone_id'] for r in refs}) == len(refs), 'duplicate resolved reference')
     clash = sorted(done & affected)
     _need(not clash, f"completed action(s) with unresolved open question: {clash}")
     _need(len(_canon(p)) <= MAX_OBJECT_BYTES, f"proposal exceeds {MAX_OBJECT_BYTES} bytes")
     # Existing scanner rules on each DECODED text (JSON escaping cannot hide it);
     # gate.persist additionally scans the canonical envelope.
     for t in texts:
-        labels = gate.secret_scan(t.encode("utf-8"))
-        _need(not labels, f"secret scan blocked: {sorted(set(labels))}")
+        rejection = gate.validate_write('checkpoint-text', t.encode('utf-8'), doc_type='journal')
+        _need(rejection is None, f'decoded text refused: {rejection}')
 
 
 def build_proposal(*, milestone_id, writer, predecessor, state, log, open_questions=(),
@@ -168,7 +181,10 @@ def _read_head(backend, project: str):
     h = _strict_loads(raw[nl + 1:])
     _need(isinstance(h, dict) and set(h) == {"version", "milestone_id", "sha256", "depth"},
           "HEAD corrupt")
-    _need(_is_id(h["milestone_id"]) and bool(_HEX64.match(str(h["sha256"]))), "HEAD corrupt")
+    _need(type(h['version']) is int and h['version'] == VERSION, 'HEAD version corrupt')
+    _need(type(h['depth']) is int and 1 <= h['depth'] <= MAX_HISTORY, 'HEAD depth corrupt')
+    _reference({'milestone_id':h['milestone_id'],'sha256':h['sha256']})
+    _need(raw == gate.make_generation_header(h['depth']) + _canon(h), 'HEAD generation or encoding corrupt')
     return h, blob.version_hash
 
 
@@ -181,9 +197,26 @@ def _chain(backend, project: str, head) -> List[Dict[str, Any]]:
         got = _read_proposal(backend, project, ref["milestone_id"], ref["sha256"])
         _need(got is not None, f"checkpoint target {ref['milestone_id']} missing")
         p, h = got
+        _need(p['milestone_id'] not in {c['milestone_id'] for c in out}, 'checkpoint cycle')
         out.append({"milestone_id": p["milestone_id"], "sha256": h, "proposal": p})
         ref = p["predecessor"]
+    _need(len(out) == head['depth'], 'HEAD depth disagrees with chain')
+    accepted = {c['milestone_id'] for c in out}
+    for c in out:
+        _check_resolutions(backend, project, c['proposal'], accepted)
     return out
+
+
+def _check_resolutions(backend, project, proposal, accepted):
+    for ref in proposal['resolves_staged']:
+        _need(ref['milestone_id'] not in accepted, 'resolution target was accepted, not staged')
+        _need(ref['milestone_id'] != proposal['milestone_id'], 'self resolution')
+        got = _read_proposal(backend, project, ref['milestone_id'], ref['sha256'])
+        _need(got is not None, 'resolved staged proposal missing')
+
+
+def _resolved_ids(chain):
+    return {r['milestone_id'] for c in chain for r in c['proposal']['resolves_staged']}
 
 
 def _legacy_hashes(backend, project: str):
@@ -200,7 +233,12 @@ def _ctx(pre) -> OperationContext:
 
 def save(backend, project: str, proposal: Dict[str, Any], *,
          lease_ttl_s: float = DEFAULT_LEASE_TTL_S) -> Dict[str, Any]:
+    _need(_is_id(project), 'project invalid')
+    proposal = _strict_loads(_canon(proposal))  # freeze caller-owned mutable input
     validate_proposal(proposal)  # before staging: bad input reserves no ID
+    old_head, _ = _read_head(backend, project)
+    old_chain = _chain(backend, project, old_head) if old_head else []
+    _check_resolutions(backend, project, proposal, {c['milestone_id'] for c in old_chain})
     raw = _canon(proposal)
     mid = proposal["milestone_id"]
     my_sha = _sha(raw)
@@ -216,7 +254,8 @@ def save(backend, project: str, proposal: Dict[str, Any], *,
     try:
         head, head_ver = _read_head(backend, project)
         if head is not None:
-            for c in _chain(backend, project, head):
+            chain = _chain(backend, project, head)
+            for c in chain:
                 if c["milestone_id"] == mid and c["sha256"] == my_sha:
                     return {"status": "accepted", "duplicate": True, "milestone_id": mid,
                             "checkpoint_sha256": my_sha,
@@ -232,14 +271,18 @@ def save(backend, project: str, proposal: Dict[str, Any], *,
                  "current_head_milestone_id": cur["milestone_id"] if cur else None}
         if proposal["predecessor"] != cur:
             return stale  # never silently rebase
+        _need(depth <= MAX_HISTORY, 'history limit reached; staged proposal retained, head unchanged')
         body = gate.make_generation_header(depth) + _canon(
             {"version": VERSION, "milestone_id": mid, "sha256": my_sha, "depth": depth})
         pre = CreateOnly() if head is None else Overwrite(expected_hash=head_ver, lease=lease)
-        w = gate.persist(backend, hk, body, ctx=_ctx(pre), doc_type="journal")
+        w = gate.persist(backend, hk, body, ctx=_ctx(pre), doc_type="checkpoint_head_v1")
         if isinstance(w, (STALE, EXISTS)):
             return stale
         if not isinstance(w, OK):
             raise CheckpointError(f"head publish failed: {w}")
+        readback = lookup(backend, project, mid)
+        _need(readback['status'] == 'accepted' and readback['checkpoint_sha256'] == my_sha,
+              'head write acknowledged but checkpoint readback failed; outcome uncertain')
         return {"status": "accepted", "duplicate": False, "milestone_id": mid,
                 "checkpoint_sha256": my_sha, "current_head_sha256": my_sha,
                 "current_head_milestone_id": mid}
@@ -253,12 +296,14 @@ def _staged(backend, project: str, accepted) -> List[str]:
 
 
 def resume(backend, project: str) -> Dict[str, Any]:
+    _need(_is_id(project), 'project invalid')
     head, _ = _read_head(backend, project)
     if head is None:
         return {"status": "no_checkpoint", "staged": _staged(backend, project, set())}
     chain = _chain(backend, project, head)
     tgt = chain[0]["proposal"]
     accepted = {c["milestone_id"] for c in chain}
+    resolved = _resolved_ids(chain)
     legacy = _legacy_hashes(backend, project)
     unsealed = [n for n, f in (("system_state", "state"), ("session_log", "log"))
                 if legacy[f] != tgt[f"legacy_{f}_sha256"]]
@@ -266,20 +311,26 @@ def resume(backend, project: str) -> Dict[str, Any]:
             "checkpoint_sha256": head["sha256"], "state": tgt["state"], "log": tgt["log"],
             "open_questions": tgt["open_questions"],
             "completed_actions": tgt["completed_actions"],
-            "unsealed_legacy_changes": unsealed, "staged": _staged(backend, project, accepted)}
+            "unsealed_legacy_changes": unsealed, "staged": _staged(backend, project, accepted | resolved),
+            "resolved_staged": sorted(resolved)}
 
 
 def lookup(backend, project: str, mid: str) -> Dict[str, Any]:
+    _need(_is_id(project) and _is_id(mid), 'project or milestone invalid')
     got = _read_proposal(backend, project, mid)
     if got is None:
         return {"status": "not_found", "milestone_id": mid}
     _, sha = got
     head, _ = _read_head(backend, project)
     if head is not None:
-        for c in _chain(backend, project, head):
+        chain = _chain(backend, project, head)
+        for c in chain:
             if c["milestone_id"] == mid:
                 return {"status": "accepted", "milestone_id": mid, "checkpoint_sha256": sha,
                         "current_head_sha256": head["sha256"]}
+        if mid in _resolved_ids(chain):
+            return {'status':'resolved_staged','milestone_id':mid,'checkpoint_sha256':sha,
+                    'current_head_sha256':head['sha256']}
     return {"status": "staged", "milestone_id": mid, "checkpoint_sha256": sha,
             "current_head_sha256": head["sha256"] if head else None}
 
@@ -295,6 +346,7 @@ def main(argv=None) -> int:
     lk = sub.add_parser("lookup")
     lk.add_argument("--milestone-id", required=True)
     a = ap.parse_args(argv)
+    _need(_is_id(a.project), 'project invalid')
     be = LocalBackend(a.store)
     try:
         if a.op == "save":
@@ -309,10 +361,13 @@ def main(argv=None) -> int:
     except CheckpointError as e:
         print(json.dumps({"status": "error", "error": str(e)}))
         return 2
+    except BackendBusyError:
+        print(json.dumps({'status':'busy','error':'lease unavailable; proposal may be staged; retry exact payload'}))
+        return 3
     finally:
         be.close()
     print(json.dumps(out, ensure_ascii=False))
-    return 0 if out.get("status") in ("ok", "accepted", "staged", "no_checkpoint") else 1
+    return 0 if out.get("status") in ("ok", "accepted", "staged", "resolved_staged", "no_checkpoint") else 1
 
 
 if __name__ == "__main__":

@@ -170,12 +170,10 @@ def test_real_kill_after_head_journal_before_publish(tmp_path):
     assert out.returncode == 78, out.stderr
     be = _be(tmp_path)  # fresh reader: journal replay publishes the head
     res = cp.resume(be, P)
-    assert (res["milestone_id"], res["state"], res["log"]) in (
-        ("m1", "state-m1", "log-m1"), ("m2", "state-m2", "log-m2"))
-    # retry after lost reply is duplicate if accepted
-    if res["milestone_id"] == "m2":
-        import time; time.sleep(0.6)  # wait out the killed child's test-only lease
-        assert cp.save(be, P, _p("m2", _ref(r1)))["duplicate"] is True
+    # The head journal event was already fsynced: losing it is not acceptable.
+    assert (res["milestone_id"], res["state"], res["log"]) == ("m2", "state-m2", "log-m2")
+    import time; time.sleep(0.6)  # wait out the killed child's test-only lease
+    assert cp.save(be, P, _p("m2", _ref(r1)))["duplicate"] is True
 
 
 def test_two_processes_same_predecessor(tmp_path):
@@ -199,3 +197,15 @@ def test_two_processes_same_predecessor(tmp_path):
     loser = [o for o in outs if o["status"] == "staged_stale"][0]["milestone_id"]
     assert res["staged"] == [loser]
     assert cp.lookup(be, P, loser)["status"] == "staged"
+
+
+def test_long_lived_writer_cannot_overwrite_fsynced_unpublished_successor(tmp_path):
+    be = _be(tmp_path)  # deliberately remains open across another writer's crash
+    r1 = cp.save(be, P, _p('m1'))
+    out = _run_child(tmp_path, 'kill_before_head_publish', _p('m2', _ref(r1)))
+    assert out.returncode == 78, out.stderr
+    import time; time.sleep(0.6)
+    r3 = cp.save(be, P, _p('m3', _ref(r1)))
+    assert r3['status'] == 'staged_stale'
+    assert cp.resume(be, P)['milestone_id'] == 'm2'
+    assert cp.lookup(be, P, 'm2')['status'] == 'accepted'

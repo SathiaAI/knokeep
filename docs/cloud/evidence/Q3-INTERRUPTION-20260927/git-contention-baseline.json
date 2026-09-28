@@ -1,0 +1,55 @@
+{
+  "injected_pause_s": 6,
+  "helper_budget_s": 5,
+  "workers": [
+    {
+      "writer": 0,
+      "exception": "BackendBusyError",
+      "message": "key 'race' is locked",
+      "elapsed_s": 5.016
+    },
+    {
+      "writer": 1,
+      "exception": "BackendBusyError",
+      "message": "key 'race' is locked",
+      "elapsed_s": 5.016
+    },
+    {
+      "writer": 2,
+      "exception": "BackendBusyError",
+      "message": "key 'race' is locked",
+      "elapsed_s": 5.016
+    },
+    {
+      "writer": 3,
+      "exception": "BackendBusyError",
+      "message": "key 'race' is locked",
+      "elapsed_s": 5.016
+    },
+    {
+      "writer": 4,
+      "exception": "BackendBusyError",
+      "message": "key 'race' is locked",
+      "elapsed_s": 5.016
+    },
+    {
+      "writer": 5,
+      "exception": "BackendBusyError",
+      "message": "key 'race' is locked",
+      "elapsed_s": 5.016
+    },
+    {
+      "writer": 6,
+      "exception": "BackendBusyError",
+      "message": "key 'race' is locked",
+      "elapsed_s": 5.016
+    },
+    {
+      "writer": 7,
+      "kind": "OK",
+      "elapsed_s": 7.375
+    }
+  ],
+  "final": "writer-7",
+  "scope": "Controlled scheduling reproduction of the helper budget failure; does not prove the exact timing cause in the original CI runner."
+}

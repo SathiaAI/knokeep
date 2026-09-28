@@ -1,0 +1,84 @@
+{
+  "intermediate": {
+    "accepted_hash": "68c736be709c57740c6343b976e8f7961ac879ac86f6167528d216c633b495e8",
+    "prefix_bytes": 3789,
+    "bootstrap": {
+      "version_hash": "68c736be709c57740c6343b976e8f7961ac879ac86f6167528d216c633b495e8",
+      "revision": 3,
+      "log_hash": "8c8e0c20488e1c628d6232fcec10907f9b0aea7c5af949e5bc7c6a5a41b6e550",
+      "state_client": "claude-code",
+      "log_client": "claude-code",
+      "client_labels_verified": false,
+      "active": "Task complete; packing-report.csv regenerated with 6-unit cartons and verified.",
+      "next": "None \u2014 await new instructions.",
+      "conflicts": [],
+      "conflict_count": 0,
+      "settled_count": 0,
+      "resume_line": "resuming: Task complete; packing-report.csv regenerated with 6-unit cartons and verified. / next: None \u2014 await new instructions. / v68c736be709c"
+    },
+    "state": "---\nschema_version: 1\nproject_id: q1-cc-a2\nrevision: 3\nupdated: 2026-09-28T02:33:57Z\nclient: claude-code\n---\n## Architecture\npack.py (stdlib only): reads orders.csv, includes status == \"ready\", plus status == \"hold\" only when approved == \"yes\" (exact); normalizes SKU (lowercase; '-' and ' ' -> '_'), sums units per SKU, cartons = ceil(units/6) (CARTON_SIZE = 6; 4-unit cartons obsolete), writes packing-report.csv (sku,units,cartons) sorted by sku.\n## Path & Variable Directory\n- pack.py \u2014 the tool; run: python pack.py orders.csv packing-report.csv\n- orders.csv \u2014 input (order_id,sku,units,status,approved)\n- packing-report.csv \u2014 generated output\n\n## Hard Constraints\n- Only status exactly \"ready\" is included. Held orders stay out (inventory not released) even when approved=yes; the approved column is ignored.\n- Python standard library only.\n",
+    "semantic_warning_present": false,
+    "scope": "Exact accepted-prefix replay, not an actual process interruption at this source milestone."
+  },
+  "crash_after_commit_create": {
+    "os_exit_code": 73,
+    "elapsed_s": 0.078,
+    "stdout": "",
+    "stderr": "",
+    "recovered_body": "durable before acknowledgement",
+    "retry_result": "OK",
+    "journal_unchanged_on_retry": true
+  },
+  "crash_after_commit_append": {
+    "os_exit_code": 73,
+    "elapsed_s": 0.078,
+    "stdout": "",
+    "stderr": "",
+    "retry": {
+      "ok": true,
+      "log": "probe/sessions/session-a"
+    },
+    "before_count": 1,
+    "after_count": 2,
+    "before": "---\nschema_version: 1\nproject_id: probe\nsession_id: session-a\nclient: test\nupdated: 2026-09-28T03:02:28Z\n---\n## Journal\n[2026-09-28T03:02:28Z] verified task Alpha\n",
+    "after": "---\nschema_version: 1\nproject_id: probe\nsession_id: session-a\nclient: test\nupdated: 2026-09-28T03:02:28Z\n---\n## Journal\n[2026-09-28T03:02:28Z] verified task Alpha\n[2026-09-28T03:02:28Z] verified task Alpha\n",
+    "test_lease_ttl_s": 0.1,
+    "duplicate_observed": true
+  },
+  "two_process_stale_writer": {
+    "workers": [
+      {
+        "os_exit_code": 0,
+        "stdout": "{\"ok\": true, \"revision\": 2, \"version_hash\": \"5acffe99e0848c9f7e434badbc0892a588029229463a2127c4c6ba0e0c1cf138\"}\r\n",
+        "stderr": ""
+      },
+      {
+        "os_exit_code": 1,
+        "stdout": "{\"reason\": \"conflict_parked\", \"conflict_key\": \"race/conflicts/20260928-030229-028825/3e23e816-073d5595be39\", \"current_hash\": \"5acffe99e0848c9f7e434badbc0892a588029229463a2127c4c6ba0e0c1cf138\", \"base_hash\": \"19fab2aa9243b2d0533e95d78793ddd41a2c56d7fd2d7fa6b60cf9545e14e4f0\", \"doc_kind\": \"log\", \"journal_recorded\": true, \"blocked\": true}\r\n",
+        "stderr": ""
+      }
+    ],
+    "bootstrap": {
+      "version_hash": "99ae16cec70e4c80068699355bdf4324bcc6f021141202d73d02098dc3d442ab",
+      "revision": 1,
+      "log_hash": "5acffe99e0848c9f7e434badbc0892a588029229463a2127c4c6ba0e0c1cf138",
+      "state_client": "test",
+      "log_client": "test",
+      "client_labels_verified": false,
+      "active": "writer a",
+      "next": "next a",
+      "conflicts": [
+        "race/conflicts/20260928-030229-028825/3e23e816-073d5595be39"
+      ],
+      "conflict_count": 1,
+      "settled_count": 0,
+      "resume_line": "resuming: writer a / next: next a / v99ae16cec70e  [!] 1 parked conflict(s) - review race/conflicts/"
+    },
+    "documents": {
+      "race/conflicts/20260928-030229-028825/3e23e816-073d5595be39": "## Completed & Verified\nwriter b\n## Active State\nwriter b\n## Next Step\nnext b\n",
+      "race/session_log": "---\nschema_version: 1\nproject_id: race\nclient: test\nrevision: 2\nupdated: 2026-09-28T03:02:29Z\n---\n## Completed & Verified\nwriter a\n## Active State\nwriter a\n## Next Step\nnext a\n",
+      "race/sessions/conflicts": "---\nschema_version: 1\nproject_id: race\nsession_id: conflicts\nclient: system\nupdated: 2026-09-28T03:02:29Z\n---\n## Journal\n[2026-09-28T03:02:29Z] conflict_parked key=race/conflicts/20260928-030229-028825/3e23e816-073d5595be39 sess=3e23e816 doc_kind=log base_hash=19fab2aa9243b2d0533e95d78793ddd41a2c56d7fd2d7fa6b60cf9545e14e4f0 current_hash=5acffe99e0848c9f7e434badbc0892a588029229463a2127c4c6ba0e0c1cf138\n",
+      "race/system_state": "---\nschema_version: 1\nproject_id: race\nclient: test\nrevision: 1\nupdated: 2026-09-28T03:02:28Z\n---\n## Architecture\n(tbd)\n\n## Path & Variable Directory\n(tbd)\n\n## Hard Constraints\n(tbd)\n"
+    }
+  }
+}

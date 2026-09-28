@@ -1,0 +1,13 @@
+PASS orphan-secret-detected -> [{'key': 'p/leak.md', 'reasons': ['github personal access token']}]
+PASS binary-orphan-detected -> [{'key': 'p/blob.bin', 'reason': 'non-text/binary content in store'}]
+FINDING benign-name-secret-bypass -> findings=[] bootstrap_exit=0
+PASS oversized-sparse-fails-closed -> [{'key': 'p/big.md', 'reason': 'unreadable blob in store'}]
+PASS symlink-blocks -> [{'key': 'p/', 'reason': 'audit blocked: store_symlink_escape'}]
+PASS hardlink-content-scanned -> [{'key': 'p/hard.md', 'reasons': ['github personal access token']}] nlink=2
+PASS ambiguous-journal-uncertain -> [{'key': 'p/', 'reason': 'store audit uncertain: journal_torn_tail'}]
+PASS helper-no-source-mutation -> tree unchanged
+LIMIT bootstrap-mutates-before-refusal -> exit=1 refused=True removed=['staging/old.tmp']
+FINDING deep-nesting-recursionerror -> _audit_store raised RecursionError; bootstrap_exit=1 traceback=False
+INFO aggregate-2000-files -> findings=0 seconds=1.275 (no file-count or total-byte cap in helper)
+RESULT OK
+exit=0

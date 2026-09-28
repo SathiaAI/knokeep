@@ -94,7 +94,7 @@ def preflight(a):
     model = yaml_block(text, "model")
     f["route"] = {k: model.get(k) for k in ("default", "provider", "base_url", "key_env")}
     base = model.get("base_url") or ""
-    f["route_is_explicit_local"] = (model.get("provider") == "custom" and model.get("default") == a.model
+    f["route_is_explicit_local"] = (a.provider == "custom" and model.get("provider") == "custom" and model.get("default") == a.model
                                     and model.get("key_env") == a.key_env
                                     and bool(re.match(r"^http://(%s):\d+/v1/?$" % "|".join(re.escape(h) for h in LOCAL_HOSTS), base))
                                     and (not a.endpoint or base.rstrip("/") == a.endpoint.rstrip("/")))
@@ -184,6 +184,9 @@ def route_from_log(home, session_id, mark):
 
 def check_only(a):
     ok, facts = preflight(a)
+    if not ok:
+        print(json.dumps({"check_only": True, "preflight_ok": False, "facts": facts, "launched": False}))
+        return 4
     env, removed = scrubbed_env(a)
     facts["scrubbed_env_names"] = removed
     v = subprocess.run(exe_argv(a.hermes_exe) + ["--version"], capture_output=True, text=True, timeout=60, env=env,

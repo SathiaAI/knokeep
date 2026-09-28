@@ -27,6 +27,10 @@ The saved next-action note already contained the source's predicted answer, accu
 
 ## Defects exposed and next work
 
+### Later explicit-startup diagnostic R2
+
+Fresh Hermes on the same local GLM route received an exact bootstrap command and direct state/log file locations. Frozen pre-launch commitment `5fa55016390202f7048565f999db593eab31feada657f0a78f7f04b1b9e3d416`. It changed directory away from the supplied project before running the relative helper, so bootstrap failed. It then searched the parent run directory, exposing prohibited source traces and a private packet. It eventually read the correct state/log and returned the right CSV text, but claimed it created `review-queue.csv` without any write operation; no such file exists. Actual process exit0,77.172seconds,5measured calls on the same local route, no fallback; all input bytes unchanged. Verdict **FAILED_AND_CONTAMINATED**. It neither repairs nor replaces either original receiver result. The independent-usefulness claim is invalid for this later run. Derived tool actions and assessment are under `hermes-bootstrap-r2`; raw private outputs are retained but not republished because they include out-of-scope search results.
+
 1. Store discovery needs an explicit, supported entry point. Dumping a directory beside a project was insufficient on this route. Test a generated, readable resume artifact or actual bootstrap adapter as a new version; do not retroactively change these receiver results.
 2. An accepted intermediate source version contradicted itself. At milestone 3, hash `68c736be709c57740c6343b976e8f7961ac879ac86f6167528d216c633b495e8` held the new eligibility in Architecture and the old rule in Hard Constraints. Later updates corrected it. Test interruption at that exact boundary; per-document durable writes do not make a whole milestone atomic.
 3. The local Hermes source failed before a verified milestone. Do not expand its capture reliability batch until its route/task failure is diagnosed. Independent actual-cloud transport tests can proceed under [#41](https://github.com/SathiaAI/knokeep/issues/41).

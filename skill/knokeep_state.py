@@ -413,12 +413,19 @@ def flush_log(store, project, new_body, expect_hash=None, section=None, session=
     return _flush_doc("log", store, project, new_body, expect_hash=expect_hash,
                        section=section, session=session, client=client)
 
-def session_append(store, project, session_id, client, entry):
+def session_append(store, project, session_id, client, entry, operation_id=None):
     _validate_project(project)
     if not valid_id(session_id):
         die(reason="invalid session id", value=session_id)
     if not valid_id(client):
         die(reason="invalid client", value=client)
+    if operation_id is not None and not valid_id(operation_id):
+        die(reason="invalid operation id")
+    # Scope is this project's session journal. Bind both text and declared writer;
+    # the ledger and entry must be persisted as ONE document under the same lease.
+    payload_hash = hashlib.sha256(json.dumps(
+        {"client": client, "entry": entry}, sort_keys=True,
+        ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
     backend = _backend(store)
     jkey = _key(project, "journal", session_id)
     for attempt in range(1, 51):                              # bounded CAS retry: same-session concurrent appends
@@ -440,6 +447,25 @@ def session_append(store, project, session_id, client, entry):
                     fm["updated"] = now()
                     body = body or "## Journal\n"
                     expect = blob.version_hash
+                if operation_id is not None:
+                    try:
+                        operations = json.loads(fm.get("append_operations", "{}"))
+                    except (TypeError, ValueError):
+                        die(reason="invalid append operation ledger")
+                    if (not isinstance(operations, dict)
+                            or any(not valid_id(k) or not isinstance(v, str)
+                                   or not re.fullmatch(r"[0-9a-f]{64}", v)
+                                   for k, v in operations.items())):
+                        die(reason="invalid append operation ledger")
+                    previous = operations.get(operation_id)
+                    if previous is not None:
+                        if previous != payload_hash:
+                            die(reason="operation id reused with different content")
+                        return {"ok": True, "log": jkey,
+                                "operation_id": operation_id, "duplicate": True,
+                                "current_version_hash": blob.version_hash}
+                    operations[operation_id] = payload_hash
+                    fm["append_operations"] = json.dumps(operations, sort_keys=True, separators=(",", ":"))
                 body = body + f"[{now()}] {entry}\n"
                 # CreateOnly (expect is None) needs no lease; an Overwrite append
                 # carries the HELD lease. The whole-doc version_hash stays the CAS
@@ -459,6 +485,9 @@ def session_append(store, project, session_id, client, entry):
             time.sleep(random.uniform(0.01, 0.05) * min(attempt, 10))
             continue                                          # bounded retry
         if isinstance(res, OK):
+            if operation_id is not None:
+                return {"ok": True, "log": jkey, "operation_id": operation_id,
+                        "duplicate": False, "current_version_hash": res.new_hash}
             return {"ok": True, "log": jkey}
         if isinstance(res, ERROR) and res.kind == ErrorKind.SECRET_BLOCKED:
             die(reasons=list(res.labels))
@@ -468,7 +497,7 @@ def session_append(store, project, session_id, client, entry):
             die(reason="write_error", kind=res.kind.value)
     die(reason="append_retry_exhausted")
 
-def _section(b, h, warnings=None):
+def _section(b, h, warnings=None, limit=400):
     """Read-only resume view of one '## <h>' section (issue #20).
 
     Uses the same line-anchored, CRLF-tolerant heading rules as the writer
@@ -485,7 +514,12 @@ def _section(b, h, warnings=None):
         return ""
     if got is None:
         return ""
-    return got[2].replace("\r\n", "\n").strip()[:400]
+    content = got[2].replace("\r\n", "\n").strip()
+    if limit is not None and len(content) > limit:
+        if warnings is not None:
+            warnings.append(f"truncated preview: {h}; read the full section before acting")
+        return content[:limit]
+    return content
 
 # --- H1 increment 1: bounded_cas_reread_reapply conflict protocol -----------
 # A "## <Heading>" line must be a real level-2 heading: "##" immediately
@@ -693,8 +727,16 @@ def bootstrap(store, project):
     fm, _ = parse(sblob.body.decode("utf-8")) if sblob else ({}, "")
     lfm, lbody = parse(lblob.body.decode("utf-8")) if lblob else ({}, "")
     section_warnings = []
-    active = _section(lbody, "Active State", section_warnings)
-    nxt = _section(lbody, "Next Step", section_warnings)
+    active_full = _section(lbody, "Active State", section_warnings, limit=None)
+    next_full = _section(lbody, "Next Step", section_warnings, limit=None)
+    active, nxt = active_full[:400], next_full[:400]
+    truncated_fields = []
+    for field, heading, full in (("active", "Active State", active_full),
+                                 ("next", "Next Step", next_full)):
+        if len(full) > 400:
+            truncated_fields.append(field)
+            section_warnings.append(
+                f"truncated preview: {heading}; read {field}_full before acting")
     vh = sblob.version_hash if sblob else None
     lh = lblob.version_hash if lblob else None
     rev = int(fm["revision"]) if fm.get("revision") else None
@@ -718,6 +760,8 @@ def bootstrap(store, project):
            "state_client": fm.get("client"), "log_client": lfm.get("client"),
            "client_labels_verified": False,
            "active": active, "next": nxt,
+           "active_full": active_full, "next_full": next_full,
+           "truncated_fields": truncated_fields,
            "conflicts": conflicts, "conflict_count": conflict_count,
            "settled_count": settled_count,
            "resume_line": resume}
@@ -891,8 +935,14 @@ def main():
     ap.add_argument("cmd", choices=["init", "flush-state", "flush-log", "session-append", "bootstrap", "rollup", "resolve", "eval", "health"])
     ap.add_argument("--store"); ap.add_argument("--project")   # --store optional: defaults to the shared cross-tool root
     ap.add_argument("--session-id"); ap.add_argument("--client", default="cowork")
+    ap.add_argument("--operation-id")
     ap.add_argument("--body-file"); ap.add_argument("--entry"); ap.add_argument("--entry-file"); ap.add_argument("--expect-hash"); ap.add_argument("--section"); ap.add_argument("--conflict-key")
     a = ap.parse_args()
+    if a.operation_id is not None:
+        if a.cmd != "session-append":
+            ap.error("--operation-id is only supported by session-append")
+        if not a.session_id:
+            ap.error("--operation-id requires an explicit --session-id reused across retries")
     if a.cmd == "session-append":
         if a.body_file is not None:
             ap.error("session-append does not accept --body-file; use --entry-file (or --entry-file - for stdin)")
@@ -910,7 +960,7 @@ def main():
         if a.cmd == "init": result = init(a.store, a.project, client=a.client)
         elif a.cmd == "flush-state": result = flush_state(a.store, a.project, _bodyfile(a.body_file), a.expect_hash, section=a.section, session=a.session_id, client=a.client)
         elif a.cmd == "flush-log": result = flush_log(a.store, a.project, _bodyfile(a.body_file), a.expect_hash, section=a.section, session=a.session_id, client=a.client)
-        elif a.cmd == "session-append": result = session_append(a.store, a.project, a.session_id or _auto_sid(), a.client, _entry(a))
+        elif a.cmd == "session-append": result = session_append(a.store, a.project, a.session_id or _auto_sid(), a.client, _entry(a), operation_id=a.operation_id)
         elif a.cmd == "bootstrap": result = bootstrap(a.store, a.project)
         elif a.cmd == "rollup": result = rollup(a.store, a.project)
         elif a.cmd == "resolve": result = resolve_conflict(a.store, a.project, a.conflict_key)

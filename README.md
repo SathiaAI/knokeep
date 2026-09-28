@@ -28,13 +28,7 @@
 
 <p align="center"><i>Part of the Kno suite — <a href="https://github.com/SathiaAI/knosky">Knosky</a> routes to the right file; KnoKeep remembers the work.</i></p>
 
-<br>
-
-<p align="center">
-  <img src="docs/brand/story.png" alt="Illustration of the intended cross-client workflow" width="100%">
-</p>
-
-The illustration describes the intended workflow. Automatic, faithful capture and reliable cross-client continuation are still being qualified; a saved summary is not an exact conversation transcript.
+Automatic, faithful capture and reliable cross-client continuation are still being qualified; a saved summary is not an exact conversation transcript. The historical story artwork is not displayed here because its universal secret-detection promise is unsupported.
 
 ## Contents
 
@@ -66,7 +60,7 @@ Shared files, repository instructions and vendor memory are existing alternative
 
 - **Solo multi-tool builders** who jump between Cursor, Codex, Claude Code, and Cowork and want continuity without babysitting it.
 - **Security-conscious engineers** who want local storage and can keep sensitive values out of agent records; this is not a compliance or confidentiality certification.
-- **Small trusted teams** (today, via a shared database) who want one project memory everyone resumes from.
+- **Small trusted teams evaluating a shared record.** Database adapters exist in the engine; the bundled helper currently uses LocalBackend. A shared database client route still needs integration and qualification.
 
 ## How it works
 
@@ -109,7 +103,7 @@ Being honest about the edges:
 
 - **Not a code-search / RAG engine.** It remembers *your working state*, not your whole codebase (that's Knosky's job).
 - **Not for PHI or payer data.** Storing that is prohibited by design — don't point it at it.
-- **Secret detection on freeform prose is best-effort, not a guarantee.** The gate is one of several layers (store scan + gitleaks back it up), but a cleverly disguised secret in plain text can still slip a single heuristic — which is exactly why there's more than one.
+- **Secret detection on freeform prose is best-effort, not a guarantee.** Resume-time store scans add another check; gitleaks runs in this repository's CI, not automatically on each user's store. Disguised or unrecognized sensitive values can escape detection.
 - **v0.1.0.** The engine is built, tested, and independently reviewed, but it's young. Expect some rough edges and file issues.
 
 ## Docs

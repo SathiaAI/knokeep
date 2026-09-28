@@ -1,6 +1,6 @@
 {
   "name": "kno",
-  "description": "The Kno suite — portable, secret-safe AI tooling. Currently ships KnoKeep (cross-tool memory).",
+  "description": "The Kno suite — portable AI tooling. Currently ships KnoKeep project records with secret-pattern screening.",
   "owner": {
     "name": "ViaKnox",
     "url": "https://github.com/SathiaAI"
@@ -10,7 +10,7 @@
       "name": "knokeep",
       "source": "./",
       "displayName": "KnoKeep",
-      "description": "Portable, secret-safe memory that lets any AI coding agent resume exactly where the last session — on any tool — left off. Part of the Kno suite.",
+      "description": "Portable project records with secret-pattern screening. Enrolled clients can save and resume through a shared store or verified export; capture fidelity remains under qualification. Part of the Kno suite.",
       "version": "0.1.0",
       "author": {
         "name": "ViaKnox"

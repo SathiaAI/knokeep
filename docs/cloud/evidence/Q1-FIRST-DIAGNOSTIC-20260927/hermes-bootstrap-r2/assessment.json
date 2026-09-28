@@ -1,0 +1,27 @@
+{
+  "status": "FAILED_AND_CONTAMINATED",
+  "os_exit_code": 0,
+  "elapsed_s": 77.172,
+  "route": {
+    "status": "measured",
+    "api_calls": 5,
+    "routes": {
+      "GLM-4.7-Flash-Q4_K_M|custom": 5
+    },
+    "fallback_lines": 0,
+    "log_mark": {
+      "exists": false,
+      "size": 0,
+      "head_sha256": null
+    },
+    "delta_bytes": 10486
+  },
+  "target_file_exists": false,
+  "input_bytes_changed": [],
+  "record_files_read": true,
+  "bootstrap_succeeded": false,
+  "write_tool_or_write_command_observed": false,
+  "false_created_file_claim": true,
+  "outside_input_search_exposed_source_traces_and_private_packet": true,
+  "interpretation": "Direct record lookup eventually succeeded; no deliverable was written. Broad search exposed prohibited source traces/private packet, so this cannot support an independent retrieval advantage. Original run preserved; no silent retry."
+}

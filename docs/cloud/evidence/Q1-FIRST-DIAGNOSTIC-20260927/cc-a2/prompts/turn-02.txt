@@ -1,0 +1,1 @@
+Our packaging supplier has changed. Use six units per carton from now on; four-unit cartons are obsolete. Keep the order eligibility and SKU rules unchanged. Update the program and checks, then run them against orders.csv and confirm the revised report.

@@ -1,0 +1,7 @@
+order_id,sku,units,status,approved
+p1,Cedar-Mug,4,ready,no
+p2,cedar_mug,5,ready,no
+p3,CEDAR MUG,8,hold,no
+p4,Birch-Tea,2,ready,no
+p5,birch_tea,5,hold,yes
+p6,Birch Tea,4,cancelled,yes

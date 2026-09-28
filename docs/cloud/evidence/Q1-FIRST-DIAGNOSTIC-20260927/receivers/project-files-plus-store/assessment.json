@@ -1,0 +1,33 @@
+{
+  "opaque_id": "<runtime-id>",
+  "arm": "project-files-plus-store",
+  "process": {
+    "os_exit_code": 0,
+    "outcome": "exited",
+    "reported_exit_code": 0,
+    "exit_codes_agree": true
+  },
+  "route": {
+    "status": "measured",
+    "api_calls": 13,
+    "routes": {
+      "GLM-4.7-Flash-Q4_K_M|custom": 13
+    },
+    "fallback_lines": 0,
+    "log_mark": {
+      "exists": false,
+      "size": 0,
+      "head_sha256": null
+    },
+    "delta_bytes": 14738
+  },
+  "elapsed_s": 94.344,
+  "target_deliverable_exists": false,
+  "input_changed": [],
+  "new_files": [],
+  "outcome": "INCORRECT_CONTINUATION",
+  "reason": "Receiver listed store/ but never read stored state/log/journal, reran the existing report, then incorrectly excluded ready orders lacking approval.",
+  "retrieval": "FAILED_TO_READ_AVAILABLE_RECORD",
+  "copied_expected_answer": false,
+  "scope": "Single synthetic comparison on this actual Hermes/local GLM route; no benefit demonstrated, not a general platform verdict. Both shells could access outside input directory; trace review required."
+}

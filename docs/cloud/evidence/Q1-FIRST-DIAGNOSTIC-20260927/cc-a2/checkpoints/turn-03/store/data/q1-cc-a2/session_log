@@ -1,0 +1,17 @@
+---
+schema_version: 1
+project_id: q1-cc-a2
+revision: 3
+updated: 2026-09-28T02:33:57Z
+client: claude-code
+---
+## Completed & Verified
+- pack.py created and run on supplied orders.csv (initially 4-unit cartons).
+- Supplier change: CARTON_SIZE = 6 (4-unit cartons obsolete). Verified.
+- Release-team exception: held orders included only when approved == "yes"; including all held orders rejected; cancelled stays excluded. Rerun verified: birch_tea,7,2 (p4 ready 2 + p5 hold/yes 5) and cedar_mug,9,2 (p3 hold/no and p6 cancelled/yes excluded).
+
+## Active State
+Task complete; packing-report.csv regenerated with approved-hold exception and verified.
+
+## Next Step
+None — await new instructions.

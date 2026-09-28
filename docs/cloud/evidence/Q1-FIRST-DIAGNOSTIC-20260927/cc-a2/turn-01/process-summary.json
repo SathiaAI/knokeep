@@ -1,0 +1,74 @@
+{
+  "malformed_lines": [],
+  "init_count": 1,
+  "result_count": 1,
+  "session_continuity": true,
+  "model_matches": true,
+  "models": [
+    "claude-opus-5-5"
+  ],
+  "tool_names": [
+    "Bash",
+    "Edit",
+    "Glob",
+    "Grep",
+    "Read",
+    "Write"
+  ],
+  "mcp_servers": [
+    []
+  ],
+  "plugins": [
+    [
+      "agents-md",
+      "telemetry"
+    ]
+  ],
+  "api_key_sources": [
+    "none"
+  ],
+  "result_is_error": false,
+  "result_subtype": "success",
+  "usage": {
+    "input_tokens": 10,
+    "cache_creation_input_tokens": 6145,
+    "cache_read_input_tokens": 45718,
+    "output_tokens": 2221,
+    "output_tokens_details": {
+      "thinking_tokens": 143
+    },
+    "server_tool_use": {
+      "web_search_requests": 0,
+      "web_fetch_requests": 0
+    },
+    "service_tier": "standard",
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 6145,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "inference_geo": "not_available",
+    "iterations": [
+      {
+        "input_tokens": 2,
+        "output_tokens": 369,
+        "cache_read_input_tokens": 10768,
+        "cache_creation_input_tokens": 1125,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 1125
+        },
+        "type": "message"
+      }
+    ],
+    "speed": "standard"
+  },
+  "auth_route": "claude.ai Max",
+  "resume_requested": false,
+  "executable_sha256": "9dbe16dafed59da5cdabbfe11ad0335738c753fad794989b47f9446accd6de3a",
+  "product_unchanged": true,
+  "prompt_sha256": "431a0fab543ba57940b3ed573bdb83e669770fd45b6d501cf2203a523bf3fe21",
+  "product_sha": "8fb9ef7ac4290b43352a40a9690c13c1f32a8917",
+  "process_outcome": "exited",
+  "os_exit_code": 0,
+  "transport_pass": true
+}

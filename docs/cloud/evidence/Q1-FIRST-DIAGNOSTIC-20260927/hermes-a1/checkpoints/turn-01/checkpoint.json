@@ -1,0 +1,72 @@
+{
+  "job": "Q1-HERMES-A1",
+  "milestone": "m1",
+  "project_snapshot": {
+    "existed": true,
+    "files": {
+      "orders.csv": {
+        "bytes": 183,
+        "sha256": "09060574d1c48c21088174446d0114033d5e7eca707668a983d922ca96987fde"
+      },
+      "pack.py": {
+        "bytes": 2932,
+        "sha256": "39b1a7d1e75f348d30c31ab10ce98f04edee95cd541d30035dc8634a4eb01758"
+      },
+      "packing-report.csv": {
+        "bytes": 49,
+        "sha256": "6d568661d9bd4c4fa8419918634ff8cdc9efff4efa6129a1076fc4c82c0a58e0"
+      }
+    }
+  },
+  "store_snapshot": {
+    "existed": true,
+    "files": {}
+  },
+  "journal": {
+    "versions": [],
+    "tail_error": null
+  },
+  "verification": {
+    "outcome": "exited",
+    "os_exit_code": 1,
+    "rows": [
+      [
+        "sku",
+        "units",
+        "cartons"
+      ],
+      [
+        "birch_tea",
+        "2",
+        "1"
+      ],
+      [
+        "cedar_mug",
+        "9",
+        "3"
+      ]
+    ],
+    "expected_rows": [
+      [
+        "sku",
+        "units",
+        "cartons"
+      ],
+      [
+        "birch_tea",
+        "2",
+        "1"
+      ],
+      [
+        "cedar_mug",
+        "9",
+        "3"
+      ]
+    ],
+    "coordinator_task_match": false,
+    "source_verification_trace": "PENDING_REVIEW",
+    "semantic_capture": "PENDING_REVIEW",
+    "receipt_match": "PENDING_REVIEW",
+    "chronology": "PENDING_REVIEW"
+  }
+}

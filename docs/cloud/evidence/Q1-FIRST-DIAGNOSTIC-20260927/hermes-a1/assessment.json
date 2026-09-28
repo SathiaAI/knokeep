@@ -1,0 +1,30 @@
+{
+  "job": "Q1-HERMES-A1",
+  "status": "TIME_LIMIT_TASK_FAILURE",
+  "planned_milestones": 4,
+  "verified_milestones": 0,
+  "eligible_capture_opportunities": 0,
+  "durable_captures": 0,
+  "helper_calls": 0,
+  "unstarted_milestones": [
+    "m2",
+    "m3",
+    "m4"
+  ],
+  "cause": "Local model repeatedly retained incorrect expected rows in self-check; coordinator rerun exited 1. Supervisor reached six-minute limit. No terminal model result or store bytes.",
+  "actual_route": {
+    "status": "measured",
+    "api_calls": 12,
+    "routes": {
+      "GLM-4.7-Flash-Q4_K_M|custom": 12
+    },
+    "fallback_lines": 0,
+    "log_mark": {
+      "exists": false,
+      "size": 0,
+      "head_sha256": null
+    },
+    "delta_bytes": 10007
+  },
+  "assessment_limit": "This diagnoses this local-model/task configuration; it does not establish Hermes platform cannot capture or forgets verified work."
+}

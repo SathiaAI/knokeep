@@ -1,0 +1,203 @@
+{
+  "change": "Only harness Bash composition permission plus fresh project/session identifiers; task/policy/rubric unchanged. A1 remains capture BLOCKED, 1 verified opportunity, 0 durable captures, 3 unstarted.",
+  "code_commit": "8fb9ef7ac4290b43352a40a9690c13c1f32a8917",
+  "critical_stop": "Pause expansion after any source missed critical fact, false verified milestone, failure to save, lost durable bytes, incorrect KnoKeep-treatment continuation, leaked rubric or required coordinator repair. A control receiver reporting missing information or producing an incorrect artifact is a comparison outcome, not by itself an expansion-stop event. Keep all failures and blocked cases. Further runs after a critical stop require a new versioned diagnostic, not replacing results.",
+  "execution": {
+    "claude_driver": "new headless session then explicit --resume session id",
+    "driver_pins": {
+      "claude_driver": "d9584063f4703aecec4f463dd294fd21e3af1dae",
+      "hermes_driver": "f6c0c3b9885e1d1ff3a6976bc2102051e54b0795",
+      "product": "8fb9ef7ac4290b43352a40a9690c13c1f32a8917",
+      "protocol": "3256e6a3d1ef2f3afda1a80462c12be079086282",
+      "supervisor": "28668664317a6d9a2ed1dcbd886f5a8832e3e2c8"
+    },
+    "hermes_driver": "new isolated profile/oneshot query-file then explicit --resume session id",
+    "native_enrollment": "Policy in first message only; native plugin/hook discovery not tested.",
+    "ordinary_capture_body_files_included_in_both_arms": true,
+    "product_ignored_files": "Ignored Python bytecode and test cache may exist; tracked edits and untracked nonignored files invalidate product-integrity checks.",
+    "receiver_budget_seconds": 300,
+    "receiver_git_included": false,
+    "receiver_inclusion": "Identical complete ordinary project snapshot in both arms; .git excluded. Dedicated source store added only to treatment. No history, profiles, prompts, checkpoint/scoring artifacts or transcript supplied.",
+    "receiver_order": {
+      "claude-code": [
+        {
+          "arm": "project-files-only",
+          "opaque_id": "<runtime-id>"
+        },
+        {
+          "arm": "project-files-plus-store",
+          "opaque_id": "<runtime-id>"
+        }
+      ],
+      "hermes": [
+        {
+          "arm": "project-files-only",
+          "opaque_id": "<runtime-id>"
+        },
+        {
+          "arm": "project-files-plus-store",
+          "opaque_id": "<runtime-id>"
+        }
+      ]
+    },
+    "receiver_routes": {
+      "claude-code source": "fresh actual Hermes local GLM, two new isolated profiles, terminal/file tools",
+      "hermes source": "fresh actual Claude Code Max, claude-opus-5-5, restricted Read/Write/Glob/Grep only"
+    },
+    "session_budget_seconds": 1200,
+    "session_stop_rule": "Unexpected session/model/tools/route, failed process or blocked verification stops the affected source session. A semantic capture miss is kept; complete the already planned four turns if transport remains valid, but do not expand beyond the first pair before diagnosis.",
+    "source_code_entrypoint": "pack.py",
+    "source_routes": {
+      "claude-code": {
+        "apiKeySource": "none",
+        "auth": "Max subscription",
+        "model": "claude-opus-5-5",
+        "native_executable_sha256": "9dbe16dafed59da5cdabbfe11ad0335738c753fad794989b47f9446accd6de3a"
+      },
+      "hermes": {
+        "config_sha256": "cc1a3ea575dff900bb643f6d638ee355b0c36e16024373a6019681924bb98e55",
+        "endpoint": "http://127.0.0.1:18434/v1",
+        "model": "GLM-4.7-Flash-Q4_K_M",
+        "native_executable_sha256": "358c44d523066abda23c106e2cfcaee027c741eebb28c37ffbf0820927f85e39",
+        "paid_fallbacks": false,
+        "provider": "custom"
+      }
+    },
+    "supervisor_sha": "28668664317a6d9a2ed1dcbd886f5a8832e3e2c8",
+    "total_budget_rule": "Before each turn cap its timeout at min(360, 1200 minus elapsed source-session wall time); no launch when budget exhausted. Record this derived limit.",
+    "turn_budget_seconds": 360,
+    "verification_location": "separate copy of each completed source-turn workspace; compare parsed CSV to that checkpoint expected rows; source store never mutated",
+    "verify_command": [
+      "python",
+      "pack.py",
+      "orders.csv",
+      "packing-report.csv"
+    ]
+  },
+  "first_pair": [
+    "actual Claude Code A2; Hermes A1 remains its separate original frozen attempt"
+  ],
+  "frozen_at_utc": "2026-09-28T02:28:02.154779+00:00",
+  "independence": "same scenario in separate fresh sessions; diagnostic, not independent population samples",
+  "input": {
+    "orders.csv": "order_id,sku,units,status,approved\np1,Cedar-Mug,4,ready,no\np2,cedar_mug,5,ready,no\np3,CEDAR MUG,8,hold,no\np4,Birch-Tea,2,ready,no\np5,birch_tea,5,hold,yes\np6,Birch Tea,4,cancelled,yes\n"
+  },
+  "opportunities": [
+    {
+      "critical_facts": [
+        "only ready included",
+        "held excluded because inventory not released",
+        "SKU normalization",
+        "four-unit cartons",
+        "packing report path/schema"
+      ],
+      "rows": [
+        [
+          "birch_tea",
+          "2",
+          "1"
+        ],
+        [
+          "cedar_mug",
+          "9",
+          "3"
+        ]
+      ],
+      "verify": "packing report matches expected rows and trace shows successful execution/check"
+    },
+    {
+      "critical_facts": [
+        "six-unit cartons supersede four-unit cartons",
+        "reason: supplier change",
+        "eligibility unchanged"
+      ],
+      "rows": [
+        [
+          "birch_tea",
+          "2",
+          "1"
+        ],
+        [
+          "cedar_mug",
+          "9",
+          "2"
+        ]
+      ],
+      "verify": "updated report matches expected rows and trace shows successful execution/check"
+    },
+    {
+      "critical_facts": [
+        "ready included",
+        "hold included only if approved exactly yes",
+        "cancelled always excluded",
+        "including all held orders rejected",
+        "six-unit cartons retained"
+      ],
+      "rows": [
+        [
+          "birch_tea",
+          "7",
+          "2"
+        ],
+        [
+          "cedar_mug",
+          "9",
+          "2"
+        ]
+      ],
+      "verify": "updated report matches expected rows and trace shows successful execution/check"
+    },
+    {
+      "critical_facts": [
+        "next action review-queue.csv",
+        "hold and approved not yes only",
+        "cancelled excluded from queue",
+        "columns order_id,reason,owner",
+        "reason awaiting approval",
+        "owner Warehouse Control",
+        "queue not implemented"
+      ],
+      "rows": [
+        [
+          "birch_tea",
+          "7",
+          "2"
+        ],
+        [
+          "cedar_mug",
+          "9",
+          "2"
+        ]
+      ],
+      "verify": "final report still correct, successful verification observed, future queue not implemented"
+    }
+  ],
+  "parent_commitment": "abd6cb0f6f15bb0491acc13ffb119d8c2be889d635a82604ff319444f9e1a94d",
+  "pins": {
+    "claude_driver": "d9584063f4703aecec4f463dd294fd21e3af1dae",
+    "hermes_driver": "f6c0c3b9885e1d1ff3a6976bc2102051e54b0795",
+    "product": "8fb9ef7ac4290b43352a40a9690c13c1f32a8917",
+    "protocol": "3256e6a3d1ef2f3afda1a80462c12be079086282",
+    "supervisor": "28668664317a6d9a2ed1dcbd886f5a8832e3e2c8"
+  },
+  "policy": {
+    "bytes_sha256": "20e4927d1b068bd3640a5e0027a80a81bc9a38d2857a3fa4c39d5fcd77f61606",
+    "placement": "first user message only, identical bytes, separate enrollment block",
+    "sha256": "20e4927d1b068bd3640a5e0027a80a81bc9a38d2857a3fa4c39d5fcd77f61606"
+  },
+  "receiver_arms": [
+    "normal project files plus KnoKeep",
+    "same normal project files without KnoKeep"
+  ],
+  "receiver_expected_csv": "order_id,reason,owner\np3,awaiting approval,Warehouse Control\n",
+  "receiver_prompt": "Continue this project from the supplied records and normal project files, and complete its recorded next action. Do not infer an unstated decision; report missing information if you cannot proceed. Write the deliverable and cite the saved evidence used.",
+  "semantic_scoring": "Score equivalent meanings, not literal phrase matches; current accepted rules must be unambiguous. Root and independent Claude reviewer judge each item separately; unresolved disagreement stays UNRESOLVED. Actual deliverable rows scored mechanically.",
+  "source_turns": [
+    "Create pack.py using only the Python standard library. Its command is python pack.py orders.csv packing-report.csv. Read orders.csv and write packing-report.csv with columns sku,units,cartons, sorted by sku. Include only rows whose status is exactly ready. Normalize SKU by lowercasing and replacing each hyphen or space with underscore. Sum units per SKU. Cartons hold four units, rounded up. Held orders must stay out because their inventory is not released. Run it on the supplied data and verify the resulting rows before reporting completion.",
+    "Our packaging supplier has changed. Use six units per carton from now on; four-unit cartons are obsolete. Keep the order eligibility and SKU rules unchanged. Update the program and checks, then run them against orders.csv and confirm the revised report.",
+    "The release team has approved a narrower exception: include a held order only when its approved field is exactly yes. Ready orders remain included; cancelled orders remain excluded even if approved says yes. Reject the proposal to include every held order. Update the program and checks, and verify the report with the existing data.",
+    "Verify the final report once more against the current rules. The next item is a separate review-queue.csv for held orders whose approved field is not yes, with columns order_id,reason,owner; reason is awaiting approval and owner is Warehouse Control. Cancelled orders do not belong in that queue. Leave this next item unimplemented for now."
+  ],
+  "status": "FROZEN BEFORE FIRST SOURCE INFERENCE",
+  "version": "q1-cc-a2-after-permission-block"
+}

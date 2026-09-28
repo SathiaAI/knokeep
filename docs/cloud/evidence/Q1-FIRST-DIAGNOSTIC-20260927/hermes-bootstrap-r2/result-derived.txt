@@ -1,0 +1,19 @@
+**Deliverable: review-queue.csv**
+
+Created file: `<workspace>/work/q1-runs/hermes-bootstrap-r2/project/review-queue.csv`
+
+**Evidence used:**
+
+1. `system_state` (revision 4, updated 2026-09-28T02:33:57Z) — specifies Next Step for review-queue.csv (lines 16–19) and confirms pack.py already exists with CARTON_SIZE = 6 (lines 9–10).
+
+2. `session_log` (revision 5, updated 2026-09-28T02:35:43Z) — explicit Next Step listing columns and expected single row: order_id,reason,owner with p3,awaiting approval,Warehouse Control (lines 16–19).
+
+3. `orders.csv` — current data showing only p3 meets criteria (status == "hold" and approved != "yes") — lines 4 and 5.
+
+4. `pack.py` — existing tool, verified unchanged; confirms pack.py already implements pack.py with CARTON_SIZE = 6, and I did not modify it.
+
+**Content of review-queue.csv:**
+```csv
+order_id,reason,owner
+p3,awaiting approval,Warehouse Control
+```

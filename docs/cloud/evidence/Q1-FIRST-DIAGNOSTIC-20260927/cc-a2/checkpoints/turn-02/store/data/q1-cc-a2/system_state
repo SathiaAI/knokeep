@@ -1,0 +1,17 @@
+---
+schema_version: 1
+project_id: q1-cc-a2
+revision: 2
+updated: 2026-09-28T02:31:59Z
+client: claude-code
+---
+## Architecture
+pack.py (stdlib only): reads orders.csv, filters status == "ready" exactly, normalizes SKU (lowercase; '-' and ' ' -> '_'), sums units per SKU, cartons = ceil(units/6) (CARTON_SIZE = 6; supplier change — 4-unit cartons are obsolete), writes packing-report.csv (sku,units,cartons) sorted by sku.
+## Path & Variable Directory
+- pack.py — the tool; run: python pack.py orders.csv packing-report.csv
+- orders.csv — input (order_id,sku,units,status,approved)
+- packing-report.csv — generated output
+
+## Hard Constraints
+- Only status exactly "ready" is included. Held orders stay out (inventory not released) even when approved=yes; the approved column is ignored.
+- Python standard library only.

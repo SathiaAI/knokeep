@@ -1,0 +1,1 @@
+The release team has approved a narrower exception: include a held order only when its approved field is exactly yes. Ready orders remain included; cancelled orders remain excluded even if approved says yes. Reject the proposal to include every held order. Update the program and checks, and verify the report with the existing data.

@@ -1,0 +1,22 @@
+{
+  "args_sha256": "488d34c8259c6f831b1eaaf47f6dc15accdd0dc7d775e62a0a148819d130d5c1",
+  "arm": "project-files-only",
+  "input_files": {
+    "orders.csv": {
+      "bytes": 183,
+      "sha256": "09060574d1c48c21088174446d0114033d5e7eca707668a983d922ca96987fde"
+    },
+    "pack.py": {
+      "bytes": 1345,
+      "sha256": "21a623664f8569d72d0172a240515be80d841d94af7effcc0447bc8ced7f96ae"
+    },
+    "packing-report.csv": {
+      "bytes": 49,
+      "sha256": "c0c2ea893ff04aa91e91f64f43b468bec84d050d36d27b6c75d5f077b1484bc9"
+    }
+  },
+  "opaque_id": "<runtime-id>",
+  "order": 1,
+  "profile_sha256": "cc1a3ea575dff900bb643f6d638ee355b0c36e16024373a6019681924bb98e55",
+  "prompt_sha256": "feb297af3d28a9d6fcb5bcaae9624fe0c5e8b738bf90b88238b4069ed6dcd0e8"
+}

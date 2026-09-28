@@ -1,0 +1,33 @@
+{
+  "opaque_id": "<runtime-id>",
+  "arm": "project-files-only",
+  "process": {
+    "os_exit_code": 0,
+    "outcome": "exited",
+    "reported_exit_code": 0,
+    "exit_codes_agree": true
+  },
+  "route": {
+    "status": "measured",
+    "api_calls": 9,
+    "routes": {
+      "GLM-4.7-Flash-Q4_K_M|custom": 9
+    },
+    "fallback_lines": 0,
+    "log_mark": {
+      "exists": false,
+      "size": 0,
+      "head_sha256": null
+    },
+    "delta_bytes": 9052
+  },
+  "elapsed_s": 87.704,
+  "target_deliverable_exists": false,
+  "input_changed": [],
+  "new_files": [],
+  "outcome": "INCORRECT_CONTINUATION",
+  "reason": "Receiver inferred the next action was rerunning the existing packing script, although no next action was present in supplied ordinary artifacts; requested queue not produced.",
+  "retrieval": "NO_NEXT_ACTION_IN_INPUTS",
+  "copied_expected_answer": false,
+  "scope": "Single synthetic comparison on this actual Hermes/local GLM route; no benefit demonstrated, not a general platform verdict. Both shells could access outside input directory; trace review required."
+}

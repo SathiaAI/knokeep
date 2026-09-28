@@ -28,7 +28,7 @@ Initial failure during development: unreadable-store case raised uncaught `Permi
 
 ## Commit
 
-`5ebf065` on `fix/cursor-health-readonly-a1` (pushed).
+`232c81f` on `fix/cursor-health-readonly-a1` (pushed).
 
 ## Residual limits
 

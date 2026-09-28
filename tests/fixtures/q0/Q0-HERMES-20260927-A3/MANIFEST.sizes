@@ -1,0 +1,6 @@
+669	./.knokeep-eval/events.jsonl
+170	./data/q0-hermes-20260927-a3/sessions/20260927-2352-6236
+275	./journal/journal.log
+1	./locks/advisory.lock
+1	./locks/cas.lock
+53	./locks/fence-alloc/9d098468ac345202ca734e596cf288f87c99a572df746738713cdf0d5a2ce6f4.fence

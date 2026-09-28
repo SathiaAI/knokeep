@@ -1,0 +1,5 @@
+{"ts": "2026-09-27T23:52:42Z", "project": "q0-hermes-20260927-a3", "op": "bootstrap", "decision": "allow", "ok": null}
+{"ts": "2026-09-27T23:52:53Z", "project": "q0-hermes-20260927-a3", "op": "session-append", "decision": "allow", "ok": true}
+{"ts": "2026-09-27T23:53:39Z", "project": "q0-hermes-20260927-a3", "op": "flush-state", "decision": "block", "reason": "missing --body-file"}
+{"ts": "2026-09-27T23:53:54Z", "project": "q0-hermes-20260927-a3", "op": "resolve", "decision": "block", "reason": "invalid_conflict_key"}
+{"ts": "2026-09-27T23:53:55Z", "project": "q0-hermes-20260927-a3", "op": "flush-log", "decision": "block", "reason": "missing --body-file"}

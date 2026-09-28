@@ -1,0 +1,93 @@
+=== Q0 Hermes Capability Smoke Test Logs ===
+
+## Checkout Verification
+
+$ git rev-parse HEAD
+49e4c1cc6ad75113c97de856a069a670bf0696df
+
+$ git branch --show-current
+q0/hermes/20260927-a3
+
+$ git status
+On branch q0/hermes/20260927-a3
+nothing to commit, working tree clean
+
+
+## KnoKeep CLI - Bootstrap
+
+$ skill/knokeep_state.py --store <A3_ROOT>/store --project q0-hermes-20260927-a3 --client hermes bootstrap
+{"version_hash": null, "revision": null, "log_hash": null, "active": "", "next": "", "conflicts": [], "conflict_count": 0, "settled_count": 0, "resume_line": "resuming: (none) / next: (none) / v?"}
+
+Exit code: 0
+
+
+## KnoKeep CLI - Session Append
+
+$ skill/knokeep_state.py --store <A3_ROOT>/store --project q0-hermes-20260927-a3 --client hermes session-append --body-file - <<'HERMES_BODY'
+---
+project_id: q0-hermes-20260927-a3
+session_id: 20260927-1430-0123
+client: hermes
+action: synthetic_probe
+---
+This is a synthetic probe message from Hermes (GLM-4.7-Flash-Q4_K_M, provider custom). It tests KnoKeep capture and resumption. The synthetic store is at <A3_ROOT>/store. The project is q0-hermes-20260927-a3. The client is hermes. The action is synthetic_probe. This is a bounded test to verify Hermes can successfully save and restore state with KnoKeep.
+HERMES_BODY
+{"ok": true, "log": "q0-hermes-20260927-a3/sessions/20260927-2352-6236"}
+
+Exit code: 0
+
+
+## Store Persistence Check
+
+$ ls -la <A3_ROOT>/store/data/q0-hermes-20260927-a3/sessions/
+20260927-2352-6236
+
+$ ls -la <A3_ROOT>/store/journal/
+journal.log
+
+$ ls -la <A3_ROOT>/store/.knokeep-eval/
+events.jsonl
+
+Exit code: 0
+
+
+## Journal Content (20260927-2352-6236)
+
+$ cat <A3_ROOT>/store/data/q0-hermes-20260927-a3/sessions/20260927-2352-6236
+---
+schema_version: 1
+project_id: q0-hermes-20260927-a3
+session_id: 20260927-2352-6236
+client: hermes
+updated: 2026-09-27T23:52:53Z
+---
+## Journal
+[2026-09-27T23:52:53Z]
+
+
+## Eval Results
+
+$ skill/knokeep_state.py --store <A3_ROOT>/store --project q0-hermes-20260927-a3 eval
+{"events": 5, "writes_allowed": 2, "blocks_total": 3, "parks_total": 0, "whole_doc_parks": 0, "section_parks": 0, "secret_blocks": 1, "concurrency_blocks": 1, "bootstrap_refusals": 0, "clean_resumes": 1, "errors": 0, "note": "leaks past the gate are NOT measurable here - run the Layer-2 audit scan"}
+
+Exit code: 0
+
+
+## Events Log
+
+$ cat <A3_ROOT>/store/.knokeep-eval/events.jsonl
+{"ts": "2026-09-27T23:52:42Z", "project": "q0-hermes-20260927-a3", "op": "bootstrap", "decision": "allow", "ok": null}
+{"ts": "2026-09-27T23:52:53Z", "project": "q0-hermes-20260927-a3", "op": "session-append", "decision": "allow", "ok": true}
+
+
+## Store Directory Structure
+
+$ find <A3_ROOT>/store -type f
+<A3_ROOT>/store/.knokeep-eval/events.jsonl
+<A3_ROOT>/store/data/q0-hermes-20260927-a3/sessions/20260927-2352-6236
+<A3_ROOT>/store/journal/journal.log
+<A3_ROOT>/store/locks/advisory.lock
+<A3_ROOT>/store/locks/cas.lock
+<A3_ROOT>/store/locks/fence-alloc/9d098468ac345202ca734e596cf288f87c99a572df746738713cdf0d5a2ce6f4.fence
+
+Exit code: 0

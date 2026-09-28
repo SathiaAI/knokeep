@@ -1,0 +1,30 @@
+model:
+  default: GLM-4.7-Flash-Q4_K_M
+  provider: custom
+  base_url: http://127.0.0.1:18434/v1
+  key_env: HERMES_A3_LOCAL_KEY
+  api_mode: chat_completions
+fallback_providers: []
+agent:
+  max_turns: 20
+  reasoning_effort: low
+memory:
+  memory_enabled: false
+  user_profile_enabled: false
+compression:
+  enabled: false
+auxiliary:
+  free_only: true
+moa:
+  enabled: false
+checkpoints:
+  enabled: false
+terminal:
+  backend: local
+  timeout: 120
+platform_toolsets:
+  cli:
+    - terminal
+    - file
+_config_version: 46
+

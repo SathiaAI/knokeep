@@ -1,0 +1,8 @@
+{"type": "system", "subtype": "init", "model": "GLM-4.7-Flash-Q4_K_M", "session_id": "<HERMES_LOCAL_SESSION>", "timestamp": 1790552959214}
+{"type": "text", "text": "OK", "timestamp": 1790552977015}
+{"type": "text", "text": "-", "timestamp": 1790552977047}
+{"type": "text", "text": "HER", "timestamp": 1790552977077}
+{"type": "text", "text": "MES", "timestamp": 1790552977108}
+{"type": "text", "text": "-A", "timestamp": 1790552977138}
+{"type": "text", "text": "3", "timestamp": 1790552977169}
+{"type": "result", "session_id": "<HERMES_LOCAL_SESSION>", "exit_code": 0, "text": "OK-HERMES-A3", "tokens": {"input": 5873, "output": 82, "total": 5955, "cache_read": 0, "cache_write": 0}, "duration_ms": 18008, "timestamp": 1790552977223}

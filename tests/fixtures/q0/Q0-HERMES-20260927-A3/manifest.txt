@@ -1,0 +1,44 @@
+# Q0-HERMES-20260927-A3: Synthetic Store Manifest
+
+## Store Location
+
+- **Source**: <A3_ROOT>\store
+- **Export**: tests/fixtures/q0/Q0-HERMES-20260927-A3/
+
+## Files
+
+| Path | Size (bytes) | SHA-256 | Notes |
+|------|--------------|---------|-------|
+| journal/journal.log | 275 | [TODO: compute] | Binary journal log |
+| data/q0-hermes-20260927-a3/sessions/20260927-2352-6236 | 170 | [TODO: compute] | Text journal entry |
+| .knokeep-eval/events.jsonl | 245 | [TODO: compute] | Event log |
+| locks/advisory.lock | 1 | [TODO: compute] | Advisory lock file |
+| locks/cas.lock | 1 | [TODO: compute] | CAS lock file |
+| locks/fence-alloc/9d098468ac345202ca734e596cf288f87c99a572df746738713cdf0d5a2ce6f4.fence | [TODO: compute] | Fence allocation file |
+
+## Total Files
+
+- Total file count: 6
+- Total size: [TODO: compute]
+- SHA-256: [TODO: compute]
+
+## Restoration Commands
+
+To restore the synthetic store from this manifest:
+
+```bash
+# Copy the entire store directory from the export location
+cp -r tests/fixtures/q0/Q0-HERMES-20260927-A3/ <A3_STORE>
+
+# Verify restoration
+sha256sum -c manifest.txt
+```
+
+## Notes
+
+- The store is a bounded synthetic test project.
+- The store contains no sensitive information or credentials.
+- The store is meant for Hermes capability testing only.
+- The project ID is `q0-hermes-20260927-a3`.
+- The client identifier is `hermes`.
+- The model is `GLM-4.7-Flash-Q4_K_M` with provider `custom`.

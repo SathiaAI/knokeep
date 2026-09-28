@@ -1,0 +1,6 @@
+PASS ambiguous-legacy-tail-keeps-staging -> BackendCorruptionError
+PASS clean-store-scavenges-aged-staging
+PASS orphan-empty-journal-write-fails-closed -> target=ERROR(kind=<ErrorKind.CORRUPTION: 'CORRUPTION'>, labels=()) unrelated=OK
+PASS child-durable-before-publish-parent-write-first -> write=EXISTS(current_hash='015ab4dd3a34dbace388e79176130c5c62516d59f7406a45b0d77a2f28be59e8') read_tail=b'\nchild'
+RESULT OK
+exit=0

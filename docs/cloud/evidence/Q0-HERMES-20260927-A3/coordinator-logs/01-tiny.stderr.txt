@@ -1,0 +1,24 @@
+hermes: completing source-update dependencies...
+Preparing the isolated Hermes runtime…
+  → Installing Python dependencies…
+  ✓ Installing Python dependencies
+  → Installing Python dependencies…
+  ✓ Installing Python dependencies
+Traceback (most recent call last):
+  File "C:\Users\<user>\AppData\Local\hermes\hermes-agent\hermes_cli\source_completion.py", line 142, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "C:\Users\<user>\AppData\Local\hermes\hermes-agent\hermes_cli\source_completion.py", line 119, in main
+    ok = complete_source_checkout(
+        root, desktop=args.desktop, assume_yes=True,
+        completion_message=None, announce="\n✓ Code updated!",
+    )
+  File "C:\Users\<user>\AppData\Local\hermes\hermes-agent\hermes_cli\source_completion.py", line 58, in complete_source_checkout
+    publish_launchers(root)
+    ~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Users\<user>\AppData\Local\hermes\hermes-agent\hermes_cli\venv_sync.py", line 94, in publish_launchers
+    raise InstallError("launchers", "source launcher publication failed", "retry the source update")
+pm.package.InstallError: launchers: source launcher publication failed — retry the source update
+hermes: source-update completion failed: source update completion failed; run `hermes update` to finish it; running with the previous dependencies — run `hermes update` to finish it
+
+session_id: <HERMES_LOCAL_SESSION>

@@ -1,0 +1,5 @@
+{"type": "system", "subtype": "init", "model": "GLM-4.7-Flash-Q4_K_M", "session_id": "<HERMES_LOCAL_SESSION>", "timestamp": 1790552873886}
+[1;31mHermes couldn't start the model connection: Failed to initialize OpenAI client: [0m
+[1;31mNo module named 'pydantic_core._pydantic_core'. Your message was not sent. Run [0m
+[1;31m`hermes doctor` to check the setup, or /model to pick a different provider.[0m
+{"type": "result", "session_id": "<HERMES_LOCAL_SESSION>", "exit_code": 1, "text": "", "tokens": {"input": 0, "output": 0, "total": 0, "cache_read": 0, "cache_write": 0}, "duration_ms": 469, "error": "credentials or agent init failed", "timestamp": 1790552874356}

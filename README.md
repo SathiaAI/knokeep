@@ -2,7 +2,7 @@
   <img src="docs/brand/banner.png" alt="KnoKeep" width="640">
 </p>
 
-<p align="center"><b>KnoKeep is a portable, secret-safe memory layer that works across your AI tools.</b></p>
+<p align="center"><b>KnoKeep stores project records that enrolled AI clients can save and resume.</b></p>
 
 <p align="center">
   <a href="https://github.com/SathiaAI/knokeep/actions/workflows/ci.yml"><img src="https://github.com/SathiaAI/knokeep/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <b>Works with</b>&nbsp;
+  <b>Client adapters under qualification</b>&nbsp;
   <img src="https://img.shields.io/badge/Claude_Code-2E3A2F?logo=claude&logoColor=F8F6EE" alt="Claude Code">
   <img src="https://img.shields.io/badge/Cowork-2E3A2F?logo=anthropic&logoColor=F8F6EE" alt="Cowork">
   <img src="https://img.shields.io/badge/Cursor-2E3A2F?logo=cursor&logoColor=F8F6EE" alt="Cursor">
@@ -31,8 +31,10 @@
 <br>
 
 <p align="center">
-  <img src="docs/brand/story.png" alt="A session ends in one tool and resumes exactly in another — with your secrets kept out" width="100%">
+  <img src="docs/brand/story.png" alt="Illustration of the intended cross-client workflow" width="100%">
 </p>
+
+The illustration describes the intended workflow. Automatic, faithful capture and reliable cross-client continuation are still being qualified; a saved summary is not an exact conversation transcript.
 
 ## Contents
 
@@ -41,7 +43,7 @@
 - [Who it's for](#who-its-for)
 - [How it works](#how-it-works)
 - [Quickstart](#quickstart)
-- [Secret-safe by design](#secret-safe-by-design)
+- [Secret detection and limits](#secret-detection-and-limits)
 - [What KnoKeep is not](#what-knokeep-is-not)
 - [Docs](#docs)
 - [Security](#security)
@@ -49,21 +51,21 @@
 
 ## The problem
 
-Long AI coding sessions forget. The context window fills up and gets **compacted** into a lossy summary — exact paths, versions, the bug you just squashed, the constraint you agreed on — all dropped. So the agent reintroduces a bug it already fixed. Start a **new chat**, or switch from **Cursor to Codex to Claude Code**, and it resets to zero.
+Long AI coding sessions can lose decisions during compaction or a switch to another client. A new session may need paths, constraints and unfinished work that were never saved to the project.
 
-The usual workarounds each have a catch: they work in only one tool, or they need a local daemon that can't run in a cloud sandbox, or they mean copy-pasting context by hand. And **none of them scrub secrets** — a real risk, because these agents are reading your `.env`.
+Shared files, repository instructions and vendor memory are existing alternatives. KnoKeep must demonstrate better capture and continuation against those alternatives; portability alone does not establish an advantage.
 
 ## What you get
 
-- **Resume exactly — not a fuzzy recap.** The next session states where you were and what's next before it does anything, then keeps going.
-- **One memory across every tool.** Cursor, Codex, Claude Code, and Cowork read and write the same store, so switching tools doesn't reset you.
-- **Never a leaked secret.** A fail-closed gate refuses anything credential-shaped and stores a reference instead of the value.
-- **You own the data.** The default store is a plain local folder — self-hostable and airgappable. Nothing phones home.
+- **Resume submitted records.** Bootstrap exposes saved state and next steps. Agents must preserve the meaning of decisions and flag contradictions; matching hashes prove bytes, not truth.
+- **Portable storage.** Enrolled clients can share a store or carry a verified complete export between environments. Each client still needs a working, tested route.
+- **Secret-pattern detection.** The write gate rejects patterns its scanner detects. Store references rather than values; detection is incomplete.
+- **Local storage by default.** The CLI can use a local folder. A cloud AI provider sees records supplied to its agent, and remote backends require their own access and trust decisions.
 
 ## Who it's for
 
 - **Solo multi-tool builders** who jump between Cursor, Codex, Claude Code, and Cowork and want continuity without babysitting it.
-- **Regulated / security-conscious engineers** who need self-hosting, airgapping, and a memory that is safe to keep next to their secrets.
+- **Security-conscious engineers** who want local storage and can keep sensitive values out of agent records; this is not a compliance or confidentiality certification.
 - **Small trusted teams** (today, via a shared database) who want one project memory everyone resumes from.
 
 ## How it works
@@ -71,10 +73,10 @@ The usual workarounds each have a catch: they work in only one tool, or they nee
 At the start of a session the agent **bootstraps** — reads the store and states its resume line before acting. As work is verified it **flushes**:
 
 - `system_state` — architecture, paths, hard constraints (changes rarely, guarded by a content hash so two sessions can't clobber each other).
-- `session_log` — Completed / Active / Next step (changes often).
-- `journal` — this session's own append-only log (parallel-safe).
+- `session_log` — Completed / Active / Next step (changes often; use its own expected hash).
+- `journal` — this session's append log; stable operation IDs support deduplicating retries within the retained session metadata.
 
-Under the hood it's a single store engine with pluggable backends — a local folder by default, plus git, S3/GCS-style object stores, and Postgres — all behind the same secret gate. The skill your agent runs and the bundled MCP server share that one store, so there is no split-brain.
+The store engine has local, Git, object-store and Postgres adapters. The bundled skill and MCP server can share a LocalBackend root when configured accordingly. Native MCP registration is a separate client test. State and log are separate writes: they do not yet form one atomic milestone checkpoint.
 
 ## Quickstart
 
@@ -89,11 +91,11 @@ Under the hood it's a single store engine with pluggable backends — a local fo
 **Codex** → drop in `shims/codex/AGENTS.md`.
 **Any tool with a shell** → `python skill/knokeep_state.py bootstrap --project <name>`.
 
-Point every tool at the same store (the default is per-user and shared automatically) and they all resume from one memory.
+Verify every enrolled tool's store location and project ID. A per-user default on one machine is not automatically shared with a cloud sandbox. Read complete bootstrap fields before acting, preserve unresolved decisions in the current record, and verify exports before ending an ephemeral session. Installation and working shell commands alone do not prove automatic capture.
 
-## Secret-safe by design
+## Secret detection and limits
 
-KnoKeep reads your project — including files that sit next to secrets — and **never writes a secret down**. Every write passes a single, fail-closed gate. If the content looks like a credential (a known token prefix, a high-entropy value, a credential-shaped assignment or URL) the write is **refused**, and a reference is stored instead:
+Normal writes pass through a gate that refuses detected credential patterns, including known token prefixes and some assignments or URLs. It cannot identify every secret, personal fact or disguised value. Keep sensitive content out of the input and submit a reference after a refusal:
 
 ```
 OPENROUTER_API_KEY (in .env, not stored)

@@ -1,0 +1,92 @@
+{
+  "root": "docs/cloud/q2-work",
+  "source_original_files": 17,
+  "files": [
+    {
+      "path": ".gitattributes",
+      "bytes": 17,
+      "sha256": "1e1f89388215c331239129347ce584af3c8872dd9e77c025e8813fe7f430a7f6"
+    },
+    {
+      "path": "manifest.json",
+      "bytes": 3468,
+      "sha256": "0633bb75bb5e044693d6e7924eab7716ccc4b3c756088b8189c42c349c35b5e1"
+    },
+    {
+      "path": "project/_log_body.md",
+      "bytes": 642,
+      "sha256": "e076ca1021e23533440d816e55b4257376946fceffaa182c6f22bb62efb605ce"
+    },
+    {
+      "path": "project/restock.csv",
+      "bytes": 60,
+      "sha256": "e8dca2a1c62370bdecbfe066bba4b2372d4c62abee2e3438ec85f00aeb8823dd"
+    },
+    {
+      "path": "project/restock.py",
+      "bytes": 1294,
+      "sha256": "2f5dd8880a820e588dd82e5b5c7081215447bcf1485dfb1e9371ed2ebce8eb73"
+    },
+    {
+      "path": "project/_state_body.md",
+      "bytes": 568,
+      "sha256": "65116ae20c63adc38d7d99158e5e665dee41040de7ffe1be7d869933887369a2"
+    },
+    {
+      "path": "project/stock.csv",
+      "bytes": 116,
+      "sha256": "6464c029fec7222d469ff378b9907edf61e8b78b6e182455ee2214b105c39166"
+    },
+    {
+      "path": "store/data/q2-cursor-a1/session_log",
+      "bytes": 756,
+      "sha256": "54372dc9b2e45945a73534ab3300364fa2196a0fd07778ce09bd4e8fc6ec9879"
+    },
+    {
+      "path": "store/data/q2-cursor-a1/sessions/q2-cursor-source-a1",
+      "bytes": 234,
+      "sha256": "037fdf0a00383051fa23bbca9d45faaa958979ceb7d3650ccfba8c4ae5bca89c"
+    },
+    {
+      "path": "store/data/q2-cursor-a1/system_state",
+      "bytes": 682,
+      "sha256": "c8726ae561c5e89df562a5c136813ba2b23bfb42e484da2ee5b951aaac21bb1f"
+    },
+    {
+      "path": "store/journal/journal.log",
+      "bytes": 2459,
+      "sha256": "0880497ec2e05d97bd51495251abfbd6aa3e85c26bf2c000475c38e74e8cf703"
+    },
+    {
+      "path": "store/.knokeep-eval/events.jsonl",
+      "bytes": 772,
+      "sha256": "48b111a16d1bd107b74df92961d9530cdf2d8ed26d840cbc82d8b29633f4e27a"
+    },
+    {
+      "path": "store/locks/advisory.lock",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "store/locks/cas.lock",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "store/locks/fence-alloc/d29dc7046f4f1103085ec8ad648445d8456fab991549a63c3d2eb39661774c43.fence",
+      "bytes": 52,
+      "sha256": "b03e729b2f2b14291f3d230ff8989573161ee35ea72343b2d6dc320cbc8c947f"
+    },
+    {
+      "path": "store/locks/fence-alloc/d3ac3ca360babd4a92ea1750e8a2543d8b9807b51da5ebe6bdefe654f7332727.fence",
+      "bytes": 53,
+      "sha256": "bcfd989b2dbcf870a685fe35939b9cadf4bdede4f694a4611942be2ed679e564"
+    },
+    {
+      "path": "store/locks/fence-alloc/f97fd5fe3063a222a842767e0fd860f06f783c4661573112f808be81ba02e141.fence",
+      "bytes": 53,
+      "sha256": "7114440739bb5c43f3e2c994d9c0519373f61f6a77ba322de2c8d5fbf15f52ce"
+    }
+  ],
+  "note": "Authoritative complete inventory; manifest.json remains the unchanged original partial worker manifest."
+}

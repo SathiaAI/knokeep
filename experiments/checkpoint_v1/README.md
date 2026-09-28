@@ -1,6 +1,7 @@
 # checkpoint_v1 — EXPERIMENTAL prototype (not production)
 
-This prototype is not wired into the CLI bootstrap, skill, shims or CI, and it changes no product behavior.
+This prototype is not wired into the CLI bootstrap, skill or shims, and it changes no product behavior.
+Its dedicated experimental CI runs separately from the product checks on Linux, Windows and macOS.
 It shows how one complete state+log checkpoint could be kept as the authoritative
 experimental resume input. It does **not** prove semantic truth or production readiness.
 

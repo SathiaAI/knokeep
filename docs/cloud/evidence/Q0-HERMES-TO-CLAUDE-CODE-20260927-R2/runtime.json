@@ -1,0 +1,20 @@
+{
+  "job": "Q0-HERMES-TO-CLAUDE-CODE-20260927-R2",
+  "started_at": "2026-09-28T01:15:44.780927+00:00",
+  "status": "EXITED",
+  "auth_route": "claude.ai Max",
+  "timeout_seconds": 300,
+  "isolation": "safe-mode; restricted file tools; no shell/web/MCP tools; new session",
+  "claim": "file-carried guided continuation; not native MCP or automatic capture",
+  "exit_code": 0,
+  "ended_at": "2026-09-28T01:16:12.488804+00:00",
+  "elapsed_seconds": 27.7,
+  "model": "claude-opus-5-5",
+  "tools": [
+    "Glob",
+    "Grep",
+    "Read",
+    "Write"
+  ],
+  "permission_mode": "dontAsk"
+}

@@ -1,0 +1,38 @@
+{
+  "correct_continuation": true,
+  "source_files_unchanged": 11,
+  "expected_rows": [
+    [
+      "sku",
+      "units",
+      "cartons"
+    ],
+    [
+      "blue_mug",
+      "6",
+      "2"
+    ],
+    [
+      "green_tea",
+      "6",
+      "2"
+    ]
+  ],
+  "actual_rows": [
+    [
+      "sku",
+      "units",
+      "cartons"
+    ],
+    [
+      "blue_mug",
+      "6",
+      "2"
+    ],
+    [
+      "green_tea",
+      "6",
+      "2"
+    ]
+  ]
+}

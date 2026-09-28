@@ -1,0 +1,19 @@
+PASS valid-mixed-only: yielded=2 end=142 size=142 maxread=32
+FAIL legacy-uint32-keylen: AssertionError: untrusted length reached read(): 4294967295
+FAIL v2-uint32-keylen: AssertionError: untrusted length reached read(): 4294967295
+FAIL legacy-keylen-1025: AssertionError: untrusted length reached read(): 7740398493674204011
+PASS legacy-keylen-0: yielded=2 end=142 size=206 maxread=32
+FAIL legacy-uint64-body: AssertionError: untrusted length reached read(): 18446744073709551615
+FAIL v2-uint64-body: AssertionError: untrusted length reached read(): 18446744073709551615
+FAIL v2-body-2^63: AssertionError: untrusted length reached read(): 9223372036854775808
+PASS v2-body-len-off-by-one: yielded=2 end=142 size=201 maxread=32
+PASS legacy-truncated-digest: yielded=2 end=142 size=187 maxread=32
+PASS v2-truncated-fence: yielded=2 end=142 size=199 maxread=32
+PASS v2-magic-only: yielded=2 end=142 size=146 maxread=32
+PASS v2-magic-partial-keylen: yielded=2 end=142 size=148 maxread=32
+PASS bad-digest: yielded=2 end=142 size=200 maxread=32
+PASS valid-trailing-legacy: yielded=3 end=190 size=190 maxread=32
+PASS valid-trailing-v2-maxkey: yielded=3 end=1223 size=1223 maxread=1024
+PASS valid-empty-body-v2: yielded=3 end=201 size=201 maxread=32
+RESULT 6 FAILED
+exit=1

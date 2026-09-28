@@ -1,0 +1,37 @@
+[
+  {
+    "case": "repeated-key-history",
+    "exception": "FileExistsError",
+    "errno": 17,
+    "frames": [
+      {
+        "function": "run",
+        "line": 15
+      },
+      {
+        "function": "repeated",
+        "line": 19
+      },
+      {
+        "function": "export_store",
+        "line": 398
+      }
+    ]
+  },
+  {
+    "case": "directory-symlink",
+    "code": "EXPORT_SYNTACTICALLY_CONSISTENT_COMPLETENESS_UNPROVEN",
+    "expected": "REFUSE_SYMLINK_HARDLINK_OR_SPECIAL"
+  },
+  {
+    "case": "empty-directory-depth",
+    "code": "EXPORT_SYNTACTICALLY_CONSISTENT_COMPLETENESS_UNPROVEN",
+    "expected": "REFUSE_BUDGET_EXCEEDED"
+  },
+  {
+    "case": "forged-invalid-key-skips-candidate",
+    "code": "VERIFY_OK",
+    "expected": "REJECT_INCOMPLETE_OR_ALTERED",
+    "reason": "Verifier must recompute key validity rather than trust export annotations, even without an authenticity claim."
+  }
+]

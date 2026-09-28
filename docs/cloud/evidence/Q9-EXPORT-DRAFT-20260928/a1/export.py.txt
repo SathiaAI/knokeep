@@ -1,0 +1,556 @@
+"""Offline read-only store evidence export (experimental, stdlib-only).
+
+Never constructs LocalBackend, never writes into the source tree, never repairs
+or switches service. CLI: export and verify only.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import secrets
+import stat
+import struct
+import sys
+import time
+from pathlib import Path
+from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
+
+# Checkout import only; source store is never mutated through this module.
+from store import gate
+from store import health_inspect as hi
+from store.types import sha256_hex
+
+CHUNK_SIZE = 65536
+MAX_TOTAL_BYTES = 64 << 20
+MAX_FILE_COUNT = 10_000
+MAX_DEPTH = 64
+LOCK_REL = "locks/cas.lock"
+JOURNAL_REL = "journal/journal.log"
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            block = f.read(CHUNK_SIZE)
+            if not block:
+                break
+            h.update(block)
+    return h.hexdigest()
+
+
+def _copy_file_chunked(src: Path, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with open(src, "rb") as inf, open(dst, "xb") as outf:
+        while True:
+            block = inf.read(CHUNK_SIZE)
+            if not block:
+                break
+            outf.write(block)
+        outf.flush()
+        os.fsync(outf.fileno())
+
+
+def _fsync_file(path: Path) -> None:
+    with open(path, "rb") as f:
+        os.fsync(f.fileno())
+
+
+def _try_exclusive_lock(lock_path: Path) -> Optional[Any]:
+    try:
+        fh = open(lock_path, "rb")
+    except OSError:
+        return None
+    try:
+        if os.name == "nt":
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fh
+    except OSError:
+        fh.close()
+        return None
+
+
+def _release_lock(fh: Any) -> None:
+    try:
+        if os.name == "nt":
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    finally:
+        fh.close()
+
+
+def _read_via_held(fh: Any) -> bytes:
+    fh.seek(0)
+    data = fh.read()
+    fh.seek(0)
+    return data
+
+
+def _inside(a: Path, b: Path) -> bool:
+    try:
+        a.relative_to(b)
+        return True
+    except ValueError:
+        return False
+
+
+def _path_depth(rel: str) -> int:
+    return len(rel.split("/")) if rel else 0
+
+
+def _inventory_hashes(
+    store: Path,
+    lock_rel: str,
+    lock_fh: Any,
+) -> Tuple[Dict[str, str], List[str]]:
+    """Walk regular files only; hash in chunks (no full-tree byte cache)."""
+    hashes: Dict[str, str] = {}
+    problems: List[str] = []
+    total = 0
+    count = 0
+    for dirpath, dirnames, filenames in os.walk(store, followlinks=False):
+        dirnames[:] = [d for d in dirnames if not os.path.islink(Path(dirpath) / d)]
+        for name in dirnames + filenames:
+            p = Path(dirpath) / name
+            try:
+                st = os.lstat(p)
+            except OSError:
+                problems.append(str(p.relative_to(store)).replace(os.sep, "/"))
+                continue
+            if stat.S_ISLNK(st.st_mode) or stat.S_ISFIFO(st.st_mode) or stat.S_ISSOCK(st.st_mode):
+                problems.append(str(p.relative_to(store)).replace(os.sep, "/"))
+                continue
+            if stat.S_ISDIR(st.st_mode):
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                problems.append(str(p.relative_to(store)).replace(os.sep, "/"))
+                continue
+            if st.st_nlink > 1:
+                problems.append(str(p.relative_to(store)).replace(os.sep, "/"))
+                continue
+            rel = str(p.relative_to(store)).replace(os.sep, "/")
+            if _path_depth(rel) > MAX_DEPTH:
+                raise _BudgetExceeded()
+            count += 1
+            if count > MAX_FILE_COUNT:
+                raise _BudgetExceeded()
+            total += st.st_size
+            if total > MAX_TOTAL_BYTES:
+                raise _BudgetExceeded()
+            if rel == lock_rel:
+                hashes[rel] = _sha256_bytes(_read_via_held(lock_fh))
+            else:
+                hashes[rel] = _sha256_file(p)
+    return hashes, problems
+
+
+class _BudgetExceeded(Exception):
+    pass
+
+
+def _journal_prefix_scan(journal_path: Path) -> Tuple[Dict[str, str], int, int, List[str]]:
+    """Strict prefix via store.health_inspect parser (no LocalBackend)."""
+    reasons: List[str] = []
+    scan_state: Dict[str, int] = {"end": 0, "size": 0}
+    latest: Dict[str, str] = {}
+    for key, body_hash in hi._iter_journal_records(journal_path, scan_state, reasons):
+        latest[key] = body_hash
+    end = int(scan_state.get("end", 0))
+    size = int(scan_state.get("size", 0))
+    return latest, end, size, reasons
+
+
+def _iter_prefix_bodies(journal_path: Path, prefix_end: int) -> Iterator[Tuple[str, bytes, str]]:
+    """Body bytes for each record in the strict prefix; stops at prefix_end."""
+    with open(journal_path, "rb") as f:
+        size = os.fstat(f.fileno()).st_size
+        prefix_end = min(prefix_end, size)
+        while f.tell() < prefix_end:
+            record_start = f.tell()
+            header = f.read(4)
+            if len(header) < 4:
+                break
+            is_v2 = header == hi._JOURNAL_V2_MAGIC
+            if is_v2:
+                header = f.read(4)
+                if len(header) < 4:
+                    break
+            try:
+                (key_len,) = struct.unpack(">I", header)
+            except struct.error:
+                break
+            trailer_len = 32 + (8 if is_v2 else 0)
+            if not 1 <= key_len <= gate._MAX_KEY_LEN:
+                break
+            if key_len + 8 + trailer_len > size - f.tell():
+                break
+            key_bytes = f.read(key_len)
+            if len(key_bytes) < key_len:
+                break
+            body_len_bytes = f.read(8)
+            if len(body_len_bytes) < 8:
+                break
+            (body_len,) = struct.unpack(">Q", body_len_bytes)
+            if body_len + trailer_len > size - f.tell():
+                break
+            body = f.read(body_len)
+            if len(body) < body_len:
+                break
+            digest = f.read(32)
+            if len(digest) < 32:
+                break
+            if hashlib.sha256(body).digest() != digest:
+                break
+            if is_v2:
+                fence_bytes = f.read(8)
+                if len(fence_bytes) < 8:
+                    break
+            try:
+                key = key_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                break
+            if f.tell() > prefix_end:
+                break
+            yield key, body, sha256_hex(body)
+            if f.tell() == prefix_end:
+                break
+            if f.tell() > prefix_end:
+                break
+
+
+def _classify_keys(
+    latest: Dict[str, str],
+) -> Tuple[Set[str], Set[str], List[str]]:
+    invalid: Set[str] = set()
+    case_colliding: Set[str] = set()
+    findings: List[str] = []
+    for key in latest:
+        if not gate._valid_key_shape(key):
+            invalid.add(key)
+    folded: Dict[str, List[str]] = {}
+    for key in latest:
+        if key in invalid:
+            continue
+        folded.setdefault(key.casefold(), []).append(key)
+    for keys in folded.values():
+        if len(keys) > 1:
+            case_colliding.update(keys)
+    if invalid:
+        findings.append("INVALID_KEYS_NOT_MATERIALIZED")
+    if case_colliding:
+        findings.append("CASE_FOLD_COLLISION_NOT_MATERIALIZED")
+    return invalid, case_colliding, findings
+
+
+def export_store(
+    store: os.PathLike[str] | str,
+    out_parent: os.PathLike[str] | str,
+    *,
+    hook: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Create a non-authoritative recovery export under out_parent."""
+    store_p = Path(store).resolve()
+    out_p = Path(out_parent).resolve()
+    if not out_p.is_dir():
+        return {"code": "REFUSE_OUTPUT_PARENT_MISSING"}
+    rs = Path(os.path.realpath(store_p))
+    ro = Path(os.path.realpath(out_p))
+    if os.path.normcase(str(rs)) == os.path.normcase(str(ro)) or _inside(ro, rs) or _inside(rs, ro):
+        return {"code": "REFUSE_OUTPUT_OVERLAPS_STORE"}
+
+    lock_path = store_p / "locks" / "cas.lock"
+    journal_path = store_p / "journal" / "journal.log"
+    if not lock_path.is_file() or os.path.islink(lock_path):
+        return {"code": "REFUSE_LOCK_MISSING"}
+    lock_fh = _try_exclusive_lock(lock_path)
+    if lock_fh is None:
+        return {"code": "REFUSE_BUSY_WRITER_ACTIVE"}
+    try:
+        if not journal_path.is_file() or os.path.islink(journal_path):
+            return {"code": "REFUSE_JOURNAL_MISSING"}
+        try:
+            with open(journal_path, "rb"):
+                pass
+        except OSError:
+            return {"code": "REFUSE_JOURNAL_UNREADABLE"}
+
+        try:
+            hashes1, odd = _inventory_hashes(store_p, LOCK_REL, lock_fh)
+        except _BudgetExceeded:
+            return {"code": "REFUSE_BUDGET_EXCEEDED"}
+        if odd:
+            return {"code": "REFUSE_SYMLINK_HARDLINK_OR_SPECIAL", "paths": sorted(odd)}
+        if hook:
+            hook("after_inventory_pass1")
+        try:
+            hashes2, odd2 = _inventory_hashes(store_p, LOCK_REL, lock_fh)
+        except _BudgetExceeded:
+            return {"code": "REFUSE_BUDGET_EXCEEDED"}
+        if odd2:
+            return {"code": "REFUSE_SYMLINK_HARDLINK_OR_SPECIAL", "paths": sorted(odd2)}
+        if hashes1 != hashes2:
+            return {"code": "REFUSE_STORE_CHANGED_DURING_EXPORT"}
+
+        latest, prefix_end, journal_size, journal_reasons = _journal_prefix_scan(journal_path)
+        prefix_body_keys: List[str] = []
+        for key, _body, _h in _iter_prefix_bodies(journal_path, prefix_end):
+            prefix_body_keys.append(key)
+        invalid_keys, case_keys, findings = _classify_keys(latest)
+        for key in prefix_body_keys:
+            if not gate._valid_key_shape(key):
+                invalid_keys.add(key)
+        if invalid_keys:
+            if "INVALID_KEYS_NOT_MATERIALIZED" not in findings:
+                findings.append("INVALID_KEYS_NOT_MATERIALIZED")
+        if prefix_end < journal_size:
+            findings.append("TAIL_UNEXAMINED_AMBIGUOUS")
+        if journal_reasons:
+            findings.extend(sorted(set(journal_reasons)))
+        if "journal_bad_key" in journal_reasons and "INVALID_KEYS_NOT_MATERIALIZED" not in findings:
+            findings.append("INVALID_KEYS_NOT_MATERIALIZED")
+
+        published_mismatch: List[str] = []
+        for rel, h in hashes1.items():
+            if not rel.startswith("data/"):
+                continue
+            key = rel[5:]
+            if key not in latest or latest[key] != h:
+                published_mismatch.append(key)
+        for key in latest:
+            data_rel = "data/" + key
+            if data_rel not in hashes1:
+                published_mismatch.append(key)
+        if published_mismatch:
+            findings.append("PUBLISHED_DATA_DIFFERS_FROM_PREFIX")
+
+        journal_sha = hashes1.get(JOURNAL_REL, "")
+        export_name = "recovery-export-" + journal_sha[:12]
+        final_dir = out_p / export_name
+        if final_dir.exists():
+            return {"code": "REFUSE_OUTPUT_EXISTS", "name": export_name}
+
+        attempt_name = f".incomplete-{export_name}-{secrets.token_hex(8)}"
+        attempt_dir = out_p / attempt_name
+        try:
+            os.mkdir(attempt_dir)
+        except FileExistsError:
+            return {"code": "REFUSE_ATTEMPT_DIR_COLLISION"}
+
+        attempt_meta = {
+            "status": "incomplete",
+            "journal_sha256": journal_sha,
+            "started_epoch": time.time(),
+        }
+        attempt_path = attempt_dir / "ATTEMPT.json"
+        with open(attempt_path, "x", encoding="utf-8") as af:
+            json.dump(attempt_meta, af, indent=1, sort_keys=True)
+            af.write("\n")
+            af.flush()
+            os.fsync(af.fileno())
+
+        archive_manifest: Dict[str, str] = {}
+        for rel in sorted(hashes1):
+            src = store_p / Path(*rel.split("/"))
+            dst = attempt_dir / "archive" / Path(*rel.split("/"))
+            if rel == LOCK_REL:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                with open(dst, "xb") as outf:
+                    outf.write(_read_via_held(lock_fh))
+                    outf.flush()
+                    os.fsync(outf.fileno())
+            else:
+                _copy_file_chunked(src, dst)
+                _fsync_file(dst)
+            archive_manifest[rel] = hashes1[rel]
+            if hook:
+                hook("copied:" + rel)
+
+        for rel, expected in archive_manifest.items():
+            got = _sha256_file(attempt_dir / "archive" / Path(*rel.split("/")))
+            if got != expected:
+                return {"code": "REFUSE_ARCHIVE_VERIFY_FAILED", "path": rel}
+
+        candidate_dir = attempt_dir / "candidate-data"
+        materialized: Dict[str, str] = {}
+        for key, body, body_hash in _iter_prefix_bodies(journal_path, prefix_end):
+            if key in invalid_keys or key in case_keys:
+                continue
+            if not gate._valid_key_shape(key):
+                continue
+            dst = candidate_dir.joinpath(*key.split("/"))
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            with open(dst, "xb") as cf:
+                cf.write(body)
+                cf.flush()
+                os.fsync(cf.fileno())
+            materialized[key] = body_hash
+
+        manifest_core: Dict[str, Any] = {
+            "schema": "recovery_export_v1",
+            "source_inventory_sha256": dict(sorted(archive_manifest.items())),
+            "journal_prefix_end": prefix_end,
+            "journal_size": journal_size,
+            "journal_scan_reasons": journal_reasons,
+            "prefix_key_hashes": {k: latest[k] for k in sorted(latest)},
+            "candidate_materialized_keys": sorted(materialized.keys()),
+            "findings": sorted(set(findings)),
+            "invalid_keys": sorted(invalid_keys),
+            "case_fold_collisions": sorted(case_keys),
+            "published_mismatch_keys": sorted(set(published_mismatch)),
+            "unparsed_byte_range": [prefix_end, journal_size] if prefix_end < journal_size else None,
+            "completeness_proven": False,
+            "candidate_is_authoritative": False,
+            "external_anchor_present": False,
+            "platform": os.name,
+            "limits": {
+                "max_total_bytes": MAX_TOTAL_BYTES,
+                "max_file_count": MAX_FILE_COUNT,
+                "max_depth": MAX_DEPTH,
+                "chunk_size": CHUNK_SIZE,
+            },
+            "durability_notes": {
+                "per_file_fsync": True,
+                "directory_fsync_posix": "best_effort_if_supported",
+                "directory_fsync_windows": "unsupported_by_python_os_fsync_on_dirs",
+                "final_rename_atomic": "name_swap_only_not_power_loss_proof",
+                "manifest_hash_is_not_authentication": True,
+            },
+        }
+        manifest_body = json.dumps(manifest_core, indent=1, sort_keys=True).encode("utf-8") + b"\n"
+        manifest_core["manifest_sha256"] = _sha256_bytes(manifest_body)
+        manifest_bytes = json.dumps(manifest_core, indent=1, sort_keys=True).encode("utf-8") + b"\n"
+        manifest_path = attempt_dir / "MANIFEST.json"
+        with open(manifest_path, "xb") as mf:
+            mf.write(manifest_bytes)
+            mf.flush()
+            os.fsync(mf.fileno())
+
+        if final_dir.exists():
+            return {"code": "REFUSE_OUTPUT_EXISTS", "name": export_name, "attempt": attempt_name}
+
+        os.rename(attempt_dir, final_dir)
+
+        code = (
+            "EXPORT_INCOMPLETE_HUMAN_DECISION_REQUIRED"
+            if findings
+            else "EXPORT_SYNTACTICALLY_CONSISTENT_COMPLETENESS_UNPROVEN"
+        )
+        return {
+            "code": code,
+            "output": str(final_dir),
+            "name": export_name,
+            "findings": manifest_core["findings"],
+            "completeness_proven": False,
+            "candidate_is_authoritative": False,
+            "manifest_sha256": manifest_core["manifest_sha256"],
+            "journal_prefix_end": prefix_end,
+        }
+    finally:
+        _release_lock(lock_fh)
+
+
+def verify_export(export_dir: os.PathLike[str] | str) -> Dict[str, Any]:
+    """Deterministic verification of a completed export directory."""
+    root = Path(export_dir)
+    manifest_path = root / "MANIFEST.json"
+    archive_root = root / "archive"
+    if not manifest_path.is_file():
+        return {"code": "REJECT_INCOMPLETE_OR_ALTERED", "reason": "manifest_missing"}
+    raw = manifest_path.read_bytes()
+    try:
+        manifest = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {"code": "REJECT_INCOMPLETE_OR_ALTERED", "reason": "manifest_invalid_json"}
+
+    if manifest.get("completeness_proven") is not False:
+        return {"code": "REJECT_INCOMPLETE_OR_ALTERED", "reason": "completeness_flag_wrong"}
+    if manifest.get("candidate_is_authoritative") is not False:
+        return {"code": "REJECT_INCOMPLETE_OR_ALTERED", "reason": "authority_flag_wrong"}
+
+    embedded_sha = manifest.get("manifest_sha256")
+    body_copy = dict(manifest)
+    body_copy.pop("manifest_sha256", None)
+    canonical = json.dumps(body_copy, indent=1, sort_keys=True).encode("utf-8") + b"\n"
+    recomputed_manifest_sha = _sha256_bytes(canonical)
+    if embedded_sha and embedded_sha != recomputed_manifest_sha:
+        return {"code": "REJECT_INCOMPLETE_OR_ALTERED", "reason": "manifest_hash_mismatch"}
+
+    expected_inv = manifest.get("source_inventory_sha256") or {}
+    for rel, expected_hash in expected_inv.items():
+        ap = archive_root / Path(*rel.split("/"))
+        if not ap.is_file():
+            return {"code": "REJECT_INCOMPLETE_OR_ALTERED", "reason": "archive_missing", "path": rel}
+        if _sha256_file(ap) != expected_hash:
+            return {"code": "REJECT_INCOMPLETE_OR_ALTERED", "reason": "archive_tampered", "path": rel}
+
+    journal_path = archive_root / "journal" / "journal.log"
+    if not journal_path.is_file():
+        return {"code": "REJECT_INCOMPLETE_OR_ALTERED", "reason": "journal_missing"}
+
+    latest, prefix_end, journal_size, reasons = _journal_prefix_scan(journal_path)
+    if prefix_end != manifest.get("journal_prefix_end"):
+        return {"code": "REJECT_INCOMPLETE_OR_ALTERED", "reason": "prefix_end_mismatch"}
+    if journal_size != manifest.get("journal_size"):
+        return {"code": "REJECT_INCOMPLETE_OR_ALTERED", "reason": "journal_size_mismatch"}
+
+    prefix_hashes = manifest.get("prefix_key_hashes") or {}
+    if prefix_hashes != {k: latest[k] for k in sorted(latest)}:
+        return {"code": "REJECT_INCOMPLETE_OR_ALTERED", "reason": "prefix_hashes_mismatch"}
+
+    invalid = set(manifest.get("invalid_keys") or [])
+    case_keys = set(manifest.get("case_fold_collisions") or [])
+    for key, body, body_hash in _iter_prefix_bodies(journal_path, prefix_end):
+        if key in invalid or key in case_keys:
+            continue
+        cand = root / "candidate-data" / Path(*key.split("/"))
+        if not cand.is_file():
+            return {"code": "REJECT_INCOMPLETE_OR_ALTERED", "reason": "candidate_missing", "key": key}
+        if _sha256_file(cand) != body_hash:
+            return {"code": "REJECT_INCOMPLETE_OR_ALTERED", "reason": "candidate_tampered", "key": key}
+
+    return {
+        "code": "VERIFY_OK",
+        "completeness_proven": False,
+        "candidate_is_authoritative": False,
+        "journal_prefix_end": prefix_end,
+        "manifest_sha256": recomputed_manifest_sha,
+        "journal_scan_reasons": reasons,
+    }
+
+
+def _main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="Experimental recovery export (read-only toward store).")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    p_exp = sub.add_parser("export", help="Export evidence from a local store root")
+    p_exp.add_argument("store")
+    p_exp.add_argument("out_parent")
+    p_ver = sub.add_parser("verify", help="Verify an export directory")
+    p_ver.add_argument("export_dir")
+    args = parser.parse_args(argv)
+    if args.cmd == "export":
+        result = export_store(args.store, args.out_parent)
+        print(json.dumps(result, indent=1, sort_keys=True))
+        return 0 if result.get("code", "").startswith("EXPORT_") else 1
+    result = verify_export(args.export_dir)
+    print(json.dumps(result, indent=1, sort_keys=True))
+    return 0 if result.get("code") == "VERIFY_OK" else 1
+
+
+if __name__ == "__main__":
+    sys.exit(_main())

@@ -1,6 +1,6 @@
 # KnoKeep client portfolio and work allocation
 
-Updated September 28, 2026, 02:35 EDT. Paul authorized work across the installed clients, including Devin, and asked to reduce Claude usage. The allocation below is operational; it is not a claim that all clients are qualified for autonomous product work.
+Updated September 28, 2026, 03:03 EDT. Paul authorized work across the installed clients, including Devin, and asked to reduce Claude usage. The allocation below is operational; it is not a claim that all clients are qualified for autonomous product work.
 
 | Client | Assigned role | Current work / qualification (latest stages below) | Review required |
 |---|---|---|---|
@@ -34,12 +34,14 @@ Codex owns the current ledger at `outputs/KnoKeep-current-status.md`; each worke
 
 The model comparison, Devin parser review, combined PR64 checks and Q8 guided checkpoint pilot are complete. Current work is final PR66 audit review/CI and a safe offline recovery-export experiment. Further Hermes role expansion needs a held-out test and bounded real tool task. Torn-tail recovery, stale long-lived reads, authenticating decisions, semantic generalization and external demand evidence still prevent a production-readiness claim. Green unit tests do not close those gaps.
 
-## Latest stages at 02:35 EDT
+## Latest stages at 03:03 EDT
 
-- Combined candidate PR64 `380fe31` passed all eight exact-head checks. PR66 `3821cdc` now contains the read/list recovery fix and bootstrap audit follow-up; all eight exact-head CI checks passed; Devin review found an OS-filename secret bypass and traversal limits; a contained correction is active.
+- Combined candidate PR64 `380fe31` passed all eight exact-head checks. PR66 `bc9fe11` includes the independently reproduced read/list and audit corrections; all eight final-head CI checks passed, including the new audit regression script on all platforms.
 - Actual Devin recovery design PR65 `22e1e85`: corrected Windows runner 24/24 and original Linux A2 24/24. Design evidence only; no service-restoration implementation. Read review PR67 `3a5ca4a`: four contained probes independently repeated by Codex; its fourth is same-process, not a process-kill test.
 - Actual Cursor source PR68 `ff6c627` and fresh Devin receiver PR69 `d0b8408` passed the one guided complete-checkpoint pilot. Codex verified the original Git bytes and meaning; separate Windows resume/lookup/duplicate also passed. PR58 stays experimental.
 - Cursor remains implementation owner, Devin independent verifier/contained engineer, Codex integrator. Claude and local models are idle. No new billing, downloads, main merges or deployment.
 - Full commit-message privacy check is mandatory: neutral author/committer alone did not prevent Cursor platform coauthor trailers. Preserve original evidence locally, publish neutral exact-tree/file derivatives where needed, and never claim old public metadata was erased.
 
-PR70 af4074521f87a1fd7827e6698c08923130fabf6c preserves the independent audit findings. Codex reproduced its first nine probes on Windows; the 1100-directory fixture was not repeated there. Actual Devin now owns bounded fix/q7-audit-budget-a1; Codex will independently review its code and results. Cursor is idle pending safer full-commit publication handling, because provider-added account coauthors survived neutral identity fields. This is an orchestration limitation, not a model-quality judgment.
+PR70 af4074521f87a1fd7827e6698c08923130fabf6c preserves the independent audit findings. Codex reproduced its first nine probes on Windows; the 1100-directory fixture was not repeated there. That correction completed and is integrated into PR66. Actual Devin now owns fix/q9-export-review-a1, reviewing and hardening the explicitly unqualified recovery-export experiment. Cursor delivered its two draft attempts privately as hashed exact file text outside Git; Codex publishes after inspection, avoiding provider-added account coauthors. This is an orchestration limitation, not a model-quality judgment.
+
+Recovery stage: actual Cursor A1/A2 files are preserved as evidence; A1 failed Windows and independent cases despite 12 Linux passes. A2 passed 16 Windows cases and four discriminating reproductions, but PR71 remains UNQUALIFIED pending actual Devin correction and Codex reproduction. Neither an agent's completion label nor passing its own test list is a release decision.

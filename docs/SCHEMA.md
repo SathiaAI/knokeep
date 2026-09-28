@@ -47,4 +47,6 @@ Produced by the `session-handshake` skill (Jev-linted). The portable, client-neu
 `sha256(system_state.md body without frontmatter)[:12]`. Echoed by every resuming session before it acts ("resuming <active> / next <step> / v<hash>"). A client that writes code without a matching hash is a bug.
 
 ## Compatibility
+The skill's `client` field on state/log documents denotes the caller-declared latest successful writer, not the creator or an authenticated principal. Both `init` and flush commands accept `--client`; omitted values retain the historical `cowork` default. Re-running `init` leaves existing documents unchanged. The optional log `client` field is added on creation or the next successful flush; reads do not migrate old records. Legacy state labels may be inaccurate and missing log labels remain unknown. Bootstrap exposes the stored values as `state_client` and `log_client` (null when absent), with `client_labels_verified: false`. No historical authorship is inferred or repaired on read.
+
 Adding a new `client` value = no bump. Adding an optional frontmatter field = no bump. Renaming/removing a field or section = **schema_version bump + migration note** in this file.

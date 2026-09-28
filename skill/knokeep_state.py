@@ -72,6 +72,10 @@ def _validate_project(project):
     if not valid_id(project):
         die(reason="invalid project id", value=project)
 
+def _validate_client(client):
+    if not valid_id(client):
+        die(reason="invalid client", value=client)
+
 def _backend(store):
     return LocalBackend(os.path.realpath(store))
 
@@ -198,20 +202,21 @@ def _event(store, project, op, decision, detail=None):
 
 # --- commands ----------------------------------------------------------------
 
-def init(store, project):
+def init(store, project, client="cowork"):
     _validate_project(project)
+    _validate_client(client)
     backend = _backend(store)
     skey, lkey = _key(project, "state"), _key(project, "log")
     if backend.read(skey) is None:
         body = "## Architecture\n(tbd)\n\n## Path & Variable Directory\n(tbd)\n\n## Hard Constraints\n(tbd)"
-        fm = {"schema_version": SCHEMA_VERSION, "project_id": project, "client": "cowork", "revision": 1, "updated": now()}
+        fm = {"schema_version": SCHEMA_VERSION, "project_id": project, "client": client, "revision": 1, "updated": now()}
         _require_ok(_persist(backend, skey, "state", _bytes(fm, body), None))
     if backend.read(lkey) is None:
-        fm = {"schema_version": SCHEMA_VERSION, "project_id": project, "revision": 1, "updated": now()}
+        fm = {"schema_version": SCHEMA_VERSION, "project_id": project, "client": client, "revision": 1, "updated": now()}
         _require_ok(_persist(backend, lkey, "log", _bytes(fm, "## Completed & Verified\n\n## Active State\n\n## Next Step\n"), None))
     return {"ok": True, "base": _data_dir(store, project)}
 
-def _flush_doc(kind, store, project, new_content, expect_hash=None, section=None, session=None):
+def _flush_doc(kind, store, project, new_content, expect_hash=None, section=None, session=None, client="cowork"):
     """Shared bounded_cas_reread_reapply implementation for flush_state/flush_log.
 
     section=None: whole-document replace, unchanged legacy semantics, EXCEPT
@@ -225,6 +230,7 @@ def _flush_doc(kind, store, project, new_content, expect_hash=None, section=None
         heading is duplicated/unparseable, park + fail closed immediately.
     """
     _validate_project(project)
+    _validate_client(client)
     backend = _backend(store)
     key = _key(project, kind)
     sess = session if (session and valid_id(str(session))) else "unknown"
@@ -339,13 +345,12 @@ def _flush_doc(kind, store, project, new_content, expect_hash=None, section=None
                     out_fm["revision"] = int(fm.get("revision", 0)) + 1
                     out_fm["updated"] = now()
                 else:
-                    # Legacy metadata preserved per-kind (F7): state carries
-                    # client, log does not.
                     out_fm = {"schema_version": SCHEMA_VERSION, "project_id": project}
-                    if kind == "state":
-                        out_fm["client"] = "cowork"
                     out_fm["revision"] = 1
                     out_fm["updated"] = now()
+                # Declared latest writer, not authenticated identity. A failed
+                # persist leaves the winner's stored metadata untouched.
+                out_fm["client"] = client
 
                 # CreateOnly (persist_expect is None) needs no lease; a fenced
                 # Overwrite carries the HELD lease so write() enforces the fence.
@@ -400,13 +405,13 @@ def _flush_doc(kind, store, project, new_content, expect_hash=None, section=None
                     reason="conflict_retry_exhausted", doc_kind=kind)
 
 
-def flush_state(store, project, new_body, expect_hash=None, section=None, session=None):
+def flush_state(store, project, new_body, expect_hash=None, section=None, session=None, client="cowork"):
     return _flush_doc("state", store, project, new_body, expect_hash=expect_hash,
-                       section=section, session=session)
+                       section=section, session=session, client=client)
 
-def flush_log(store, project, new_body, expect_hash=None, section=None, session=None):
+def flush_log(store, project, new_body, expect_hash=None, section=None, session=None, client="cowork"):
     return _flush_doc("log", store, project, new_body, expect_hash=expect_hash,
-                       section=section, session=session)
+                       section=section, session=session, client=client)
 
 def session_append(store, project, session_id, client, entry):
     _validate_project(project)
@@ -671,7 +676,7 @@ def bootstrap(store, project):
     sblob = backend.read(_key(project, "state"))
     lblob = backend.read(_key(project, "log"))
     fm, _ = parse(sblob.body.decode("utf-8")) if sblob else ({}, "")
-    _, lbody = parse(lblob.body.decode("utf-8")) if lblob else ({}, "")
+    lfm, lbody = parse(lblob.body.decode("utf-8")) if lblob else ({}, "")
     active = _section(lbody, "Active State"); nxt = _section(lbody, "Next Step")
     vh = sblob.version_hash if sblob else None
     lh = lblob.version_hash if lblob else None
@@ -691,6 +696,8 @@ def bootstrap(store, project):
         resume += (f"  [!] {conflict_count} parked conflict(s) - "
                    f"review {project}/conflicts/")
     return {"version_hash": vh, "revision": rev, "log_hash": lh,
+            "state_client": fm.get("client"), "log_client": lfm.get("client"),
+            "client_labels_verified": False,
             "active": active, "next": nxt,
             "conflicts": conflicts, "conflict_count": conflict_count,
             "settled_count": settled_count,
@@ -878,9 +885,9 @@ def main():
     if not a.project:
         print(json.dumps({"blocked": True, "reason": "--project required"})); sys.exit(2)
     try:
-        if a.cmd == "init": result = init(a.store, a.project)
-        elif a.cmd == "flush-state": result = flush_state(a.store, a.project, _bodyfile(a.body_file), a.expect_hash, section=a.section, session=a.session_id)
-        elif a.cmd == "flush-log": result = flush_log(a.store, a.project, _bodyfile(a.body_file), a.expect_hash, section=a.section, session=a.session_id)
+        if a.cmd == "init": result = init(a.store, a.project, client=a.client)
+        elif a.cmd == "flush-state": result = flush_state(a.store, a.project, _bodyfile(a.body_file), a.expect_hash, section=a.section, session=a.session_id, client=a.client)
+        elif a.cmd == "flush-log": result = flush_log(a.store, a.project, _bodyfile(a.body_file), a.expect_hash, section=a.section, session=a.session_id, client=a.client)
         elif a.cmd == "session-append": result = session_append(a.store, a.project, a.session_id or _auto_sid(), a.client, _entry(a))
         elif a.cmd == "bootstrap": result = bootstrap(a.store, a.project)
         elif a.cmd == "rollup": result = rollup(a.store, a.project)

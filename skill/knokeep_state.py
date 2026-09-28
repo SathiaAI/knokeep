@@ -844,17 +844,18 @@ def health(store, window_hours=24):
             "problems": problems, "notes": notes,
             "scorecard": sc, "audit": {"scanner": scanner, "leaks": leaks}, "projects": projects}
 
-def _bodyfile(path):
+def _bodyfile(path, option="--body-file"):
     if not path or not os.path.exists(path):
-        die(reason="missing --body-file", path=path)         # empty file is allowed; missing is an error
+        die(reason=f"missing {option}", path=path)         # empty file is allowed; missing is an error
     return _readfile(path)
 
 def _entry(a):
-    if a.entry_file == "-":
-        return sys.stdin.read().rstrip("\n")
-    if a.entry_file is not None:
-        return _bodyfile(a.entry_file)
-    return a.entry or ""
+    if a.entry_file is None:
+        return a.entry or ""
+    entry = sys.stdin.read().rstrip("\n") if a.entry_file == "-" else _bodyfile(a.entry_file, "--entry-file")
+    if not entry.strip():
+        die(reason='empty --entry-file input; use --entry "" for an intentional empty entry')
+    return entry
 
 def main():
     ap = argparse.ArgumentParser()

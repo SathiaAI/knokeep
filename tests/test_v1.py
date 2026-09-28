@@ -97,6 +97,20 @@ for label, args, stdin, expected, sid in (
     # Remove only the timestamp prefix, then verify the full payload.
     body = re.sub(r"^\[[^\]\n]+\] ?", "", saved.partition("## Journal\n")[2], count=1)
     check(label + " entry content preserved", rc == 0 and json.loads(out)["ok"] and body == expected + "\n")
+empty_entry_path = bf("")
+for label, path, stdin, hint in (
+    ("empty file", empty_entry_path, None, "empty --entry-file input"),
+    ("empty stdin", "-", "", "empty --entry-file input"),
+    ("blank stdin", "-", " \n\t\n", "empty --entry-file input"),
+    ("empty file path", "", None, "missing --entry-file"),
+    ("missing entry file", os.path.join(store, "missing-entry.txt"), None, "missing --entry-file"),
+):
+    before = snapshot()
+    rc, out, err = run("session-append", "--entry-file", path, input_text=stdin)
+    after = snapshot()
+    # Rejected reads may log telemetry, but must not alter documents or the journal.
+    durable = lambda snap: {k: v for k, v in snap.items() if not k.startswith(".knokeep-eval" + os.sep)}
+    check(label + " rejected without empty journal", rc != 0 and not out and hint in err and durable(before) == durable(after))
 # missing body-file is an error (not silent empty overwrite)
 rc, out, err = run("flush-log", "--body-file", os.path.join(store, "nope.md"))
 check("missing body-file blocked", rc != 0 and "missing --body-file" in err)

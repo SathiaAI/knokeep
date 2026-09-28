@@ -30,6 +30,7 @@ from store.health_inspect import (
     read_telemetry_bytes,
     resolve_store_root,
     enumerate_project_published_files_for_audit,
+    is_os_metadata_basename,
 )
 from store.backend import BackendBusyError
 from store.types import OK, STALE, EXISTS, ERROR, ErrorKind
@@ -704,8 +705,10 @@ def _audit_store(store, project):
     written straight to data/ (including unjournaled orphans that LocalBackend
     read/list refuse). Uses health_inspect's read-only published-file walk — not
     backend.list/read — and re-scans raw bytes through store.gate (content-based).
-    Benign OS/tooling files (.DS_Store, Thumbs.db, desktop.ini) are skipped.
-    Journal/layout uncertainty is reported as findings, not a silent all-clear."""
+    Every file, including OS metadata names (.DS_Store, Thumbs.db, desktop.ini),
+    is secret-scanned first; those names are exempt ONLY from the non-text/binary
+    check. secret_scan is heuristic, not a guarantee. Walk budget, layout and
+    journal uncertainty are reported as findings, not a silent all-clear."""
     findings = []
     entries, block_reasons, uncertainty_reasons = enumerate_project_published_files_for_audit(
         store, project
@@ -718,12 +721,12 @@ def _audit_store(store, project):
         if raw is None:
             findings.append({"key": key, "reason": "unreadable blob in store"})
             continue
-        if not gate._is_acceptable_text(raw):
-            findings.append({"key": key, "reason": "non-text/binary content in store"})
-            continue
         hits = gate.secret_scan(raw)
         if hits:
             findings.append({"key": key, "reasons": hits})
+            continue
+        if not gate._is_acceptable_text(raw) and not is_os_metadata_basename(key):
+            findings.append({"key": key, "reason": "non-text/binary content in store"})
     return findings
 
 

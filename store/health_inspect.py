@@ -10,7 +10,7 @@ import os
 import stat
 import struct
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Callable, Dict, Iterator, List, Optional, Tuple
 
 from store.gate import _MAX_KEY_LEN, _MAX_SCAN_BYTES, _valid_key_shape
 from store.types import sha256_hex
@@ -160,6 +160,65 @@ def read_project_summaries(store: str, *, root: Optional[Path] = None) -> List[d
     return projects
 
 
+_AUDIT_MAX_DEPTH = 64
+_AUDIT_MAX_ENTRIES = 4096
+_AUDIT_MAX_TOTAL_BYTES = 64 * 1024 * 1024
+
+
+def _bounded_tree_walk(
+    start: Path,
+    root: Path,
+    on_file: Optional[Callable[[Path, os.DirEntry], None]] = None,
+    start_depth: int = 0,
+) -> List[str]:
+    """Iterative lstat walk of `start` (no symlink/reparse following).
+
+    Fails closed with one machine reason on the first unsafe entry or when a
+    deterministic budget is exceeded: directory depth below data/
+    (_AUDIT_MAX_DEPTH; `start_depth` is `start`'s own depth below data/), total entries (_AUDIT_MAX_ENTRIES) or aggregate
+    regular-file st_size bytes (_AUDIT_MAX_TOTAL_BYTES). `on_file` is called for
+    each regular file only while all budgets hold."""
+    entries_seen = 0
+    total_bytes = 0
+    stack: List[Tuple[Path, int]] = [(start, start_depth)]
+    while stack:
+        dirpath, depth = stack.pop()
+        try:
+            with os.scandir(dirpath) as it:
+                children = []
+                for ent in it:
+                    entries_seen += 1
+                    if entries_seen > _AUDIT_MAX_ENTRIES:
+                        return ["audit_entry_budget_exceeded"]
+                    children.append(ent)
+        except OSError:
+            return ["data_unreadable"]
+        children.sort(key=lambda e: e.name)
+        for ent in children:
+            try:
+                est = ent.stat(follow_symlinks=False)
+            except OSError:
+                return ["data_unreadable"]
+            if _is_reparse_point(est) or stat.S_ISLNK(est.st_mode):
+                return ["store_symlink_escape"]
+            full = Path(ent.path)
+            if not _entry_contained(full, root):
+                return ["store_symlink_escape"]
+            if stat.S_ISDIR(est.st_mode):
+                if depth + 1 > _AUDIT_MAX_DEPTH:
+                    return ["audit_depth_budget_exceeded"]
+                stack.append((full, depth + 1))
+                continue
+            if not stat.S_ISREG(est.st_mode):
+                return ["data_layout_unsafe"]
+            total_bytes += est.st_size
+            if total_bytes > _AUDIT_MAX_TOTAL_BYTES:
+                return ["audit_byte_budget_exceeded"]
+            if on_file is not None:
+                on_file(full, ent)
+    return []
+
+
 def safe_data_dir_for_audit(
     store: str, *, root: Optional[Path] = None
 ) -> Tuple[Optional[str], List[str]]:
@@ -179,6 +238,14 @@ def safe_data_dir_for_audit(
 
 
 _BENIGN_AUDIT_BASENAMES = frozenset({".ds_store", "thumbs.db", "desktop.ini"})
+
+
+def is_os_metadata_basename(key: str) -> bool:
+    """True for OS/tooling metadata basenames (.DS_Store, Thumbs.db, desktop.ini).
+
+    Only exempts such files from the binary/non-text check; they are still
+    returned by the audit walk and secret-scanned like any other file."""
+    return key.rsplit("/", 1)[-1].lower() in _BENIGN_AUDIT_BASENAMES
 
 
 def enumerate_project_published_files_for_audit(
@@ -233,47 +300,18 @@ def enumerate_project_published_files_for_audit(
 
     prefix = project + "/"
 
-    def walk(dirpath: Path) -> None:
-        if block_reasons:
-            return
+    def collect(full: Path, ent: os.DirEntry) -> None:
         try:
-            with os.scandir(dirpath) as it:
-                for ent in it:
-                    if block_reasons:
-                        return
-                    try:
-                        est = ent.stat(follow_symlinks=False)
-                    except OSError:
-                        block_reasons.append("data_unreadable")
-                        return
-                    if _is_reparse_point(est) or stat.S_ISLNK(est.st_mode):
-                        block_reasons.append("store_symlink_escape")
-                        return
-                    full = Path(ent.path)
-                    if not _entry_contained(full, root):
-                        block_reasons.append("store_symlink_escape")
-                        return
-                    if stat.S_ISDIR(est.st_mode):
-                        walk(full)
-                        continue
-                    if not stat.S_ISREG(est.st_mode):
-                        block_reasons.append("data_layout_unsafe")
-                        return
-                    if ent.name.lower() in _BENIGN_AUDIT_BASENAMES:
-                        continue
-                    try:
-                        rel = full.relative_to(data_dir).as_posix()
-                    except ValueError:
-                        block_reasons.append("store_symlink_escape")
-                        return
-                    if not rel.startswith(prefix):
-                        continue
-                    raw = _read_bounded_regular_file(full)
-                    entries.append((rel, raw))
-        except OSError:
-            block_reasons.append("data_unreadable")
+            rel = full.relative_to(data_dir).as_posix()
+        except ValueError:
+            block_reasons.append("store_symlink_escape")
+            return
+        if rel.startswith(prefix):
+            entries.append((rel, _read_bounded_regular_file(full)))
 
-    walk(project_dir)
+    walk_reasons = _bounded_tree_walk(project_dir, root, collect, start_depth=1)
+    if walk_reasons or block_reasons:
+        return [], block_reasons + walk_reasons, uncertainty_reasons
     return entries, block_reasons, uncertainty_reasons
 
 
@@ -359,38 +397,7 @@ def _check_optional_dir_entry(path: Path, root: Path) -> List[str]:
 
 def _data_tree_safe_for_audit(data_dir: Path, root: Path) -> List[str]:
     """Walk data/ without following symlinks; external scanners are not a boundary."""
-    reasons: List[str] = []
-
-    def walk(dirpath: Path) -> None:
-        if reasons:
-            return
-        try:
-            with os.scandir(dirpath) as it:
-                for ent in it:
-                    if reasons:
-                        return
-                    try:
-                        est = ent.stat(follow_symlinks=False)
-                    except OSError:
-                        reasons.append("data_unreadable")
-                        return
-                    if _is_reparse_point(est) or stat.S_ISLNK(est.st_mode):
-                        reasons.append("store_symlink_escape")
-                        return
-                    full = Path(ent.path)
-                    if not _entry_contained(full, root):
-                        reasons.append("store_symlink_escape")
-                        return
-                    if stat.S_ISDIR(est.st_mode):
-                        walk(full)
-                    elif not stat.S_ISREG(est.st_mode):
-                        reasons.append("data_layout_unsafe")
-                        return
-        except OSError:
-            reasons.append("data_unreadable")
-
-    walk(data_dir)
-    return reasons
+    return _bounded_tree_walk(data_dir, root)
 
 
 def _is_reparse_point(st: os.stat_result) -> bool:

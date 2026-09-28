@@ -528,6 +528,53 @@ if hasattr(os, "symlink"):
     except OSError:
         check("nested audit symlink skipped", True)
 
+# --- bootstrap audit: raw published walk (orphan bypass) --------------------
+
+bootstrap_audit_root = tempfile.mkdtemp(prefix="kk_health_bootstrap_audit_")
+b_ba = LocalBackend(bootstrap_audit_root)
+gate.persist(
+    b_ba,
+    "ba/system_state",
+    b"---\nrevision: 1\n---\nok\n",
+    ctx=create_ctx(),
+    doc_type="system_state",
+)
+gate.persist(
+    b_ba,
+    "ba/session_log",
+    b"---\nrevision: 1\n---\n## Active State\n\n## Next Step\n\n",
+    ctx=create_ctx(),
+    doc_type="session_log",
+)
+b_ba.close()
+with open(
+    os.path.join(bootstrap_audit_root, "data", "ba", "leak.md"),
+    "w",
+    encoding="utf-8",
+) as _leak:
+    _leak.write("ghp_EXAMPLE0000000000000000000000")
+entries_ba, block_ba, _unc_ba = hi.enumerate_project_published_files_for_audit(
+    bootstrap_audit_root, "ba"
+)
+check(
+    "bootstrap audit walk lists orphan bypass blob",
+    not block_ba and any(k == "ba/leak.md" for k, _ in entries_ba),
+)
+findings_ba = knokeep_state._audit_store(bootstrap_audit_root, "ba")
+check(
+    "bootstrap audit flags orphan secret",
+    any(f.get("key") == "ba/leak.md" and f.get("reasons") for f in findings_ba),
+)
+p_ba = subprocess.run(
+    [sys.executable, STATE, "bootstrap", "--store", bootstrap_audit_root, "--project", "ba"],
+    capture_output=True,
+    text=True,
+)
+check(
+    "bootstrap CLI refuses orphan bypass secret",
+    p_ba.returncode != 0 and "store contains secrets" in p_ba.stderr,
+)
+
 # --- redaction --------------------------------------------------------------
 
 secret_key = "sekret/proj/system_state"
@@ -579,6 +626,7 @@ for d in (
     dangle_ev_root,
     empty_journal_root,
     bad_ts_root,
+    bootstrap_audit_root,
 ) + tuple(symlink_roots):
     if os.path.exists(d):
         import shutil

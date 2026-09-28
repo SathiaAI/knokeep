@@ -24,9 +24,46 @@ Usage (no inference):  --check-only   (version, profile, endpoint /v1/models)
 """
 import argparse, hashlib, importlib.util, json, os, re, subprocess, sys, urllib.request
 
-DRIVER_VERSION = "q1-hermes-driver/1"
-SCRUB_ENV = ("ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY", "XAI_API_KEY", "NOUS_API_KEY",
-             "HERMES_PROFILE", "HERMES_INFERENCE_MODEL", "HERMES_INFERENCE_PROVIDER")
+DRIVER_VERSION = "q1-hermes-driver/2"
+_SCRUB_PREFIXES = ("HERMES_", "ANTHROPIC_", "OPENAI_", "OPENROUTER_", "XAI_", "NOUS_", "OLLAMA_", "HONCHO_",
+                   "GROQ_", "MISTRAL_", "GEMINI_", "GOOGLE_API", "AZURE_OPENAI", "DEEPSEEK_", "MOONSHOT_", "KIMI_",
+                   "LLAMA", "LLM_", "LITELLM_", "TOGETHER_", "FIREWORKS_", "CLAUDE_CODE_USE_")
+_SCRUB_PARTS = ("API_KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "BEARER", "BASE_URL", "API_BASE", "ENDPOINT")
+LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]")
+
+
+def scrubbed_env(a, key=None):
+    """Child environment: inherited Hermes/profile/config/provider/endpoint/auth overrides removed
+    (ALL HERMES_* included), then only the intended HERMES_HOME, lazy-install flag and local key set.
+    Returns (env, removed_names). Values are never recorded."""
+    env, removed = {}, []
+    for k, v in os.environ.items():
+        u = k.upper()
+        if u.startswith(_SCRUB_PREFIXES) or any(p in u for p in _SCRUB_PARTS):
+            removed.append(k)
+        else:
+            env[k] = v
+    env["HERMES_HOME"] = os.path.abspath(a.home)
+    env["HERMES_DISABLE_LAZY_INSTALLS"] = "1"
+    if key is not None:
+        env[a.key_env] = key
+    return env, sorted(removed)
+
+
+def yaml_block(text, name):
+    """Minimal read of a top-level mapping's direct 'key: value' children (no YAML dependency)."""
+    out, inside = {}, False
+    for line in text.splitlines():
+        if re.match(rf"^{re.escape(name)}:\s*$", line):
+            inside = True
+            continue
+        if inside:
+            if line and not line.startswith(" "):
+                break
+            m = re.match(r"^  ([A-Za-z_]+):\s*(.*?)\s*$", line)
+            if m:
+                out[m.group(1)] = m.group(2).strip("'\"")
+    return out
 
 
 def sha(path):
@@ -49,19 +86,47 @@ def exe_argv(exe):
 
 
 def preflight(a):
-    """Read-only isolation checks on the fresh profile. Returns (ok, facts)."""
+    """Read-only isolation checks on the fresh profile. Returns (ok, facts). Unknown stays unknown."""
     f = {"home_exists": os.path.isdir(a.home)}
     cfg = os.path.join(a.home, "config.yaml")
     f["config_sha256"] = sha(cfg) if os.path.isfile(cfg) else None
     text = open(cfg, encoding="utf-8").read() if os.path.isfile(cfg) else ""
+    model = yaml_block(text, "model")
+    f["route"] = {k: model.get(k) for k in ("default", "provider", "base_url", "key_env")}
+    base = model.get("base_url") or ""
+    f["route_is_explicit_local"] = (model.get("provider") == "custom" and model.get("default") == a.model
+                                    and model.get("key_env") == a.key_env
+                                    and bool(re.match(r"^http://(%s):\d+/v1/?$" % "|".join(re.escape(h) for h in LOCAL_HOSTS), base))
+                                    and (not a.endpoint or base.rstrip("/") == a.endpoint.rstrip("/")))
     f["fallback_providers_empty"] = bool(re.search(r"(?m)^fallback_providers:\s*\[\]\s*$", text))
-    f["memory_disabled"] = bool(re.search(r"(?m)^\s+memory_enabled:\s*false\s*$", text))
-    f["user_profile_disabled"] = bool(re.search(r"(?m)^\s+user_profile_enabled:\s*false\s*$", text))
+    mem = yaml_block(text, "memory")
+    f["memory_disabled"] = mem.get("memory_enabled") == "false"
+    f["user_profile_disabled"] = mem.get("user_profile_enabled") == "false"
+    f["honcho_configured"] = bool(re.search(r"(?i)honcho", text)) or os.path.exists(os.path.join(a.home, "honcho.json"))
+    f["mcp_servers_configured"] = bool(re.search(r"(?m)^mcp_servers:", text)) and not re.search(
+        r"(?m)^mcp_servers:\s*(\[\]|\{\})?\s*$(?!\n  )", text)
+    pdir = os.path.join(a.home, "plugins")
+    f["plugins_installed"] = sorted(os.listdir(pdir)) if os.path.isdir(pdir) else []
+    f["plugins_config_key"] = bool(re.search(r"(?m)^plugins:", text))
     f["no_profile_env_file"] = not os.path.exists(os.path.join(a.home, ".env"))
     f["no_profile_auth_file"] = not os.path.exists(os.path.join(a.home, "auth.json"))
     f["key_file_present"] = bool(a.key_file) and os.path.isfile(a.key_file)
-    ok = all(v for k, v in f.items() if k != "config_sha256") and f["config_sha256"] is not None
+    required = ("home_exists", "route_is_explicit_local", "fallback_providers_empty", "memory_disabled",
+                "user_profile_disabled", "no_profile_env_file", "no_profile_auth_file", "key_file_present")
+    ok = (f["config_sha256"] is not None and all(f[k] for k in required) and not f["honcho_configured"]
+          and not f["mcp_servers_configured"] and not f["plugins_installed"])
     return ok, f
+
+
+def log_mark(home):
+    """Position + head fingerprint of the profile agent.log before a turn."""
+    p = os.path.join(home, "logs", "agent.log")
+    if not os.path.isfile(p):
+        return {"exists": False, "size": 0, "head_sha256": None}
+    size = os.path.getsize(p)
+    with open(p, "rb") as fh:
+        head = fh.read(min(size, 4096))
+    return {"exists": True, "size": size, "head_len": len(head), "head_sha256": hashlib.sha256(head).hexdigest()}
 
 
 def parse_stream(stdout_bytes, stderr_bytes):
@@ -85,39 +150,52 @@ def parse_stream(stdout_bytes, stderr_bytes):
     return rep
 
 
-def route_from_log(home, session_id):
-    """Model/provider per API call and fallback mentions for this session from the isolated profile log."""
-    out = {"api_calls": 0, "routes": {}, "fallback_lines": 0, "log_found": False}
-    log = os.path.join(home, "logs", "agent.log")
-    if not session_id or not os.path.isfile(log):
+def route_from_log(home, session_id, mark):
+    """Model/provider per API call and fallback mentions for this session, from ONLY the bytes the
+    profile log gained during this turn. Rotation/truncation => status unknown (never guessed)."""
+    out = {"status": "unknown", "api_calls": None, "routes": {}, "fallback_lines": None, "log_mark": mark}
+    p = os.path.join(home, "logs", "agent.log")
+    if not session_id or not os.path.isfile(p):
+        out["reason"] = "no session id" if not session_id else "log missing"
         return out
-    out["log_found"] = True
-    tag = f"[{session_id}]"
-    with open(log, encoding="utf-8", errors="replace") as f:
-        for line in f:
-            if tag not in line:
-                continue
-            if "API call #" in line:
-                out["api_calls"] += 1
-                m = re.search(r"model=(\S+) provider=(\S+)", line)
-                k = f"{m.group(1)}|{m.group(2)}" if m else "unparsed"
-                out["routes"][k] = out["routes"].get(k, 0) + 1
-            if re.search(r"(?i)fallback", line):
-                out["fallback_lines"] += 1
+    size = os.path.getsize(p)
+    with open(p, "rb") as fh:
+        if mark["exists"]:
+            head = fh.read(mark["head_len"])
+            if size < mark["size"] or hashlib.sha256(head).hexdigest() != mark["head_sha256"]:
+                out["reason"] = "log rotated or truncated during turn"
+                return out
+        fh.seek(mark["size"] if mark["exists"] else 0)
+        delta = fh.read().decode("utf-8", "replace")
+    tag, calls, fb = f"[{session_id}]", 0, 0
+    for line in delta.splitlines():
+        if tag not in line:
+            continue
+        if "API call #" in line:
+            calls += 1
+            m = re.search(r"model=(\S+) provider=(\S+)", line)
+            k = f"{m.group(1)}|{m.group(2)}" if m else "unparsed"
+            out["routes"][k] = out["routes"].get(k, 0) + 1
+        if re.search(r"(?i)fallback", line):
+            fb += 1
+    out.update(status="measured", api_calls=calls, fallback_lines=fb, delta_bytes=len(delta.encode("utf-8")))
     return out
 
 
 def check_only(a):
     ok, facts = preflight(a)
-    v = subprocess.run(exe_argv(a.hermes_exe) + ["--version"], capture_output=True, text=True, timeout=60,
+    env, removed = scrubbed_env(a)
+    facts["scrubbed_env_names"] = removed
+    v = subprocess.run(exe_argv(a.hermes_exe) + ["--version"], capture_output=True, text=True, timeout=60, env=env,
                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     facts["hermes_version"] = (v.stdout.strip().splitlines() or [""])[0]
     facts["endpoint"] = None
     if a.endpoint and facts["key_file_present"]:
         key = open(a.key_file, encoding="utf-8").read().strip()
         req = urllib.request.Request(a.endpoint.rstrip("/") + "/models", headers={"Authorization": f"Bearer {key}"})
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))   # localhost: never via a proxy
         try:
-            with urllib.request.urlopen(req, timeout=15) as r:
+            with opener.open(req, timeout=15) as r:
                 ids = [m.get("id") for m in json.load(r).get("data", [])]
             facts["endpoint"] = {"http": 200, "model_listed": a.model in ids}   # listing != loadable
         except Exception as e:
@@ -144,7 +222,7 @@ def main(argv=None):
     ap.add_argument("--timeout", type=float, default=630, help="supervisor hard wall-clock limit")
     ap.add_argument("--key-file", help="local endpoint key file; value goes only into the child env")
     ap.add_argument("--key-env", default="HERMES_A3_LOCAL_KEY")
-    ap.add_argument("--endpoint", help="for --check-only: base URL ending in /v1")
+    ap.add_argument("--endpoint", required=True, help="explicit local base URL ending in /v1; must equal profile base_url")
     ap.add_argument("--ignore-rules", action="store_true", help="pass --ignore-rules (record in packet)")
     ap.add_argument("--check-only", action="store_true")
     a = ap.parse_args(argv)
@@ -176,16 +254,13 @@ def main(argv=None):
     if a.ignore_rules:
         cmd += ["--ignore-rules"]
 
-    for k in SCRUB_ENV:                                   # child inherits this process env
-        os.environ.pop(k, None)
-    os.environ["HERMES_HOME"] = os.path.abspath(a.home)
-    os.environ["HERMES_DISABLE_LAZY_INSTALLS"] = "1"
-    key = None
-    if a.key_file:
-        key = open(a.key_file, encoding="utf-8").read().strip()
-        os.environ[a.key_env] = key
+    key = open(a.key_file, encoding="utf-8").read().strip() if a.key_file else None
+    env, removed = scrubbed_env(a, key)
+    os.environ.clear()                                   # the supervisor's child inherits exactly this env
+    os.environ.update(env)
 
     os.makedirs(a.evidence_dir, exist_ok=True)
+    mark = log_mark(a.home)
     rec = rb.run(cmd, a.timeout, turn_dir)                # refuses an existing dir; real OS exit
     so = open(os.path.join(turn_dir, "stdout.bin"), "rb").read()
     se = open(os.path.join(turn_dir, "stderr.bin"), "rb").read()
@@ -198,7 +273,8 @@ def main(argv=None):
     turn = {"driver": DRIVER_VERSION, "turn": a.turn,
             "prompt": {"sha256": sha(a.prompt_file), "bytes": os.path.getsize(a.prompt_file)},
             "argv": cmd, "supervisor": rec, "reported": rep, "session_id": sid, "continuity": continuity,
-            "route": route_from_log(a.home, sid), "preflight": facts,
+            "route": route_from_log(a.home, sid, mark), "preflight": facts,
+            "scrubbed_env_names": removed,
             "provenance": {"driver_sha256": sha(os.path.abspath(__file__)), "supervisor_sha256": sha(a.supervisor),
                            "ignore_rules": a.ignore_rules},
             "secret_in_output": bool(key) and (key.encode() in so or key.encode() in se)}

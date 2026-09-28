@@ -1,0 +1,72 @@
+{
+  "source_commit": "7c0e4316bc411d058ffd44b48703efb1a3bc04c2",
+  "code_commit": "8fb9ef7ac4290b43352a40a9690c13c1f32a8917",
+  "files": [
+    {
+      "path": "orders.csv",
+      "sha256": "bf35c093ccf946c1e5b17b1c7072c070974f149c9775da4bb8c7f77e2b676357",
+      "size": 179,
+      "original_bytes_match": true
+    },
+    {
+      "path": "store/.knokeep-eval/events.jsonl",
+      "sha256": "5e68e4a4a1975564737f5f3f0105592a74b687306c55cbe15bf01cad62c71154",
+      "size": 668,
+      "original_bytes_match": true
+    },
+    {
+      "path": "store/data/q0-hermes-a4/session_log",
+      "sha256": "f7cd58ef7a7801b5b48a431c90d37b60df5c92450a45d60b9d513f79dd8f3a5c",
+      "size": 402,
+      "original_bytes_match": true
+    },
+    {
+      "path": "store/data/q0-hermes-a4/sessions/hermes-a4",
+      "sha256": "0eea609fa2b2c697c045a3e933f3cbefb1c81fe319dee07bd64124460a974de7",
+      "size": 612,
+      "original_bytes_match": true
+    },
+    {
+      "path": "store/data/q0-hermes-a4/system_state",
+      "sha256": "bcbff151c36d73b6252ccacb7e98cff6f6191503856e62f3c2882c64aaf640de",
+      "size": 800,
+      "original_bytes_match": true
+    },
+    {
+      "path": "store/journal/journal.log",
+      "sha256": "47e87258503451efba92c9857e6e98eccb6ed11b3b8dbc7045ffeecda7817e1e",
+      "size": 2579,
+      "original_bytes_match": true
+    },
+    {
+      "path": "store/locks/advisory.lock",
+      "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+      "size": 1,
+      "original_bytes_match": true
+    },
+    {
+      "path": "store/locks/cas.lock",
+      "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+      "size": 1,
+      "original_bytes_match": true
+    },
+    {
+      "path": "store/locks/fence-alloc/3bcc6b6bfa941164ded4b88bdd4f2b0a21126a829622de02d6aba6138f8d16b6.fence",
+      "sha256": "7e741812e46f4c37999053e09331aa06edb43d6ca5735321b299f90e79a79791",
+      "size": 52,
+      "original_bytes_match": true
+    },
+    {
+      "path": "store/locks/fence-alloc/9968b526baf1efe922fc71a647fac8bcd28f44ae49873ca1320eb3740ccfeec4.fence",
+      "sha256": "0bf7b762c8d743f1f57450a700349bae1846d97ea6e2eff0c1ae06532fb97080",
+      "size": 52,
+      "original_bytes_match": true
+    },
+    {
+      "path": "store/locks/fence-alloc/d41aa7cdf48c1c7b36178abfcbec7fb773c5ed2f1256197974c377eb2e015755.fence",
+      "sha256": "4750747828ce1b2ec51d8c1ea8f8928a147f3892ced50526699851d29a0882f9",
+      "size": 53,
+      "original_bytes_match": true
+    }
+  ]
+}

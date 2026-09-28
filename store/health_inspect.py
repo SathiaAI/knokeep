@@ -178,6 +178,105 @@ def safe_data_dir_for_audit(
     return str(data_dir), []
 
 
+_BENIGN_AUDIT_BASENAMES = frozenset({".ds_store", "thumbs.db", "desktop.ini"})
+
+
+def enumerate_project_published_files_for_audit(
+    store: str,
+    project: str,
+    *,
+    root: Optional[Path] = None,
+) -> Tuple[List[Tuple[str, Optional[bytes]]], List[str], List[str]]:
+    """Read-only walk of on-disk files under data/{project}/ for bootstrap audit.
+
+    Does not construct LocalBackend and does not treat files as journal-committed
+    records. Returns (entries, block_reasons, uncertainty_reasons) where each
+    entry is (logical_key, raw_bytes_or_None_if_unreadable).
+    """
+    block_reasons: List[str] = []
+    uncertainty_reasons: List[str] = []
+    entries: List[Tuple[str, Optional[bytes]]] = []
+
+    store_check = inspect_local_store(store)
+    if store_check.get("indeterminate"):
+        uncertainty_reasons.append("inspect_indeterminate")
+    for code in store_check.get("reasons") or []:
+        if code not in uncertainty_reasons:
+            uncertainty_reasons.append(code)
+
+    if root is None:
+        root, root_reasons = resolve_store_root(store)
+        if root is None:
+            return [], list(root_reasons), uncertainty_reasons
+
+    data_dir_str, layout_reasons = safe_data_dir_for_audit(store, root=root)
+    if layout_reasons:
+        return [], layout_reasons, uncertainty_reasons
+    if data_dir_str is None:
+        return [], ["data_layout_missing"], uncertainty_reasons
+
+    data_dir = Path(data_dir_str)
+    project_dir = data_dir / project
+    if not os.path.lexists(project_dir):
+        return [], block_reasons, uncertainty_reasons
+
+    try:
+        pst = os.lstat(project_dir)
+    except OSError:
+        return [], ["data_unreadable"], uncertainty_reasons
+    if _is_reparse_point(pst) or stat.S_ISLNK(pst.st_mode):
+        return [], ["store_symlink_escape"], uncertainty_reasons
+    if not stat.S_ISDIR(pst.st_mode):
+        return [], ["data_layout_unsafe"], uncertainty_reasons
+    if not _entry_contained(project_dir, root):
+        return [], ["store_symlink_escape"], uncertainty_reasons
+
+    prefix = project + "/"
+
+    def walk(dirpath: Path) -> None:
+        if block_reasons:
+            return
+        try:
+            with os.scandir(dirpath) as it:
+                for ent in it:
+                    if block_reasons:
+                        return
+                    try:
+                        est = ent.stat(follow_symlinks=False)
+                    except OSError:
+                        block_reasons.append("data_unreadable")
+                        return
+                    if _is_reparse_point(est) or stat.S_ISLNK(est.st_mode):
+                        block_reasons.append("store_symlink_escape")
+                        return
+                    full = Path(ent.path)
+                    if not _entry_contained(full, root):
+                        block_reasons.append("store_symlink_escape")
+                        return
+                    if stat.S_ISDIR(est.st_mode):
+                        walk(full)
+                        continue
+                    if not stat.S_ISREG(est.st_mode):
+                        block_reasons.append("data_layout_unsafe")
+                        return
+                    if ent.name.lower() in _BENIGN_AUDIT_BASENAMES:
+                        continue
+                    try:
+                        rel = full.relative_to(data_dir).as_posix()
+                    except ValueError:
+                        block_reasons.append("store_symlink_escape")
+                        return
+                    if not rel.startswith(prefix):
+                        continue
+                    raw = _read_bounded_regular_file(full)
+                    entries.append((rel, raw))
+        except OSError:
+            block_reasons.append("data_unreadable")
+
+    walk(project_dir)
+    return entries, block_reasons, uncertainty_reasons
+
+
 def safe_events_path(store: str, *, root: Optional[Path] = None) -> Optional[Path]:
     path, reasons = _telemetry_events_path(store, root=root)
     if reasons:

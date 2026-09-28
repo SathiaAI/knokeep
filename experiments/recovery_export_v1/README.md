@@ -1,4 +1,4 @@
-> UNQUALIFIED DRAFT. Do not use on real stores. Windows reproduced 16 synthetic tests and four earlier defects are corrected, but independent review still identifies incomplete-directory/link verification, aggregate resource bounds, malformed-input handling and POSIX publication durability gaps. No in-place repair or service restoration exists. This branch is for bounded review and synthetic tests only.
+> UNQUALIFIED DRAFT. Do not use on real stores. The fix/q9-export-review-a1 pass bounds inventory/verifier traversal and reads, validates manifest shape, rejects links/hard links/incomplete roots before reading data, and reports directory durability per created directory, but it has only been run on Linux here; Windows, macOS and real power-loss behaviour are UNVERIFIED. No in-place repair or service restoration exists. This branch is for bounded review and synthetic tests only.
 
 # recovery_export_v1 (experimental)
 
@@ -23,6 +23,9 @@ repair the store, switch service, install a candidate, or construct
 | Max tree entries (files + directories visited) | 10,000 |
 | Max relative path depth | 64 |
 | Copy/hash chunk size | 64 KiB |
+| Manifest size read by verify | 16 MiB |
+| Retained latest journal bodies (parser) | 32 MiB |
+| Bytes hashed by verify (archive + candidate) | 128 MiB |
 
 Refuses symlinks, hard links (`st_nlink > 1`), special files, output/store
 overlap (after `realpath` + `normcase`), busy lock, missing/unreadable journal
@@ -46,9 +49,16 @@ is indistinguishable from an honest store).
 
 - Regular files are flushed and `fsync`'d before the export directory is renamed
   complete.
-- **POSIX**: created output directories are `fsync`'d bottom-up where
-  supported; results are recorded in the manifest (`directory_fsync_results`).
-- **Windows**: directory `fsync` is not attempted; not claimed.
+- **POSIX**: every created output directory (including intermediate parents)
+  is `fsync`'d bottom-up, then the attempt root; results are recorded in the
+  manifest under relative labels (`directory_fsync_results`). Any failure
+  refuses with `REFUSE_OUTPUT_DURABILITY_FAILED` and keeps the attempt. After
+  the manifest write the attempt root is `fsync`'d again, and after rename the
+  output parent; those are reported in the result only
+  (`post_manifest_fsync`, `directory_durability`). A failed output-parent
+  fsync returns `EXPORT_DURABILITY_UNCONFIRMED` (CLI exit 1).
+- **Windows**: directory `fsync` is not attempted and is reported as
+  `unsupported_windows` / `unsupported_windows_no_directory_fsync`, never as success.
 - Final `rename` to the completed export name is a name swap only — **not** a
   power-loss proof.
 - `manifest_sha256` is a deterministic self-check only; it is **not**

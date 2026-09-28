@@ -18,6 +18,7 @@ env:
     tests/test_gate_hardening.py
     tests/test_gate_supplement.py
     tests/test_plugin_store_root.py
+    tests/test_client_attribution.py
     tests/test_local_backend.py
     tests/test_git_backend.py
     tests/test_objectstore.py
@@ -79,7 +80,7 @@ jobs:
         run: pip install pytest pg8000 boto3 "moto[server]" flask flask-cors
       - name: Local adapter (msvcrt/NTFS native) + conformance + skill/plugin tests
         shell: bash
-        run: python -m pytest tests/test_local_backend.py conformance tests/test_gate_supplement.py tests/test_plugin_store_root.py -q
+        run: python -m pytest tests/test_local_backend.py conformance tests/test_gate_supplement.py tests/test_plugin_store_root.py tests/test_client_attribution.py -q
       - name: V1/skill acceptance scripts (unified engine)
         shell: bash
         run: |
@@ -112,7 +113,7 @@ jobs:
       - name: Install deps
         run: pip install pytest pg8000 boto3 "moto[server]" flask flask-cors
       - name: Core adapter + conformance + skill/plugin tests
-        run: python -m pytest tests/test_local_backend.py conformance tests/test_gate_supplement.py tests/test_plugin_store_root.py -q
+        run: python -m pytest tests/test_local_backend.py conformance tests/test_gate_supplement.py tests/test_plugin_store_root.py tests/test_client_attribution.py -q
       - name: V1/skill acceptance scripts (unified engine)
         run: |
           set -e

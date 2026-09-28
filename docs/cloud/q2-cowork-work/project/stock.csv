@@ -1,0 +1,5 @@
+sku,stock,reserved,threshold,lead_days,active
+notebook,4,1,10,14,yes
+pen,8,3,5,10,yes
+pouch,3,1,8,5,yes
+cable,1,0,9,21,no

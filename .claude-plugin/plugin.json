@@ -1,7 +1,7 @@
 {
   "name": "knokeep",
   "version": "0.1.0",
-  "description": "Portable, secret-safe memory that lets any AI coding agent resume exactly where the last session — on any tool — left off. Part of the Kno suite.",
+  "description": "Portable project records with secret-pattern screening. Enrolled clients can save and resume through a shared store or verified export; capture fidelity remains under qualification. Part of the Kno suite.",
   "author": {
     "name": "ViaKnox",
     "url": "https://github.com/SathiaAI"

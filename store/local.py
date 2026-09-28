@@ -389,8 +389,7 @@ class LocalBackend:
             # new empty store (no published blobs under data/).
             self._journal_fh = open(self._journal_path, "ab")
 
-            # One-time case-insensitivity probe (JUDGMENT CALL #5 above).
-            self._case_insensitive = self._detect_case_insensitive()
+            self._case_insensitive = False
 
             # Resume: replay the journal to re-materialize any key whose
             # published blob is missing or torn (contract §3). This MUST hold
@@ -400,13 +399,16 @@ class LocalBackend:
             # another process's in-flight write() to that same key (both doing
             # an O_EXCL create for the same path at once) — a real race found
             # by tests/test_local_backend.py's two-process tests, not a
-            # theoretical concern.
+            # theoretical concern. The case-insensitivity probe also runs here
+            # so a transient probe file under data/ cannot be mistaken for user
+            # data by a concurrent list() on another instance.
             resume_lock = _FileLock(self._cas_lock_path)
             if not resume_lock.acquire(self._lock_timeout_s):
                 raise RuntimeError(
                     "LocalBackend: could not acquire cas.lock to resume/scavenge on startup"
                 )
             try:
+                self._case_insensitive = self._detect_case_insensitive()
                 self._resume()
                 # Startup scavenger: remove staging temps older than TTL, left
                 # behind by a process that crashed between mkstemp and the
@@ -439,6 +441,11 @@ class LocalBackend:
         finally:
             with contextlib.suppress(OSError):
                 lower.unlink()
+
+    @staticmethod
+    def _orphan_published_blob(key: str, latest: Dict[str, Tuple[bytes, int]], data_path: Path) -> bool:
+        """Published bytes with no durable journal record for this key."""
+        return key not in latest and data_path.is_file()
 
     def _scan_journal_latest(
         self,
@@ -598,12 +605,18 @@ class LocalBackend:
         committed value for `key` is unknown and must not be treated as
         "nothing committed". OSErrors propagate to write() for mapping."""
         scan_state: Dict[str, int] = {}
+        journal_latest: Dict[str, Tuple[bytes, int]] = {}
         latest: Optional[Tuple[bytes, int]] = None
         for rec_key, raw, last_accepted_fence in self._iter_journal_records(scan_state):
+            journal_latest[rec_key] = (raw, last_accepted_fence)
             if rec_key == key:
                 latest = (raw, last_accepted_fence)
         if not self._journal_scan_complete(scan_state):
             raise _RecoveryIncomplete()
+        if self._orphan_published_blob(key, journal_latest, data_path):
+            raise BackendCorruptionError(
+                f"published blob at {key!r} has no durable journal record"
+            )
         if latest is None:
             return
         raw, last_accepted_fence = latest
@@ -750,9 +763,10 @@ class LocalBackend:
 
         Under a bounded cas.lock wait, replays journal.log far enough to
         materialize any committed-but-unpublished record for this key, then
-        reads the published blob. Cost is O(journal bytes) per call (the log is
-        never compacted); there is no size/mtime shortcut. Separate read/list
-        calls are not a cross-key transactional snapshot."""
+        reads the published blob while still holding the lock so this call's
+        view matches that synchronized scan. Cost is O(journal bytes) per call.
+        Published files without a journal record raise corruption. Separate
+        read/list calls are not a cross-key transactional snapshot."""
         if self._journal_ambiguous:
             raise BackendCorruptionError(
                 "journal.log cannot be fully replayed; read/list are unavailable"
@@ -773,15 +787,17 @@ class LocalBackend:
                 raise BackendBusyError(
                     "recovery publish contended on cas.lock or data path"
                 ) from None
+            except BackendCorruptionError:
+                raise
+            try:
+                raw = data_path.read_bytes()
+            except FileNotFoundError:
+                return None
+            # PERMISSION / other OSErrors propagate per contract §2 ("None ONLY
+            # for NOT_FOUND; PERMISSION/NETWORK/CORRUPTION RAISE").
+            return Blob(body=raw, version_hash=sha256_hex(raw))
         finally:
             lock.release()
-        try:
-            raw = data_path.read_bytes()
-        except FileNotFoundError:
-            return None
-        # PERMISSION / other OSErrors propagate per contract §2 ("None ONLY
-        # for NOT_FOUND; PERMISSION/NETWORK/CORRUPTION RAISE").
-        return Blob(body=raw, version_hash=sha256_hex(raw))
 
     def list(self, prefix: str) -> Iterator[str]:
         """Keys under `prefix` visible after a journal-aware scan.
@@ -802,14 +818,15 @@ class LocalBackend:
                 raise BackendCorruptionError(
                     "journal.log cannot be fully replayed to EOF"
                 )
-            keys: set[str] = {k for k in latest if k.startswith(prefix)}
             if self._data_dir.exists():
                 for path in self._data_dir.rglob("*"):
                     if path.is_file():
                         rel = path.relative_to(self._data_dir).as_posix()
-                        if rel.startswith(prefix):
-                            keys.add(rel)
-            results = sorted(keys)
+                        if rel.startswith(prefix) and rel not in latest:
+                            raise BackendCorruptionError(
+                                f"published blob at {rel!r} has no durable journal record"
+                            )
+            results = sorted(k for k in latest if k.startswith(prefix))
         finally:
             lock.release()
         return iter(results)

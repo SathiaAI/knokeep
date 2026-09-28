@@ -1586,3 +1586,47 @@ def test_constructor_closes_journal_handle_when_resume_fails(tmp_path, monkeypat
 
     again = LocalBackend(root)
     again.close()
+
+
+def test_orphan_published_blob_without_journal_record(tmp_path):
+    root = tmp_path / "store-root"
+    LocalBackend(root).close()  # genuinely new store: creates empty journal.log
+    orphan = root / "data" / "p" / "orphan"
+    orphan.parent.mkdir(parents=True, exist_ok=True)
+    orphan.write_bytes(b"unjournaled-materialized-view")
+    journal = root / "journal" / "journal.log"
+    assert journal.is_file() and journal.read_bytes() == b""
+
+    backend = LocalBackend(root)
+    try:
+        assert journal.is_file()
+        with pytest.raises(BackendCorruptionError, match="no durable journal record"):
+            backend.read("p/orphan")
+        with pytest.raises(BackendCorruptionError, match="no durable journal record"):
+            list(backend.list("p/"))
+        assert orphan.read_bytes() == b"unjournaled-materialized-view"
+        assert journal.read_bytes() == b""
+    finally:
+        backend.close()
+
+
+def test_read_returns_none_for_missing_key_on_empty_store(tmp_path):
+    root = tmp_path / "store-root"
+    backend = LocalBackend(root)
+    try:
+        assert backend.read("no/such/key") is None
+        assert list(backend.list("no/")) == []
+    finally:
+        backend.close()
+
+
+def test_case_insensitivity_probe_leaves_no_data_files(tmp_path):
+    """Probe markers must not remain under data/ after startup (lock-guarded)."""
+    root = tmp_path / "store-root"
+    backend = LocalBackend(root)
+    try:
+        for path in (root / "data").rglob("*"):
+            if path.is_file():
+                assert not path.name.startswith("case-probe-")
+    finally:
+        backend.close()

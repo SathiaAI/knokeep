@@ -1,0 +1,32 @@
+{
+  "verdict": "PASS for guided continuation and uncertainty retention; semantic caveat retained",
+  "input_sha": "11deb60bf5aa872bd80bc86ad8af457153caf499",
+  "original_output_sha": "a5709c5342b44b5ab89cbf2424b18932188644c7",
+  "original_tree": "94032e59c46ba3b0086f51e31c08ac29f22f049d",
+  "input_manifest_count": 15,
+  "output_manifest_count": 20,
+  "hash_mismatches": 0,
+  "input_unchanged": true,
+  "project_trio_unchanged": true,
+  "summary_expected": {
+    "total_rows": 5,
+    "active_rows": 4,
+    "needs_restock_rows": 2
+  },
+  "summary_actual": {
+    "total_rows": 5,
+    "active_rows": 4,
+    "needs_restock_rows": 2
+  },
+  "journal_and_telemetry_original_prefix": true,
+  "final_receipts_match": true,
+  "question_carried_in_active_and_next": true,
+  "priority_file_absent": true,
+  "limitations": [
+    "Explicit guided prompt and policy, not blind reliability/incremental-value evidence.",
+    "The inherited question incorrectly says standalone Rule B gives an empty set; it would select bowl. The agent preserved it verbatim instead of resolving it; no disputed file was created.",
+    "State remains the prior Claude-authored architecture; current session log and appended session identify cursor-cloud. Caller labels are not authenticated.",
+    "Original provider commits contain an account-email coauthor trailer. This public derivative preserves the exact Git tree with coordinator metadata; old public commits may remain accessible.",
+    "Command exits in original report are worker-reported; provider completion is independently observed, not a full OS process trace."
+  ]
+}

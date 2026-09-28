@@ -38,7 +38,7 @@ Static review also noted: project `system_state` symlink reads, broken root-syml
 
 ## Commit
 
-(See latest push on `fix/cursor-health-readonly-a1`.)
+`e5747df` on `fix/cursor-health-readonly-a1` (round 2; prior history: `232c81f`, `b808d73`).
 
 ## Residual limits
 

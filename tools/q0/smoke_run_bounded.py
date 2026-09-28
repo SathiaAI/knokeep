@@ -7,6 +7,9 @@
 4. existing_output  output dir already exists -> refused, CLI exit 3, prior evidence byte-identical, child never ran
 5. cleanup_fail     simulated failing kill command -> timeout_cleanup_failed, exit code null
 6. cleanup_hang     simulated hanging kill command -> failed within the kill bound
+7. inspection_fail_closed  simulated denied / erroring process inspection must never read as "dead"
+Precondition: the script's own PID must inspect as alive, else it aborts (rc 2)
+without claiming anything, because liveness checks would be meaningless.
 Children in 5/6 are left running by design and are then force-killed by this
 script (finally block) and verified gone. Exits 0 only if every check passes.
 """
@@ -17,6 +20,36 @@ import run_bounded as rb
 PY = sys.executable
 out = tempfile.mkdtemp(prefix="rb-smoke-")
 ok = True
+
+try:
+    _self_ok = rb._alive(os.getpid()) is True
+except rb.InspectionError as e:
+    _self_ok = False
+if not _self_ok:
+    print(json.dumps({"case": "self_pid_sanity", "pass": False, "detail": "process inspection unavailable; no liveness claims made"}))
+    sys.exit(2)
+print(json.dumps({"case": "self_pid_sanity", "pass": True}), flush=True)
+
+
+def gone(pid):
+    """Verified gone only when the OS positively says so; inspection errors count as NOT verified."""
+    try:
+        return not rb._alive(pid)
+    except rb.InspectionError:
+        return False
+
+
+def force_cleanup(pid):
+    class _P: pass
+    _P.pid = pid
+    try:
+        rb._kill_tree(_P)
+    finally:
+        for _ in range(20):
+            if gone(pid):
+                return True
+            time.sleep(0.25)
+    return gone(pid)
 
 
 def report(name, rec, checks):
@@ -60,7 +93,7 @@ report("timeout_tree", r, {"timeout_killed": r["outcome"] == "timeout_killed",
                            "exit_code_recorded": r["os_exit_code"] is not None,
                            "bounded": r["elapsed_s"] < 3 + rb.KILL_TIMEOUT_S + rb.REAP_TIMEOUT_S,
                            "stdout_before_kill_kept": b"started" in o,
-                           "child_gone": not rb._alive(r["pid"]), "grandchild_gone": not rb._alive(gpid)})
+                           "child_gone": gone(r["pid"]), "grandchild_gone": gone(gpid)})
 # 4
 d = os.path.join(out, "existing_output")
 os.makedirs(d)
@@ -90,14 +123,32 @@ for name, kill_cmd, kt in (("cleanup_fail", [PY, "-c", "import sys; sys.exit(1)"
             checks["kill_timeout_reported"] = "exceeded" in (c.get("detail") or "")
     finally:
         if r and r.get("pid"):                           # guaranteed cleanup of the deliberately surviving child
-            class _P: pid = r["pid"]
-            rb._kill_tree(_P)
-            for _ in range(20):
-                if not rb._alive(r["pid"]):
-                    break
-                time.sleep(0.25)
-            checks["test_child_cleaned_up"] = not rb._alive(r["pid"])
+            checks["test_child_cleaned_up"] = force_cleanup(r["pid"])
     report(name, r, checks)
+
+# 7: fail-closed inspection (the #37 review regression)
+live = subprocess.Popen([PY, "-c", "import time; time.sleep(60)"], stdin=subprocess.DEVNULL,
+                        **({"creationflags": rb._NOWIN} if rb.WIN else {}))
+real_probe = rb._raw_probe
+checks = {}
+try:
+    rb._raw_probe = lambda pid: "denied"
+    checks["denied_reads_alive"] = rb._alive(live.pid) is True
+    def _boom(pid):
+        raise rb.InspectionError("simulated: Access denied")
+    rb._raw_probe = _boom
+    try:
+        rb._alive(live.pid)
+        checks["error_raises"] = False
+    except rb.InspectionError:
+        checks["error_raises"] = True
+    checks["error_not_reported_cleaned"] = gone(live.pid) is False
+finally:
+    rb._raw_probe = real_probe
+    live.kill()
+    live.wait(timeout=10)
+    checks["real_child_really_gone"] = gone(live.pid)
+report("inspection_fail_closed", None, checks)
 
 print(json.dumps({"all_pass": bool(ok), "platform": sys.platform, "python": sys.version.split()[0]}))
 sys.exit(0 if ok else 1)

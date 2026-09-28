@@ -18,6 +18,7 @@ Exit status of this script: 0 when a record was written (read run.json for the
 child's result), 3 when the output directory already exists (nothing launched),
 2 on usage error.
 
+Liveness (_alive) fails closed: inspection errors raise, denied means alive.
 Limits: descendants that leave the child's process group (POSIX setsid) or
 break away from it on Windows are not tracked; liveness checks are PID-based.
 """
@@ -38,27 +39,65 @@ def _utc():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
-def _alive(pid):
-    """True if pid is running. Linux: a zombie counts as not running. Other
-    POSIX systems without /proc fall back to kill(pid, 0), which cannot tell a
-    zombie from a live process."""
+class InspectionError(Exception):
+    """Process state could not be determined. Callers must treat it as NOT cleaned up."""
+
+
+def _raw_probe(pid):
+    """Platform probe. Returns "gone", "exists" or "denied" (exists but not inspectable);
+    raises InspectionError on anything else. Test hook: smoke tests replace this."""
     if WIN:
-        r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True,
-                           timeout=KILL_TIMEOUT_S, creationflags=_NOWIN)
-        return str(pid) in r.stdout
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.restype = wintypes.HANDLE
+        h = k32.OpenProcess(0x1000, False, int(pid))      # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            err = ctypes.get_last_error()
+            if err == 87:                                   # ERROR_INVALID_PARAMETER: no such PID
+                return "gone"
+            if err == 5:                                    # ERROR_ACCESS_DENIED: it exists
+                return "denied"
+            raise InspectionError(f"OpenProcess error {err}")
+        try:
+            code = wintypes.DWORD()
+            if not k32.GetExitCodeProcess(h, ctypes.byref(code)):
+                raise InspectionError(f"GetExitCodeProcess error {ctypes.get_last_error()}")
+            return "exists" if code.value == 259 else "gone"   # 259 = STILL_ACTIVE
+        finally:
+            k32.CloseHandle(h)
     if _HAS_PROC:
         try:
-            with open(f"/proc/{pid}/stat") as f:
-                return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+            with open(f"/proc/{int(pid)}/stat") as f:
+                return "gone" if f.read().rsplit(")", 1)[1].split()[0] == "Z" else "exists"
         except FileNotFoundError:
-            return False
-    try:
-        os.kill(pid, 0)
-        return True
+            return "gone"
+        except PermissionError:
+            return "denied"
+        except (OSError, IndexError, ValueError) as e:
+            raise InspectionError(f"/proc read failed: {type(e).__name__}: {e}")
+    try:                                                    # POSIX without /proc: zombies count as alive
+        os.kill(int(pid), 0)
+        return "exists"
     except ProcessLookupError:
-        return False
+        return "gone"
     except PermissionError:
+        return "denied"
+    except OSError as e:
+        raise InspectionError(f"kill(pid, 0) failed: {type(e).__name__}: {e}")
+
+
+def _alive(pid):
+    """Fail-closed liveness: True if running OR not inspectable ("denied");
+    False only when the OS positively reports the PID gone (or a Linux zombie).
+    Raises InspectionError when state is unknown. Never infers "dead" from an
+    error or empty output. PID reuse can still mislead any PID-based check."""
+    state = _raw_probe(pid)
+    if state == "gone":
+        return False
+    if state in ("exists", "denied"):
         return True
+    raise InspectionError(f"unexpected probe result {state!r}")
 
 
 def _kill_tree(proc, kill_timeout=KILL_TIMEOUT_S, kill_cmd=None):

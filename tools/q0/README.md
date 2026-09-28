@@ -22,10 +22,18 @@ What the cleanup statuses mean:
 
 **Scoring rule:** decide success from `outcome == "exited"` together with `os_exit_code`. A killed child's number depends on the platform (Windows `taskkill /F` gives 1, POSIX gives -9), so **classify by `outcome`**.
 
-**Liveness helper `_alive`:**
-- Windows uses `tasklist`, bounded.
-- Linux reads `/proc/<pid>/stat` and treats a zombie as not running.
-- Other POSIX systems without `/proc` fall back to `kill(pid, 0)`, which cannot tell a zombie from a live process. This is documented rather than fixed.
+**Liveness helper `_alive`: fails closed.** It returns False (dead) **only** when the OS positively reports the PID gone. On Linux, a zombie also counts as gone.
+
+| Probe result | `_alive` returns | How each platform produces it |
+|---|---|---|
+| Access denied | **True** (treated as alive) | Windows `OpenProcess` error 5; POSIX `EPERM` |
+| No such PID | False | Windows error 87 or exit code other than `STILL_ACTIVE`; POSIX `ESRCH` or no `/proc` entry |
+| Any other error | raises `InspectionError` | — |
+
+- Windows uses the `OpenProcess` / `GetExitCodeProcess` API directly. It no longer runs `tasklist`, and it never reads empty output as "dead".
+- Callers must treat `InspectionError` as **not cleaned up**.
+- POSIX systems without `/proc` fall back to `kill(pid, 0)`, which cannot tell a zombie from a live process.
+- The smoke script aborts with rc 2 and makes no claims if its own PID does not inspect as alive.
 
 ## Smoke evidence (`smoke_run_bounded.py`; harmless local children, no model or credentials)
 
@@ -36,6 +44,7 @@ What the cleanup statuses mean:
 | Child plus grandchild, 3 s limit | `timeout_killed`, cleanup `confirmed`, both PIDs gone |
 | Output directory already exists | CLI exit 3, prior evidence byte-identical, no `run.json`, child **not launched** |
 | Simulated failing kill command (hook) | `timeout_cleanup_failed`, `os_exit_code` null; the test child is then force-killed and verified gone |
+| Simulated denied inspection or inspection error (the #37 regression) | Denied counts as alive; an error raises and is never reported as cleaned up; the real child is then killed and verified gone |
 | Simulated hanging kill command, 1 s bound | `timeout_cleanup_failed`, "kill command exceeded 1s", bounded elapsed; test child cleaned up |
 
 Raw results are in `docs/cloud/evidence/Q1-SUPERVISOR-SMOKE/smoke-{linux,windows}.jsonl`.

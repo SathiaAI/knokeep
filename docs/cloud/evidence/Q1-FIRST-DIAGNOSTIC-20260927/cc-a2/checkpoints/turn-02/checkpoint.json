@@ -1,0 +1,134 @@
+{
+  "job": "Q1-CC-A2",
+  "milestone": "m2",
+  "project_snapshot": {
+    "existed": true,
+    "files": {
+      "orders.csv": {
+        "bytes": 183,
+        "sha256": "09060574d1c48c21088174446d0114033d5e7eca707668a983d922ca96987fde"
+      },
+      "pack.py": {
+        "bytes": 1089,
+        "sha256": "62591fa7a5e6eaa6b685f9fddf4d328bb9d971de2ae70766b7e4a9f1938277dd"
+      },
+      "packing-report.csv": {
+        "bytes": 49,
+        "sha256": "fa891d2dec05ebafec2c6e9c4d7a28311b22a2b1b23b7a9478ab5e568f88eac2"
+      }
+    }
+  },
+  "store_snapshot": {
+    "existed": true,
+    "files": {
+      ".knokeep-eval/events.jsonl": {
+        "bytes": 753,
+        "sha256": "ebeab97b4e0fe302600fd98b243f26db1a5e978acf952aa6b161236e68bb5a21"
+      },
+      "data/q1-cc-a2/session_log": {
+        "bytes": 563,
+        "sha256": "8c8e0c20488e1c628d6232fcec10907f9b0aea7c5af949e5bc7c6a5a41b6e550"
+      },
+      "data/q1-cc-a2/system_state": {
+        "bytes": 825,
+        "sha256": "506ee27a6c6d977065bbd2f88c2353a2b2147486cbf323cf412396d5f7be27c5"
+      },
+      "journal/journal.log": {
+        "bytes": 2859,
+        "sha256": "0ed4ebb89166890fa54a9db85f32a2208b4f92b126d0627e5c466ea9efc10dd5"
+      },
+      "locks/advisory.lock": {
+        "bytes": 1,
+        "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+      },
+      "locks/cas.lock": {
+        "bytes": 1,
+        "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+      },
+      "locks/fence-alloc/41b196ef256d5b3989f6d38c06370da67507c62cb58e1fef422676e0d7540ac8.fence": {
+        "bytes": 53,
+        "sha256": "725dd4f550bf195123a81bf1570c2685dde101edc8be6a5a2a4bf909731f0db1"
+      },
+      "locks/fence-alloc/792c5251056e21397d988f6570b8af7d8ac3271d4f1cd95f16777c49115151ff.fence": {
+        "bytes": 53,
+        "sha256": "0b3bd25e0f08b4cd10e901bbe9726d16506a24b2dce4c7e994405bb4bb83704f"
+      }
+    }
+  },
+  "journal": {
+    "versions": [
+      {
+        "key": "q1-cc-a2/system_state",
+        "sha256": "fce549562608e32d5d161a0483d26b784040e3c43d90e6428e0de989bd14bbf2",
+        "bytes": 759,
+        "offset": 0,
+        "fence": 0
+      },
+      {
+        "key": "q1-cc-a2/session_log",
+        "sha256": "db053fe3e8ac2e48d85cf0b69f605a3ed4df67c627c0f97c1283a4f65dd91da1",
+        "bytes": 406,
+        "offset": 836,
+        "fence": 0
+      },
+      {
+        "key": "q1-cc-a2/system_state",
+        "sha256": "506ee27a6c6d977065bbd2f88c2353a2b2147486cbf323cf412396d5f7be27c5",
+        "bytes": 825,
+        "offset": 1318,
+        "fence": 2
+      },
+      {
+        "key": "q1-cc-a2/session_log",
+        "sha256": "8c8e0c20488e1c628d6232fcec10907f9b0aea7c5af949e5bc7c6a5a41b6e550",
+        "bytes": 563,
+        "offset": 2220,
+        "fence": 2
+      }
+    ],
+    "tail_error": null
+  },
+  "verification": {
+    "outcome": "exited",
+    "os_exit_code": 0,
+    "rows": [
+      [
+        "sku",
+        "units",
+        "cartons"
+      ],
+      [
+        "birch_tea",
+        "2",
+        "1"
+      ],
+      [
+        "cedar_mug",
+        "9",
+        "2"
+      ]
+    ],
+    "expected_rows": [
+      [
+        "sku",
+        "units",
+        "cartons"
+      ],
+      [
+        "birch_tea",
+        "2",
+        "1"
+      ],
+      [
+        "cedar_mug",
+        "9",
+        "2"
+      ]
+    ],
+    "coordinator_task_match": true,
+    "source_verification_trace": "PENDING_REVIEW",
+    "semantic_capture": "PENDING_REVIEW",
+    "receipt_match": "PENDING_REVIEW",
+    "chronology": "PENDING_REVIEW"
+  }
+}

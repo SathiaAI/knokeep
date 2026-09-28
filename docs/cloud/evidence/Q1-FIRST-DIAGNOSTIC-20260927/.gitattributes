@@ -1,0 +1,3 @@
+# Checkpoint bytes must survive transport unchanged, including CRLF CSV output.
+* -text
+** -text

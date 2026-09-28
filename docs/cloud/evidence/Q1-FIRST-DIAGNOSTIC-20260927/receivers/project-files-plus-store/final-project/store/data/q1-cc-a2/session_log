@@ -1,0 +1,20 @@
+---
+schema_version: 1
+project_id: q1-cc-a2
+revision: 5
+updated: 2026-09-28T02:35:43Z
+client: claude-code
+---
+## Completed & Verified
+- pack.py created and run on supplied orders.csv (initially 4-unit cartons).
+- Supplier change: CARTON_SIZE = 6 (4-unit cartons obsolete). Verified.
+- Release-team exception: held orders included only when approved == "yes"; including all held orders rejected; cancelled stays excluded. Rerun verified: birch_tea,7,2 (p4 ready 2 + p5 hold/yes 5) and cedar_mug,9,2 (p3 hold/no and p6 cancelled/yes excluded).
+
+## Active State
+packing-report.csv final re-verification passed (independent recompute from orders.csv + literal check): birch_tea,7,2 and cedar_mug,9,2. review-queue.csv NOT implemented yet (deliberately deferred by user).
+## Next Step
+Implement review-queue.csv (not started; wait for the user's go-ahead):
+- Rows: held orders (status exactly "hold") whose approved is NOT exactly "yes".
+- Columns: order_id,reason,owner. reason = "awaiting approval"; owner = "Warehouse Control".
+- Cancelled orders do NOT belong in the queue (even if approved != yes).
+- With current orders.csv, expected single row: p3,awaiting approval,Warehouse Control.

@@ -1,0 +1,1 @@
+Continue this project from the supplied records and normal project files, and complete its recorded next action. Do not infer an unstated decision; report missing information if you cannot proceed. Write the deliverable and cite the saved evidence used.

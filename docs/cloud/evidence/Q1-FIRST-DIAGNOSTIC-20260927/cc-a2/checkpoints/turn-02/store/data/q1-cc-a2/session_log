@@ -1,0 +1,16 @@
+---
+schema_version: 1
+project_id: q1-cc-a2
+revision: 2
+updated: 2026-09-28T02:31:59Z
+client: claude-code
+---
+## Completed & Verified
+- pack.py created and run on supplied orders.csv (initially 4-unit cartons).
+- Supplier change: CARTON_SIZE switched to 6 (4-unit cartons obsolete). Rerun verified: birch_tea,2,1 and cedar_mug,9,2 (p3 hold, p5 hold+approved, p6 cancelled excluded). Eligibility and SKU rules unchanged.
+
+## Active State
+Task complete; packing-report.csv regenerated with 6-unit cartons and verified.
+
+## Next Step
+None — await new instructions.

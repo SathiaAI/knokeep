@@ -1,0 +1,12 @@
+{
+  "timeout_s": 360,
+  "start_utc": "2026-09-27T22:35:31.752963-04:00",
+  "os_exit_code": 0,
+  "outcome": "exited",
+  "cleanup": null,
+  "platform": "win32",
+  "elapsed_s": 16.359,
+  "end_utc": "2026-09-27T22:35:48.1214-04:00",
+  "stdout_bytes": 20108,
+  "stderr_bytes": 0
+}

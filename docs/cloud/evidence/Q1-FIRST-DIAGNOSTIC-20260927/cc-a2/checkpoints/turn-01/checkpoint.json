@@ -1,0 +1,120 @@
+{
+  "job": "Q1-CC-A2",
+  "milestone": "m1",
+  "project_snapshot": {
+    "existed": true,
+    "files": {
+      "orders.csv": {
+        "bytes": 183,
+        "sha256": "09060574d1c48c21088174446d0114033d5e7eca707668a983d922ca96987fde"
+      },
+      "pack.py": {
+        "bytes": 1089,
+        "sha256": "6d3d39a9a465a436c4aca94c4d8d4caf406098738751e5d220358aae16b22782"
+      },
+      "packing-report.csv": {
+        "bytes": 49,
+        "sha256": "6d568661d9bd4c4fa8419918634ff8cdc9efff4efa6129a1076fc4c82c0a58e0"
+      }
+    }
+  },
+  "store_snapshot": {
+    "existed": true,
+    "files": {
+      ".knokeep-eval/events.jsonl": {
+        "bytes": 430,
+        "sha256": "7a74e8d2512eacdb3a9b59e7dc3aa5c4d72519b4a3057403e20559cac387445f"
+      },
+      "data/q1-cc-a2/session_log": {
+        "bytes": 406,
+        "sha256": "db053fe3e8ac2e48d85cf0b69f605a3ed4df67c627c0f97c1283a4f65dd91da1"
+      },
+      "data/q1-cc-a2/system_state": {
+        "bytes": 759,
+        "sha256": "fce549562608e32d5d161a0483d26b784040e3c43d90e6428e0de989bd14bbf2"
+      },
+      "journal/journal.log": {
+        "bytes": 1318,
+        "sha256": "43b36fa0b43ddad9bf06ed6dca0e27bf82d9f9fdd2fb0968a081306ba7f55cf1"
+      },
+      "locks/advisory.lock": {
+        "bytes": 1,
+        "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+      },
+      "locks/cas.lock": {
+        "bytes": 1,
+        "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+      },
+      "locks/fence-alloc/41b196ef256d5b3989f6d38c06370da67507c62cb58e1fef422676e0d7540ac8.fence": {
+        "bytes": 52,
+        "sha256": "187831014d7a6a26143a8b2f3c5088d62c20a4e119c8a7d72a08ba286faa23ca"
+      },
+      "locks/fence-alloc/792c5251056e21397d988f6570b8af7d8ac3271d4f1cd95f16777c49115151ff.fence": {
+        "bytes": 53,
+        "sha256": "5a45d5443f5cd38ba337c4fb5ab9219413343603b6395191ae7b5f7458a425db"
+      }
+    }
+  },
+  "journal": {
+    "versions": [
+      {
+        "key": "q1-cc-a2/system_state",
+        "sha256": "fce549562608e32d5d161a0483d26b784040e3c43d90e6428e0de989bd14bbf2",
+        "bytes": 759,
+        "offset": 0,
+        "fence": 0
+      },
+      {
+        "key": "q1-cc-a2/session_log",
+        "sha256": "db053fe3e8ac2e48d85cf0b69f605a3ed4df67c627c0f97c1283a4f65dd91da1",
+        "bytes": 406,
+        "offset": 836,
+        "fence": 0
+      }
+    ],
+    "tail_error": null
+  },
+  "verification": {
+    "outcome": "exited",
+    "os_exit_code": 0,
+    "rows": [
+      [
+        "sku",
+        "units",
+        "cartons"
+      ],
+      [
+        "birch_tea",
+        "2",
+        "1"
+      ],
+      [
+        "cedar_mug",
+        "9",
+        "3"
+      ]
+    ],
+    "expected_rows": [
+      [
+        "sku",
+        "units",
+        "cartons"
+      ],
+      [
+        "birch_tea",
+        "2",
+        "1"
+      ],
+      [
+        "cedar_mug",
+        "9",
+        "3"
+      ]
+    ],
+    "coordinator_task_match": true,
+    "source_verification_trace": "PENDING_REVIEW",
+    "semantic_capture": "PENDING_REVIEW",
+    "receipt_match": "PENDING_REVIEW",
+    "chronology": "PENDING_REVIEW"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "job": "Q1-CC-A1",
+  "generation": 1,
+  "status": "BLOCKED_CAPTURE",
+  "cause": "Coordinator Bash(python *) rule refused ordinary compound save command",
+  "planned_milestones": 4,
+  "verified_milestones": 1,
+  "visible_save_attempts": 1,
+  "durable_captures": 0,
+  "false_capture_claims": 0,
+  "unstarted_milestones": [
+    "m2",
+    "m3",
+    "m4"
+  ],
+  "attempted_content_semantics": "All five m1 critical facts appear in refused command bodies; this is attempted content only, never durable capture.",
+  "source_verification": "Actual source ran pack.py and asserted exact output rows before attempted flush; independent copy verification passed.",
+  "receipts": [],
+  "independent_review": "https://github.com/SathiaAI/knokeep/issues/36#issuecomment-5862190629",
+  "rerun_rule": "New generation with only allowed Bash composition corrected; original prompt/stream/store/checkpoint preserved."
+}

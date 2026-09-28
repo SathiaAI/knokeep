@@ -1,0 +1,337 @@
+[
+  {
+    "path": "cc-a1/checkpoints/turn-01/project/orders.csv",
+    "bytes": 183,
+    "sha256": "09060574d1c48c21088174446d0114033d5e7eca707668a983d922ca96987fde"
+  },
+  {
+    "path": "cc-a1/checkpoints/turn-01/project/pack.py",
+    "bytes": 1069,
+    "sha256": "e4fea7c361c2f28f73fc4becf6d84aaf57fcefdf94278dbf2afcec97b38c72d8"
+  },
+  {
+    "path": "cc-a1/checkpoints/turn-01/project/packing-report.csv",
+    "bytes": 49,
+    "sha256": "6d568661d9bd4c4fa8419918634ff8cdc9efff4efa6129a1076fc4c82c0a58e0"
+  },
+  {
+    "path": "cc-a1/checkpoints/turn-01/store/.knokeep-eval/events.jsonl",
+    "bytes": 107,
+    "sha256": "d43253a6f273bce4890bd80d2b78e6121badf566b8bba5d14898f23c3c234c92"
+  },
+  {
+    "path": "cc-a1/checkpoints/turn-01/store/journal/journal.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "cc-a1/checkpoints/turn-01/store/locks/cas.lock",
+    "bytes": 1,
+    "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+  },
+  {
+    "path": "hermes-a1/checkpoints/turn-01/project/orders.csv",
+    "bytes": 183,
+    "sha256": "09060574d1c48c21088174446d0114033d5e7eca707668a983d922ca96987fde"
+  },
+  {
+    "path": "hermes-a1/checkpoints/turn-01/project/pack.py",
+    "bytes": 2932,
+    "sha256": "39b1a7d1e75f348d30c31ab10ce98f04edee95cd541d30035dc8634a4eb01758"
+  },
+  {
+    "path": "hermes-a1/checkpoints/turn-01/project/packing-report.csv",
+    "bytes": 49,
+    "sha256": "6d568661d9bd4c4fa8419918634ff8cdc9efff4efa6129a1076fc4c82c0a58e0"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-01/project/orders.csv",
+    "bytes": 183,
+    "sha256": "09060574d1c48c21088174446d0114033d5e7eca707668a983d922ca96987fde"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-01/project/pack.py",
+    "bytes": 1089,
+    "sha256": "6d3d39a9a465a436c4aca94c4d8d4caf406098738751e5d220358aae16b22782"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-01/project/packing-report.csv",
+    "bytes": 49,
+    "sha256": "6d568661d9bd4c4fa8419918634ff8cdc9efff4efa6129a1076fc4c82c0a58e0"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-01/store/.knokeep-eval/events.jsonl",
+    "bytes": 430,
+    "sha256": "7a74e8d2512eacdb3a9b59e7dc3aa5c4d72519b4a3057403e20559cac387445f"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-01/store/data/q1-cc-a2/session_log",
+    "bytes": 406,
+    "sha256": "db053fe3e8ac2e48d85cf0b69f605a3ed4df67c627c0f97c1283a4f65dd91da1"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-01/store/data/q1-cc-a2/system_state",
+    "bytes": 759,
+    "sha256": "fce549562608e32d5d161a0483d26b784040e3c43d90e6428e0de989bd14bbf2"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-01/store/journal/journal.log",
+    "bytes": 1318,
+    "sha256": "43b36fa0b43ddad9bf06ed6dca0e27bf82d9f9fdd2fb0968a081306ba7f55cf1"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-01/store/locks/advisory.lock",
+    "bytes": 1,
+    "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-01/store/locks/cas.lock",
+    "bytes": 1,
+    "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-01/store/locks/fence-alloc/41b196ef256d5b3989f6d38c06370da67507c62cb58e1fef422676e0d7540ac8.fence",
+    "bytes": 52,
+    "sha256": "187831014d7a6a26143a8b2f3c5088d62c20a4e119c8a7d72a08ba286faa23ca"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-01/store/locks/fence-alloc/792c5251056e21397d988f6570b8af7d8ac3271d4f1cd95f16777c49115151ff.fence",
+    "bytes": 53,
+    "sha256": "5a45d5443f5cd38ba337c4fb5ab9219413343603b6395191ae7b5f7458a425db"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-02/project/orders.csv",
+    "bytes": 183,
+    "sha256": "09060574d1c48c21088174446d0114033d5e7eca707668a983d922ca96987fde"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-02/project/pack.py",
+    "bytes": 1089,
+    "sha256": "62591fa7a5e6eaa6b685f9fddf4d328bb9d971de2ae70766b7e4a9f1938277dd"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-02/project/packing-report.csv",
+    "bytes": 49,
+    "sha256": "fa891d2dec05ebafec2c6e9c4d7a28311b22a2b1b23b7a9478ab5e568f88eac2"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-02/store/.knokeep-eval/events.jsonl",
+    "bytes": 753,
+    "sha256": "ebeab97b4e0fe302600fd98b243f26db1a5e978acf952aa6b161236e68bb5a21"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-02/store/data/q1-cc-a2/session_log",
+    "bytes": 563,
+    "sha256": "8c8e0c20488e1c628d6232fcec10907f9b0aea7c5af949e5bc7c6a5a41b6e550"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-02/store/data/q1-cc-a2/system_state",
+    "bytes": 825,
+    "sha256": "506ee27a6c6d977065bbd2f88c2353a2b2147486cbf323cf412396d5f7be27c5"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-02/store/journal/journal.log",
+    "bytes": 2859,
+    "sha256": "0ed4ebb89166890fa54a9db85f32a2208b4f92b126d0627e5c466ea9efc10dd5"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-02/store/locks/advisory.lock",
+    "bytes": 1,
+    "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-02/store/locks/cas.lock",
+    "bytes": 1,
+    "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-02/store/locks/fence-alloc/41b196ef256d5b3989f6d38c06370da67507c62cb58e1fef422676e0d7540ac8.fence",
+    "bytes": 53,
+    "sha256": "725dd4f550bf195123a81bf1570c2685dde101edc8be6a5a2a4bf909731f0db1"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-02/store/locks/fence-alloc/792c5251056e21397d988f6570b8af7d8ac3271d4f1cd95f16777c49115151ff.fence",
+    "bytes": 53,
+    "sha256": "0b3bd25e0f08b4cd10e901bbe9726d16506a24b2dce4c7e994405bb4bb83704f"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-03/project/orders.csv",
+    "bytes": 183,
+    "sha256": "09060574d1c48c21088174446d0114033d5e7eca707668a983d922ca96987fde"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-03/project/pack.py",
+    "bytes": 1345,
+    "sha256": "21a623664f8569d72d0172a240515be80d841d94af7effcc0447bc8ced7f96ae"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-03/project/packing-report.csv",
+    "bytes": 49,
+    "sha256": "c0c2ea893ff04aa91e91f64f43b468bec84d050d36d27b6c75d5f077b1484bc9"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-03/store/.knokeep-eval/events.jsonl",
+    "bytes": 1185,
+    "sha256": "fd59fad2962c09521fd2beb5c1405e08ec34f5295dfb9d23c668952fb0ecf180"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-03/store/data/q1-cc-a2/session_log",
+    "bytes": 694,
+    "sha256": "9b2a8b98d1fe870e5d85987d062a3fa507fdfe8e442176130bbc256f40a121d0"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-03/store/data/q1-cc-a2/system_state",
+    "bytes": 1086,
+    "sha256": "ffd1be37cf643d8d1522f780f648a5935be3d8ef5fe60984ac7a266e339cca8e"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-03/store/journal/journal.log",
+    "bytes": 5722,
+    "sha256": "93c36fa01541dba5ce273351db9b40946c49df244f2dad447e25e3da4c56012e"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-03/store/locks/advisory.lock",
+    "bytes": 1,
+    "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-03/store/locks/cas.lock",
+    "bytes": 1,
+    "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-03/store/locks/fence-alloc/41b196ef256d5b3989f6d38c06370da67507c62cb58e1fef422676e0d7540ac8.fence",
+    "bytes": 53,
+    "sha256": "f45d003c62d94f8e0181547926ac5a5cf5a07b1c65391b95885d241b08aaed77"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-03/store/locks/fence-alloc/792c5251056e21397d988f6570b8af7d8ac3271d4f1cd95f16777c49115151ff.fence",
+    "bytes": 53,
+    "sha256": "9b444360b2c734058945bbb03a887060ae5fc9ccda83fe80eecbe0cff8fafdb9"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-04/project/orders.csv",
+    "bytes": 183,
+    "sha256": "09060574d1c48c21088174446d0114033d5e7eca707668a983d922ca96987fde"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-04/project/pack.py",
+    "bytes": 1345,
+    "sha256": "21a623664f8569d72d0172a240515be80d841d94af7effcc0447bc8ced7f96ae"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-04/project/packing-report.csv",
+    "bytes": 49,
+    "sha256": "c0c2ea893ff04aa91e91f64f43b468bec84d050d36d27b6c75d5f077b1484bc9"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-04/store/.knokeep-eval/events.jsonl",
+    "bytes": 1506,
+    "sha256": "616ac91071941056adf2d497ee14938e956a7d6e4c9ecf071834a04d5a2beb35"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-04/store/data/q1-cc-a2/session_log",
+    "bytes": 1186,
+    "sha256": "d95ea7fa31ad9028a05b4f5b8418385dfcce124b30fd07e5640c21fde8ac806d"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-04/store/data/q1-cc-a2/system_state",
+    "bytes": 1086,
+    "sha256": "ffd1be37cf643d8d1522f780f648a5935be3d8ef5fe60984ac7a266e339cca8e"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-04/store/journal/journal.log",
+    "bytes": 7872,
+    "sha256": "16ecf88551dea073b7afcf5c2a3ab1abf21ef0503f1279b45e060ada9cdd5924"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-04/store/locks/advisory.lock",
+    "bytes": 1,
+    "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-04/store/locks/cas.lock",
+    "bytes": 1,
+    "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-04/store/locks/fence-alloc/41b196ef256d5b3989f6d38c06370da67507c62cb58e1fef422676e0d7540ac8.fence",
+    "bytes": 53,
+    "sha256": "f45d003c62d94f8e0181547926ac5a5cf5a07b1c65391b95885d241b08aaed77"
+  },
+  {
+    "path": "cc-a2/checkpoints/turn-04/store/locks/fence-alloc/792c5251056e21397d988f6570b8af7d8ac3271d4f1cd95f16777c49115151ff.fence",
+    "bytes": 53,
+    "sha256": "ca643e0e1a3bb55a8b8831c60faf2d0df2190daf38a8779547336ab81fdadb46"
+  },
+  {
+    "path": "receivers/project-files-only/final-project/orders.csv",
+    "bytes": 183,
+    "sha256": "09060574d1c48c21088174446d0114033d5e7eca707668a983d922ca96987fde"
+  },
+  {
+    "path": "receivers/project-files-only/final-project/pack.py",
+    "bytes": 1345,
+    "sha256": "21a623664f8569d72d0172a240515be80d841d94af7effcc0447bc8ced7f96ae"
+  },
+  {
+    "path": "receivers/project-files-only/final-project/packing-report.csv",
+    "bytes": 49,
+    "sha256": "c0c2ea893ff04aa91e91f64f43b468bec84d050d36d27b6c75d5f077b1484bc9"
+  },
+  {
+    "path": "receivers/project-files-plus-store/final-project/orders.csv",
+    "bytes": 183,
+    "sha256": "09060574d1c48c21088174446d0114033d5e7eca707668a983d922ca96987fde"
+  },
+  {
+    "path": "receivers/project-files-plus-store/final-project/pack.py",
+    "bytes": 1345,
+    "sha256": "21a623664f8569d72d0172a240515be80d841d94af7effcc0447bc8ced7f96ae"
+  },
+  {
+    "path": "receivers/project-files-plus-store/final-project/packing-report.csv",
+    "bytes": 49,
+    "sha256": "c0c2ea893ff04aa91e91f64f43b468bec84d050d36d27b6c75d5f077b1484bc9"
+  },
+  {
+    "path": "receivers/project-files-plus-store/final-project/store/.knokeep-eval/events.jsonl",
+    "bytes": 1506,
+    "sha256": "616ac91071941056adf2d497ee14938e956a7d6e4c9ecf071834a04d5a2beb35"
+  },
+  {
+    "path": "receivers/project-files-plus-store/final-project/store/data/q1-cc-a2/session_log",
+    "bytes": 1186,
+    "sha256": "d95ea7fa31ad9028a05b4f5b8418385dfcce124b30fd07e5640c21fde8ac806d"
+  },
+  {
+    "path": "receivers/project-files-plus-store/final-project/store/data/q1-cc-a2/system_state",
+    "bytes": 1086,
+    "sha256": "ffd1be37cf643d8d1522f780f648a5935be3d8ef5fe60984ac7a266e339cca8e"
+  },
+  {
+    "path": "receivers/project-files-plus-store/final-project/store/journal/journal.log",
+    "bytes": 7872,
+    "sha256": "16ecf88551dea073b7afcf5c2a3ab1abf21ef0503f1279b45e060ada9cdd5924"
+  },
+  {
+    "path": "receivers/project-files-plus-store/final-project/store/locks/advisory.lock",
+    "bytes": 1,
+    "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+  },
+  {
+    "path": "receivers/project-files-plus-store/final-project/store/locks/cas.lock",
+    "bytes": 1,
+    "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+  },
+  {
+    "path": "receivers/project-files-plus-store/final-project/store/locks/fence-alloc/41b196ef256d5b3989f6d38c06370da67507c62cb58e1fef422676e0d7540ac8.fence",
+    "bytes": 53,
+    "sha256": "f45d003c62d94f8e0181547926ac5a5cf5a07b1c65391b95885d241b08aaed77"
+  },
+  {
+    "path": "receivers/project-files-plus-store/final-project/store/locks/fence-alloc/792c5251056e21397d988f6570b8af7d8ac3271d4f1cd95f16777c49115151ff.fence",
+    "bytes": 53,
+    "sha256": "ca643e0e1a3bb55a8b8831c60faf2d0df2190daf38a8779547336ab81fdadb46"
+  }
+]

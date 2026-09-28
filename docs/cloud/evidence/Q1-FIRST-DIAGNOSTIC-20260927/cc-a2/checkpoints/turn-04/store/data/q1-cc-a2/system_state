@@ -1,0 +1,18 @@
+---
+schema_version: 1
+project_id: q1-cc-a2
+revision: 4
+updated: 2026-09-28T02:33:57Z
+client: claude-code
+---
+## Architecture
+pack.py (stdlib only): reads orders.csv, includes status == "ready", plus status == "hold" only when approved == "yes" (exact); normalizes SKU (lowercase; '-' and ' ' -> '_'), sums units per SKU, cartons = ceil(units/6) (CARTON_SIZE = 6; 4-unit cartons obsolete), writes packing-report.csv (sku,units,cartons) sorted by sku.
+## Path & Variable Directory
+- pack.py — the tool; run: python pack.py orders.csv packing-report.csv
+- orders.csv — input (order_id,sku,units,status,approved)
+- packing-report.csv — generated output
+
+## Hard Constraints
+- Eligibility: status exactly "ready" is included. A held order is included ONLY when approved is exactly "yes" (release-team exception). Held orders without approved=yes stay out (inventory not released). Cancelled orders stay out even when approved=yes. The proposal to include every held order was REJECTED.
+- Cartons hold 6 units (supplier change; 4-unit cartons obsolete).
+- Python standard library only.

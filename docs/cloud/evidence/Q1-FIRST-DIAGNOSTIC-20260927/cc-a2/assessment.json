@@ -1,0 +1,98 @@
+{
+  "job": "Q1-CC-A2",
+  "status": "SOURCE_PASS_INDEPENDENTLY_REVIEWED",
+  "milestones": [
+    {
+      "milestone": "m1",
+      "eligible": true,
+      "source_verification_before_receipts": true,
+      "receipts": [
+        {
+          "hash": "fce549562608e32d5d161a0483d26b784040e3c43d90e6428e0de989bd14bbf2",
+          "event_index": 15,
+          "matches_original_journal": true
+        },
+        {
+          "hash": "db053fe3e8ac2e48d85cf0b69f605a3ed4df67c627c0f97c1283a4f65dd91da1",
+          "event_index": 15,
+          "matches_original_journal": true
+        }
+      ],
+      "durable_capture": true,
+      "semantic_critical_facts": "ROOT_AND_CLAUDE_REVIEW_PASS",
+      "false_capture_claims": 0
+    },
+    {
+      "milestone": "m2",
+      "eligible": true,
+      "source_verification_before_receipts": true,
+      "receipts": [
+        {
+          "hash": "506ee27a6c6d977065bbd2f88c2353a2b2147486cbf323cf412396d5f7be27c5",
+          "event_index": 11,
+          "matches_original_journal": true
+        },
+        {
+          "hash": "8c8e0c20488e1c628d6232fcec10907f9b0aea7c5af949e5bc7c6a5a41b6e550",
+          "event_index": 11,
+          "matches_original_journal": true
+        }
+      ],
+      "durable_capture": true,
+      "semantic_critical_facts": "ROOT_AND_CLAUDE_REVIEW_PASS",
+      "false_capture_claims": 0
+    },
+    {
+      "milestone": "m3",
+      "eligible": true,
+      "source_verification_before_receipts": true,
+      "receipts": [
+        {
+          "hash": "68c736be709c57740c6343b976e8f7961ac879ac86f6167528d216c633b495e8",
+          "event_index": 10,
+          "matches_original_journal": true
+        },
+        {
+          "hash": "ffd1be37cf643d8d1522f780f648a5935be3d8ef5fe60984ac7a266e339cca8e",
+          "event_index": 10,
+          "matches_original_journal": true
+        },
+        {
+          "hash": "9b2a8b98d1fe870e5d85987d062a3fa507fdfe8e442176130bbc256f40a121d0",
+          "event_index": 10,
+          "matches_original_journal": true
+        }
+      ],
+      "durable_capture": true,
+      "semantic_critical_facts": "ROOT_AND_CLAUDE_REVIEW_PASS",
+      "false_capture_claims": 0
+    },
+    {
+      "milestone": "m4",
+      "eligible": true,
+      "source_verification_before_receipts": true,
+      "receipts": [
+        {
+          "hash": "83bd6ef4723a1c7c3b09993a76f4a7c6b82b287c55cde8f1e10df97db5b4ffe6",
+          "event_index": 6,
+          "matches_original_journal": true
+        },
+        {
+          "hash": "d95ea7fa31ad9028a05b4f5b8418385dfcce124b30fd07e5640c21fde8ac806d",
+          "event_index": 6,
+          "matches_original_journal": true
+        }
+      ],
+      "durable_capture": true,
+      "semantic_critical_facts": "ROOT_AND_CLAUDE_REVIEW_PASS",
+      "false_capture_claims": 0
+    }
+  ],
+  "verified_milestones": 4,
+  "on_time_durable_captures": 4,
+  "write_receipts": 9,
+  "actual_session_continuity": "all 4 runtime IDs identical; explicit resume on turns2-4",
+  "limits": "one explicitly enrolled synthetic session; no native hook or production reliability claim",
+  "followup_test": "Turn3 used two sequential state section writes plus a log write; interruption testing should inspect the durable intermediate state for contradictions before treating a whole milestone as atomic.",
+  "independent_review": "https://github.com/SathiaAI/knokeep/issues/36#issuecomment-5862321889"
+}

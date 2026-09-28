@@ -1,0 +1,85 @@
+{
+  "job": "Q1-CC-A1",
+  "milestone": "m1",
+  "project_snapshot": {
+    "existed": true,
+    "files": {
+      "orders.csv": {
+        "bytes": 183,
+        "sha256": "09060574d1c48c21088174446d0114033d5e7eca707668a983d922ca96987fde"
+      },
+      "pack.py": {
+        "bytes": 1069,
+        "sha256": "e4fea7c361c2f28f73fc4becf6d84aaf57fcefdf94278dbf2afcec97b38c72d8"
+      },
+      "packing-report.csv": {
+        "bytes": 49,
+        "sha256": "6d568661d9bd4c4fa8419918634ff8cdc9efff4efa6129a1076fc4c82c0a58e0"
+      }
+    }
+  },
+  "store_snapshot": {
+    "existed": true,
+    "files": {
+      ".knokeep-eval/events.jsonl": {
+        "bytes": 107,
+        "sha256": "d43253a6f273bce4890bd80d2b78e6121badf566b8bba5d14898f23c3c234c92"
+      },
+      "journal/journal.log": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "locks/cas.lock": {
+        "bytes": 1,
+        "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+      }
+    }
+  },
+  "journal": {
+    "versions": [],
+    "tail_error": null
+  },
+  "verification": {
+    "outcome": "exited",
+    "os_exit_code": 0,
+    "rows": [
+      [
+        "sku",
+        "units",
+        "cartons"
+      ],
+      [
+        "birch_tea",
+        "2",
+        "1"
+      ],
+      [
+        "cedar_mug",
+        "9",
+        "3"
+      ]
+    ],
+    "expected_rows": [
+      [
+        "sku",
+        "units",
+        "cartons"
+      ],
+      [
+        "birch_tea",
+        "2",
+        "1"
+      ],
+      [
+        "cedar_mug",
+        "9",
+        "3"
+      ]
+    ],
+    "coordinator_task_match": true,
+    "source_verification_trace": "PENDING_REVIEW",
+    "semantic_capture": "PENDING_REVIEW",
+    "receipt_match": "PENDING_REVIEW",
+    "chronology": "PENDING_REVIEW"
+  }
+}

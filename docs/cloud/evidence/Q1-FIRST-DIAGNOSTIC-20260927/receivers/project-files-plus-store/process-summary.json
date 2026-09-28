@@ -1,0 +1,71 @@
+{
+  "driver": "q1-hermes-driver/2",
+  "turn": 1,
+  "prompt": {
+    "sha256": "feb297af3d28a9d6fcb5bcaae9624fe0c5e8b738bf90b88238b4069ed6dcd0e8",
+    "bytes": 253
+  },
+  "supervisor": {
+    "timeout_s": 300.0,
+    "start_utc": "2026-09-28T02:41:44.036745+00:00",
+    "os_exit_code": 0,
+    "outcome": "exited",
+    "cleanup": null,
+    "platform": "win32",
+    "pid": 75424,
+    "elapsed_s": 94.344,
+    "end_utc": "2026-09-28T02:43:18.389351+00:00",
+    "stdout_bytes": 53858,
+    "stderr_bytes": 38
+  },
+  "continuity": {
+    "consistent_ids": true,
+    "resumed_same_session": null
+  },
+  "route": {
+    "status": "measured",
+    "api_calls": 13,
+    "routes": {
+      "GLM-4.7-Flash-Q4_K_M|custom": 13
+    },
+    "fallback_lines": 0,
+    "log_mark": {
+      "exists": false,
+      "size": 0,
+      "head_sha256": null
+    },
+    "delta_bytes": 14738
+  },
+  "preflight": {
+    "home_exists": true,
+    "config_sha256": "cc1a3ea575dff900bb643f6d638ee355b0c36e16024373a6019681924bb98e55",
+    "route": {
+      "default": "GLM-4.7-Flash-Q4_K_M",
+      "provider": "custom",
+      "base_url": "http://127.0.0.1:18434/v1",
+      "key_env": "HERMES_A3_LOCAL_KEY"
+    },
+    "route_is_explicit_local": true,
+    "fallback_providers_empty": true,
+    "memory_disabled": true,
+    "user_profile_disabled": true,
+    "honcho_configured": false,
+    "mcp_servers_configured": false,
+    "plugins_installed": [],
+    "plugins_config_key": false,
+    "no_profile_env_file": true,
+    "no_profile_auth_file": true,
+    "key_file_present": true
+  },
+  "provenance": {
+    "driver_sha256": "f10a3c7f7ce1c96c41ac4d99fe08cc47f06765f92a3491e8ccc7c93dc731cc7e",
+    "supervisor_sha256": "1b54a6649ee9ec5b8ea940fea2be48ed9195c7babcec05d64f54dee0ed08445a",
+    "ignore_rules": true
+  },
+  "verdict_inputs": {
+    "os_exit_code": 0,
+    "outcome": "exited",
+    "reported_exit_code": 0,
+    "exit_codes_agree": true
+  }
+}

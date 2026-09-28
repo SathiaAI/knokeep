@@ -1,0 +1,9 @@
+---
+schema_version: 1
+project_id: q2-cursor-a1
+session_id: q2-cursor-source-a1
+client: cowork
+updated: 2026-09-28T03:03:41Z
+---
+## Journal
+[2026-09-28T03:03:41Z] Verified restock.csv; flushed state/log; preparing manifest and result.

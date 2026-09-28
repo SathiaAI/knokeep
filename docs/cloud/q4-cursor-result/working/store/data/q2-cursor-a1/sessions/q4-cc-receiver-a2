@@ -1,0 +1,10 @@
+---
+schema_version: 1
+project_id: q2-cursor-a1
+session_id: q4-cc-receiver-a2
+client: claude-code
+updated: 2026-09-28T04:22:51Z
+append_operations: {"q4-restock-and-blocker-1":"f88d6d2dfecef8d55acb4d20cfbcaf2555076f50ec85eaade0c6afdaf0ea2329"}
+---
+## Journal
+[2026-09-28T04:22:51Z] Recomputed restock.csv with new bowl row (verified independently). priority-review.csv blocked on contradictory criteria; question recorded in Active State and Next Step.

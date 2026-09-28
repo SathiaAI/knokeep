@@ -1,5 +1,14 @@
 # Q7-DEVIN-RECOVERY-DESIGN-20260928-A1 — conservative offline crash-tail recovery workflow
 
+> **A2 CORRECTION NOTICE (supersedes the A1 text below where they conflict; see `REPORT_A2.md`).**
+> - A1 `recovery_probe.py` fails on Windows: `PermissionError` (Errno 13) reading `locks/cas.lock` through a second handle while holding the byte lock.
+> - A1 could write into the source store (it had no check for overlapping store/output paths).
+> - A1 rmtree'd prior incomplete attempts.
+> - A1 wrongly implied that a clean journal proves completeness. It cannot.
+> - The A1 probe is **not** a shipping design.
+> - Product service restoration remains unavailable; this is design evidence only.
+
+
 - Input: `integration/q5-reviewed-a1` at exact HEAD `380fe31e592b1aade88f7fcc7351455b1d4191af` (verified with `git rev-parse HEAD` after fetch).
 - Output branch: `q7/devin-recovery-design-a1`. The only files added are in this directory. `store/`, `tests/` and `skill/` are unchanged (`git diff --quiet HEAD -- store tests skill` → unchanged).
 - Scope: this is a design plus a synthetic probe. It is not a product repair tool. It does not duplicate Cursor's fixes for the parent read/list prepublish-crash bug or the constructor prefix-replay bug.

@@ -64,9 +64,10 @@ class CaptureDriverTests(unittest.TestCase):
 
     def test_child_environment_excludes_paid_provider_overrides(self):
         with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'fake', 'ANTHROPIC_BASE_URL': 'fake',
-                                     'CLAUDE_CODE_USE_BEDROCK': '1', 'OPENROUTER_API_KEY': 'fake'}):
+                                     'CLAUDE_CODE_USE_BEDROCK': '1', 'OPENROUTER_API_KEY': 'fake',
+                                     'GH_TOKEN': 'fake', 'GITHUB_TOKEN': 'fake', 'HERMES_CONFIG_PATH': 'fake'}):
             env = claude_turn.environment('python-dir')
-            for key in ('ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_USE_BEDROCK', 'OPENROUTER_API_KEY'):
+            for key in ('ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_USE_BEDROCK', 'OPENROUTER_API_KEY', 'GH_TOKEN', 'GITHUB_TOKEN', 'HERMES_CONFIG_PATH'):
                 self.assertNotIn(key, env)
 
 

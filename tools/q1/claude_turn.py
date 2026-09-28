@@ -49,8 +49,8 @@ def environment(python_dir):
     env = os.environ.copy()
     for key in list(env):
         upper = key.upper()
-        if (any(p in upper for p in ('API_KEY', 'AUTH_TOKEN', 'ACCESS_TOKEN', 'SECRET', 'BEARER', 'BASE_URL'))
-                or upper.startswith(('ANTHROPIC_', 'OPENROUTER_', 'HONCHO_', 'CLAUDE_CODE_USE_'))):
+        if (any(p in upper for p in ('API_KEY', 'TOKEN', 'AUTH', 'SECRET', 'BEARER', 'PASSWORD', 'BASE_URL', 'ENDPOINT'))
+                or upper.startswith(('ANTHROPIC_', 'OPENROUTER_', 'HONCHO_', 'HERMES_', 'CLAUDE_CODE_USE_'))):
             env.pop(key, None)
     env['PATH'] = str(python_dir) + os.pathsep + env.get('PATH', '')
     return env

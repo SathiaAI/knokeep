@@ -468,9 +468,24 @@ def session_append(store, project, session_id, client, entry):
             die(reason="write_error", kind=res.kind.value)
     die(reason="append_retry_exhausted")
 
-def _section(b, h):
-    m = re.search(rf"##\s*{re.escape(h)}\s*\n(.*?)(?=\n##|\Z)", b, re.S)
-    return (m.group(1).strip() if m else "")[:400]
+def _section(b, h, warnings=None):
+    """Read-only resume view of one '## <h>' section (issue #20).
+
+    Uses the same line-anchored, CRLF-tolerant heading rules as the writer
+    (_get_section): an exact level-2 heading ("### Sub" and "# Title" lines are
+    content, not boundaries), and the section ends at the next level-2 heading.
+    An empty section returns "" and never the next heading's text. A duplicated
+    heading is ambiguous: return "" (never guess) and record a warning.
+    """
+    try:
+        got = _get_section(b, h)
+    except ValueError:
+        if warnings is not None:
+            warnings.append(f"duplicate heading: {h}")
+        return ""
+    if got is None:
+        return ""
+    return got[2].replace("\r\n", "\n").strip()[:400]
 
 # --- H1 increment 1: bounded_cas_reread_reapply conflict protocol -----------
 # A "## <Heading>" line must be a real level-2 heading: "##" immediately
@@ -677,7 +692,9 @@ def bootstrap(store, project):
     lblob = backend.read(_key(project, "log"))
     fm, _ = parse(sblob.body.decode("utf-8")) if sblob else ({}, "")
     lfm, lbody = parse(lblob.body.decode("utf-8")) if lblob else ({}, "")
-    active = _section(lbody, "Active State"); nxt = _section(lbody, "Next Step")
+    section_warnings = []
+    active = _section(lbody, "Active State", section_warnings)
+    nxt = _section(lbody, "Next Step", section_warnings)
     vh = sblob.version_hash if sblob else None
     lh = lblob.version_hash if lblob else None
     rev = int(fm["revision"]) if fm.get("revision") else None
@@ -695,13 +712,18 @@ def bootstrap(store, project):
     if conflict_count:
         resume += (f"  [!] {conflict_count} parked conflict(s) - "
                    f"review {project}/conflicts/")
-    return {"version_hash": vh, "revision": rev, "log_hash": lh,
-            "state_client": fm.get("client"), "log_client": lfm.get("client"),
-            "client_labels_verified": False,
-            "active": active, "next": nxt,
-            "conflicts": conflicts, "conflict_count": conflict_count,
-            "settled_count": settled_count,
-            "resume_line": resume}
+    if section_warnings:                                    # ambiguous resume sections: say so, never guess
+        resume += "  [!] " + "; ".join(section_warnings)
+    out = {"version_hash": vh, "revision": rev, "log_hash": lh,
+           "state_client": fm.get("client"), "log_client": lfm.get("client"),
+           "client_labels_verified": False,
+           "active": active, "next": nxt,
+           "conflicts": conflicts, "conflict_count": conflict_count,
+           "settled_count": settled_count,
+           "resume_line": resume}
+    if section_warnings:
+        out["section_warnings"] = section_warnings
+    return out
 
 def resolve_conflict(store, project, conflict_key):
     """Deferral C: mark a parked conflict RESOLVED with a durable, append-only

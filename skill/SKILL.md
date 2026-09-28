@@ -14,6 +14,7 @@ Helper (stdlib Python, on the machine): `skill/knokeep_state.py`, unified onto t
 python skill/knokeep_state.py bootstrap --store <STORE> --project <PROJECT>
 ```
 State the returned `resume_line` to the user ("resuming: … / next: … / v<hash>") **before doing anything else**. Do not re-open settled decisions. If ground truth (the real files) disagrees with stored state, real state wins — flag it.
+`active` / `next` come from the log's exact `## Active State` / `## Next Step` level-2 headings (up to 3 leading spaces; `###` sub-headings stay inside the section). An empty section resumes as `(none)`. If either heading is duplicated, it resumes as `(none)` and bootstrap adds `section_warnings` plus a `[!]` note to `resume_line` — fix the log instead of guessing.
 
 ## When to flush
 - After each **verified** milestone (a test passes, a fix confirmed).

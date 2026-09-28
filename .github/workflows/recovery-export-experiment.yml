@@ -1,0 +1,23 @@
+name: Recovery export experiment
+on:
+  pull_request:
+  push:
+    branches: ["experiment/recovery-export-**", "fix/q9-**"]
+permissions:
+  contents: read
+jobs:
+  experiment:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+      - name: Synthetic export and verification cases
+        run: python -m unittest discover -s experiments/recovery_export_v1 -p "test_*.py" -v

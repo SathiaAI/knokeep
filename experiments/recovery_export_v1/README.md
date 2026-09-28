@@ -1,4 +1,4 @@
-> UNQUALIFIED DRAFT. Do not use on real stores. The fix/q9-export-review-a1 pass bounds inventory/verifier traversal and reads, validates manifest shape, rejects links/hard links/incomplete roots before reading data, and reports directory durability per created directory, but it has only been run on Linux here; Windows, macOS and real power-loss behaviour are UNVERIFIED. No in-place repair or service restoration exists. This branch is for bounded review and synthetic tests only.
+> UNQUALIFIED FOR REAL-STORE RECOVERY OR PRODUCTION. This reviewed experiment has synthetic Linux and Windows results described below; see final-commit CI for the three-platform status. Link refusal assumes a cooperative, stable filesystem. Real power-loss behavior and hostile path races remain UNVERIFIED. No in-place repair or service restoration exists.
 
 # recovery_export_v1 (experimental)
 
@@ -84,8 +84,14 @@ python3 -m unittest discover -s experiments/recovery_export_v1 -p 'test_*.py' -v
 
 ## Platform testing
 
-Linux results are produced in CI/coordinator runs. **Windows: UNVERIFIED** until
-reproduced (held-lock byte read, overlap, junction/reparse rules).
+Coordinator validation of code `6d8b67ad7e135907ec2e46b502f58018d9e98509`:
+47 original tests run on Windows, 46 passed and one explicitly POSIX-only
+fsync test skipped. Eight independent Windows process-interruption/export
+checks also passed. These exercise synthetic stores, including held-lock
+reads and real hard links/symlinks; they do not qualify every reparse type or
+power-loss behavior. Provider Linux result: 47 passed. Exact final-commit
+cross-platform CI and original failed passes are recorded in the PR and
+`docs/cloud/q9-recovery-export-review.md`.
 
 ## Link, hard-link and TOCTOU scope
 

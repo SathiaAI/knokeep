@@ -444,9 +444,13 @@ class LocalBackend:
                 _scan_state["end"] = _scan_state["size"] = 0
             return
         with f:
+            # Callers hold cas.lock. Treat on-disk framing as untrusted:
+            # never pass a claimed length larger than the remaining file to
+            # read(), which could allocate gigabytes or raise OverflowError.
+            size = os.fstat(f.fileno()).st_size
             if _scan_state is not None:
                 _scan_state["end"] = 0
-                _scan_state["size"] = os.fstat(f.fileno()).st_size
+                _scan_state["size"] = size
             while True:
                 if _scan_state is not None:
                     _scan_state["end"] = f.tell()
@@ -459,6 +463,11 @@ class LocalBackend:
                     if len(header) < 4:
                         return
                 (key_len,) = struct.unpack(">I", header)
+                trailer_len = 32 + (8 if is_v2 else 0)
+                if not 1 <= key_len <= gate._MAX_KEY_LEN:
+                    return
+                if key_len + 8 + trailer_len > size - f.tell():
+                    return
                 key_bytes = f.read(key_len)
                 if len(key_bytes) < key_len:
                     return
@@ -466,6 +475,8 @@ class LocalBackend:
                 if len(body_len_bytes) < 8:
                     return
                 (body_len,) = struct.unpack(">Q", body_len_bytes)
+                if body_len + trailer_len > size - f.tell():
+                    return
                 body = f.read(body_len)
                 if len(body) < body_len:
                     return

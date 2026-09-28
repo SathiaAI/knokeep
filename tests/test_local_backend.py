@@ -1541,6 +1541,24 @@ def test_genuinely_empty_store_still_creates_journal(tmp_path):
         backend.close()
 
 
+def test_ambiguous_startup_preserves_aged_staging_evidence(tmp_path):
+    backend = LocalBackend(tmp_path)
+    assert isinstance(gate.persist(backend, "p/a", b"original", ctx=create_ctx(), doc_type="system_state"), OK)
+    backend._journal_fh.write(b"KKJ2\x00")
+    backend._journal_fh.flush()
+    backend.close()
+    staged = tmp_path / "staging" / "recovery-evidence"
+    staged.write_bytes(b"possibly-relevant-body")
+    old = time.time() - 3600
+    os.utime(staged, (old, old))
+    fresh = LocalBackend(tmp_path)
+    try:
+        assert fresh._journal_ambiguous
+        assert staged.read_bytes() == b"possibly-relevant-body"
+    finally:
+        fresh.close()
+
+
 def test_runtime_journal_deletion_fails_read_and_list(tmp_path):
     """LocalBackend keeps journal.log open for append for its whole lifetime.
 

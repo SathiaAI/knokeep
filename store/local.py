@@ -66,7 +66,7 @@ JUDGMENT CALLS (each also called out inline at its point of use):
      are length-prefixed (`>I` key length, key bytes, `>Q` body length, body
      bytes, 32-byte sha256 digest of the body) so a record can be parsed
      without scanning for delimiters that might collide with arbitrary body
-     bytes.      Replay stops at the first record that fails to parse fully or whose
+     bytes. Replay stops at the first record that fails to parse fully or whose
      trailing digest does not match. If any bytes remain after that point
      (end != size), recovery publish is forbidden and read/list report
      uncertainty — the tail is never treated as a proven-harmless torn
@@ -414,7 +414,10 @@ class LocalBackend:
                 # behind by a process that crashed between mkstemp and the
                 # final os.replace/unlink (contract §3/§4.1). Guarded by the
                 # same lock so it never races a concurrent publish's mkstemp.
-                self._scavenge_staging()
+                # An incomplete journal makes staging potentially useful
+                # recovery evidence; preserve it until explicitly reviewed.
+                if not self._journal_ambiguous:
+                    self._scavenge_staging()
             finally:
                 resume_lock.release()
         except Exception:
@@ -441,11 +444,6 @@ class LocalBackend:
         finally:
             with contextlib.suppress(OSError):
                 lower.unlink()
-
-    @staticmethod
-    def _orphan_published_blob(key: str, latest: Dict[str, Tuple[bytes, int]], data_path: Path) -> bool:
-        """Published bytes with no durable journal record for this key."""
-        return key not in latest and data_path.is_file()
 
     def _scan_journal_latest(
         self,
@@ -605,15 +603,13 @@ class LocalBackend:
         committed value for `key` is unknown and must not be treated as
         "nothing committed". OSErrors propagate to write() for mapping."""
         scan_state: Dict[str, int] = {}
-        journal_latest: Dict[str, Tuple[bytes, int]] = {}
         latest: Optional[Tuple[bytes, int]] = None
         for rec_key, raw, last_accepted_fence in self._iter_journal_records(scan_state):
-            journal_latest[rec_key] = (raw, last_accepted_fence)
             if rec_key == key:
                 latest = (raw, last_accepted_fence)
         if not self._journal_scan_complete(scan_state):
             raise _RecoveryIncomplete()
-        if self._orphan_published_blob(key, journal_latest, data_path):
+        if latest is None and data_path.is_file():
             raise BackendCorruptionError(
                 f"published blob at {key!r} has no durable journal record"
             )

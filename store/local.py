@@ -198,6 +198,11 @@ class _ReservationRace(Exception):
     directly). Treated as BUSY rather than corrupting/overwriting."""
 
 
+class _RecoveryIncomplete(Exception):
+    """Write-time journal recovery stopped on unparsable bytes before EOF,
+    so the latest durable record for the key is unknown. Fail closed."""
+
+
 # Per-record marker for the fence-trailer journal shape (H1 Increment 2).
 # As a big-endian uint32 this is 0x4B4B4A32 (> 1.2e9), so it can never be
 # mistaken for a legacy record's `key_len` (capped at store.gate._MAX_KEY_LEN,
@@ -411,7 +416,9 @@ class LocalBackend:
             with contextlib.suppress(OSError):
                 lower.unlink()
 
-    def _iter_journal_records(self) -> Iterator[Tuple[str, bytes, int]]:
+    def _iter_journal_records(
+        self, _scan_state: Optional[Dict[str, int]] = None
+    ) -> Iterator[Tuple[str, bytes, int]]:
         """Replays journal.log, accepting BOTH record shapes that can appear
         in one file (a store created before H1 Increment 2 keeps its legacy
         records, and `_journal_append` appends new-shape records after
@@ -424,13 +431,29 @@ class LocalBackend:
         Each v2 record is self-describing via `_JOURNAL_V2_MAGIC` in the
         first 4 bytes, where a legacy record carries `key_len`; the magic's
         integer value is far above the gate's key-length cap, so the two can
-        never be confused. A legacy record replays with fence 0."""
+        never be confused. A legacy record replays with fence 0.
+
+        If `_scan_state` is given, it receives "end" (byte offset just past
+        the last valid record) and "size" (file size seen at open), so a
+        caller can tell a clean EOF from a scan that stopped on unparsable
+        bytes (see `_recover_key_before_decision`)."""
         try:
             f = open(self._journal_path, "rb")
         except FileNotFoundError:
+            if _scan_state is not None:
+                _scan_state["end"] = _scan_state["size"] = 0
             return
         with f:
+            # Callers hold cas.lock. Treat on-disk framing as untrusted:
+            # never pass a claimed length larger than the remaining file to
+            # read(), which could allocate gigabytes or raise OverflowError.
+            size = os.fstat(f.fileno()).st_size
+            if _scan_state is not None:
+                _scan_state["end"] = 0
+                _scan_state["size"] = size
             while True:
+                if _scan_state is not None:
+                    _scan_state["end"] = f.tell()
                 header = f.read(4)
                 if len(header) < 4:
                     return  # clean EOF or torn tail — stop, ignore the rest
@@ -440,6 +463,11 @@ class LocalBackend:
                     if len(header) < 4:
                         return
                 (key_len,) = struct.unpack(">I", header)
+                trailer_len = 32 + (8 if is_v2 else 0)
+                if not 1 <= key_len <= gate._MAX_KEY_LEN:
+                    return
+                if key_len + 8 + trailer_len > size - f.tell():
+                    return
                 key_bytes = f.read(key_len)
                 if len(key_bytes) < key_len:
                     return
@@ -447,6 +475,8 @@ class LocalBackend:
                 if len(body_len_bytes) < 8:
                     return
                 (body_len,) = struct.unpack(">Q", body_len_bytes)
+                if body_len + trailer_len > size - f.tell():
+                    return
                 body = f.read(body_len)
                 if len(body) < body_len:
                     return
@@ -492,6 +522,51 @@ class LocalBackend:
             # Construction is single-threaded (this instance is not yet
             # visible to any other thread), so no lock is needed here.
             self._last_accepted_fence[key] = last_accepted_fence
+
+    def _recover_key_before_decision(self, key: str, rel_path: Path, data_path: Path) -> None:
+        """Caller holds cas.lock. Re-materializes `key` from the durable
+        journal BEFORE write() reads the published file to decide
+        create/CAS/generation/fence, so a long-lived instance cannot decide
+        against a published file that predates a committed-but-unpublished
+        record (another process crashed after the journal fsync and before
+        _publish). __init__'s _resume() only covers records that existed at
+        construction time.
+
+        Strategy: a full sequential scan of journal.log on every write,
+        keeping only the latest record for `key`. Cost is O(journal bytes)
+        read + SHA-256 per write (the journal is never compacted), which is
+        the price of not trusting any size/mtime shortcut: a size-only
+        check would have to reason about failed publishes, torn tails and
+        same-length change/restore, and is deliberately not attempted.
+
+        Fails CLOSED by raising `_RecoveryIncomplete` when the scan stops on
+        unparsable bytes before EOF: a torn/corrupt record may be followed by
+        later durable records this parser cannot reach, so the latest
+        committed value for `key` is unknown and must not be treated as
+        "nothing committed". OSErrors propagate to write() for mapping."""
+        scan_state: Dict[str, int] = {}
+        latest: Optional[Tuple[bytes, int]] = None
+        for rec_key, raw, last_accepted_fence in self._iter_journal_records(scan_state):
+            if rec_key == key:
+                latest = (raw, last_accepted_fence)
+        if scan_state.get("end", 0) != scan_state.get("size", 0):
+            raise _RecoveryIncomplete()
+        if latest is None:
+            return
+        raw, last_accepted_fence = latest
+        try:
+            current = data_path.read_bytes()
+        except FileNotFoundError:
+            current = None
+        if current is None or sha256_hex(current) != sha256_hex(raw):
+            # Same gate-free, fence-free republish _resume() uses: the record
+            # already passed gate+fence+CAS when it was journaled; this only
+            # completes its atomic publish (tmp + fsync + os.replace).
+            self._publish(rel_path, data_path, raw, create=current is None)
+        with self._fence_lock:
+            self._last_accepted_fence[key] = max(
+                self._last_accepted_fence.get(key, 0), last_accepted_fence
+            )
 
     def _scavenge_staging(self) -> None:
         now = time.time()
@@ -708,6 +783,21 @@ class LocalBackend:
         holds cas.lock and maps _ReplaceBusy/_ReservationRace to BUSY."""
         if self._check_case_collision(rel_path):
             return ERROR(ErrorKind.INVALID_ARGUMENT)
+
+        # Complete any durable-but-unpublished commit for this key first
+        # (see _recover_key_before_decision). Nothing below has run yet, so
+        # a failure here leaves THIS write definitely uncommitted; the
+        # durable record stays in the journal for the next recovery.
+        try:
+            self._recover_key_before_decision(k, rel_path, data_path)
+        except _RecoveryIncomplete:
+            return ERROR(ErrorKind.CORRUPTION)
+        except PermissionError:
+            return ERROR(ErrorKind.PERMISSION)
+        except (_ReplaceBusy, _ReservationRace):
+            raise  # write() maps these to BUSY
+        except OSError:
+            return ERROR(ErrorKind.CORRUPTION)
 
         current_raw: Optional[bytes]
         try:

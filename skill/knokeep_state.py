@@ -36,9 +36,20 @@ from store.backend import BackendBusyError
 from store.types import OK, STALE, EXISTS, ERROR, ErrorKind
 from store.config import default_store_root
 from store.context import create_ctx, overwrite_ctx
+from application.identifiers import valid_id
+from application.session_queries import (
+    DEFAULT_LIST_LIMIT,
+    MAX_LIST_LIMIT,
+    SessionQueryError,
+    list_sessions as query_list_sessions,
+    read_session as query_read_session,
+    session_store_key,
+    validate_list_arguments,
+)
+
+_QUERY_CMDS = frozenset({"session-list", "session-read"})
 
 SCHEMA_VERSION = 1
-ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 def now():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -49,14 +60,6 @@ def _auto_sid():                                              # session-append w
 def die(**kw):
     kw["blocked"] = True
     raise SystemExit(json.dumps(kw))
-
-RESERVED = {"con", "prn", "aux", "nul"} | {f"com{i}" for i in range(1, 10)} | {f"lpt{i}" for i in range(1, 10)}
-def valid_id(v):
-    if not isinstance(v, str):                                # missing/None arg -> clean reject, not a TypeError
-        return False
-    if not ID_RE.match(v) or v in (".", "..") or v.startswith(".") or v.endswith("."):
-        return False
-    return v.split(".")[0].lower() not in RESERVED and v.lower() not in RESERVED
 
 FM = re.compile(r"^---\n(.*?)\n---\n(.*)$", re.S)
 
@@ -838,6 +841,117 @@ def rollup(store, project):
         n += sum(1 for ln in b.splitlines() if ln.startswith("["))
     return {"ok": True, "session_entries": n}                # consolidation writer (future) must use _persist
 
+def _addressing_note():
+    return "project selects store namespace only; not authorization or tenancy"
+
+def session_list(store, project, limit=DEFAULT_LIST_LIMIT, after=None):
+    """CLI adapter: bounded session id list (StoreBackend list/read only).
+
+    Opens LocalBackend (constructor side effects apply); always closes it before return.
+    Injected backends used by application helpers remain caller-owned.
+    """
+    validate_list_arguments(project, limit=limit, after=after)
+    backend = _backend(store)
+    try:
+        listed = query_list_sessions(backend, project, limit=limit, after=after)
+        out = {
+            "ok": True,
+            "addressing": _addressing_note(),
+            "session_ids": list(listed.session_ids),
+            "truncated": listed.truncated,
+        }
+        if listed.next_after is not None:
+            out["next_after"] = listed.next_after
+        return out
+    finally:
+        backend.close()
+
+def session_read(store, project, session_id):
+    """CLI adapter: read one session journal blob (bytes + hash; no summarization).
+
+    Opens LocalBackend (constructor side effects apply); always closes it before return.
+    """
+    session_store_key(project, session_id)
+    backend = _backend(store)
+    try:
+        got = query_read_session(backend, project, session_id)
+        out = {
+            "ok": True,
+            "addressing": _addressing_note(),
+            "found": got.found,
+            "session_id": got.session_id,
+        }
+        if got.found:
+            out["content_hash"] = got.content_hash
+            out["body_base64"] = got.body_base64
+            if got.body_utf8 is not None:
+                out["body_utf8"] = got.body_utf8
+        return out
+    finally:
+        backend.close()
+
+def _query_json_fail(reason, code=2, **detail):
+    payload = {"blocked": True, "reason": reason}
+    payload.update(detail)
+    print(json.dumps(payload))
+    sys.exit(code)
+
+def _query_exit_from_session_error(exc: SessionQueryError) -> None:
+    payload = {"blocked": True, "reason": exc.reason}
+    payload.update(exc.detail)
+    print(json.dumps(payload))
+    validation = exc.reason.startswith("invalid") or exc.reason in (
+        "missing_session_id",
+        "missing_project",
+    )
+    sys.exit(2 if validation else 1)
+
+def _coerce_query_list_limit(raw):
+    if raw is None:
+        return DEFAULT_LIST_LIMIT
+    if isinstance(raw, bool):
+        raise SessionQueryError("invalid_limit", limit=raw, max_limit=MAX_LIST_LIMIT)
+    if type(raw) is int:
+        value = raw
+    else:
+        text = str(raw).strip()
+        if not re.fullmatch(r"[0-9]+", text):
+            raise SessionQueryError("invalid_limit", limit=raw, max_limit=MAX_LIST_LIMIT)
+        try:
+            value = int(text)
+        except ValueError:
+            raise SessionQueryError("invalid_limit", limit=raw, max_limit=MAX_LIST_LIMIT) from None
+    if type(value) is not int:
+        raise SessionQueryError("invalid_limit", limit=raw, max_limit=MAX_LIST_LIMIT)
+    return value
+
+def _run_query_command(ns):
+    """Validate parsed query arguments before opening LocalBackend; emit JSON."""
+    if not ns.project:
+        _query_json_fail("missing_project")
+    if not valid_id(ns.project):
+        _query_json_fail("invalid_project_id", value=ns.project)
+    store = ns.store or default_store_root()
+    try:
+        if ns.cmd == "session-read":
+            if not ns.session_id:
+                _query_json_fail("missing_session_id")
+            if ns.list_limit is not None or ns.after is not None:
+                _query_json_fail("invalid_argument", message="list options require session-list")
+            result = session_read(store, ns.project, ns.session_id)
+        else:
+            if ns.session_id is not None:
+                _query_json_fail("invalid_argument", message="--session-id requires session-read")
+            limit = _coerce_query_list_limit(ns.list_limit)
+            if ns.after is not None and not valid_id(ns.after):
+                _query_json_fail("invalid_after", value=ns.after)
+            result = session_list(store, ns.project, limit=limit, after=ns.after)
+    except SessionQueryError as exc:
+        _query_exit_from_session_error(exc)
+    except Exception as exc:
+        _query_json_fail("internal_error", code=1, error=type(exc).__name__)
+    print(json.dumps(result))
+
 def evaluate(store):
     """Layer-3 scorecard: aggregate the telemetry log into the dogfood soak metrics.
     Reads <store>/.knokeep-eval/events.jsonl. The one metric it CANNOT produce is a
@@ -1069,13 +1183,36 @@ def _entry(a):
     return entry
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["init", "flush-state", "flush-log", "session-append", "bootstrap", "rollup", "resolve", "eval", "health"])
+    class CommandParser(argparse.ArgumentParser):
+        def error(self, message):
+            # On malformed query invocations no namespace is available yet.
+            # Detect the requested command while skipping known option values.
+            takes_value = {"--store", "--project", "--session-id", "--client",
+                           "--list-limit", "--after", "--operation-id", "--body-file",
+                           "--entry", "--entry-file", "--expect-hash", "--section",
+                           "--conflict-key"}
+            args = iter(sys.argv[1:])
+            for arg in args:
+                if arg in takes_value:
+                    next(args, None)
+                elif arg in _QUERY_CMDS:
+                    _query_json_fail("invalid_argument", message=message)
+            super().error(message)
+    ap = CommandParser()
+    ap.add_argument("cmd", choices=["init", "flush-state", "flush-log", "session-append", "session-list", "session-read", "bootstrap", "rollup", "resolve", "eval", "health"])
     ap.add_argument("--store"); ap.add_argument("--project")   # --store optional: defaults to the shared cross-tool root
     ap.add_argument("--session-id"); ap.add_argument("--client", default="cowork")
+    ap.add_argument("--list-limit")
+    ap.add_argument("--after")
     ap.add_argument("--operation-id")
     ap.add_argument("--body-file"); ap.add_argument("--entry"); ap.add_argument("--entry-file"); ap.add_argument("--expect-hash"); ap.add_argument("--section"); ap.add_argument("--conflict-key")
     a = ap.parse_args()
+    if a.cmd in _QUERY_CMDS:
+        if any(getattr(a, name) is not None for name in
+               ("operation_id", "body_file", "entry", "entry_file", "expect_hash", "section", "conflict_key")):
+            _query_json_fail("invalid_argument", message="write options are not supported by queries")
+        _run_query_command(a)
+        return
     if a.operation_id is not None:
         if a.cmd != "session-append":
             ap.error("--operation-id is only supported by session-append")
@@ -1103,12 +1240,20 @@ def main():
         elif a.cmd == "rollup": result = rollup(a.store, a.project)
         elif a.cmd == "resolve": result = resolve_conflict(a.store, a.project, a.conflict_key)
     except SystemExit as e:
-        _event(a.store, a.project, a.cmd, "block", _labels(e.code))   # observe the block; never alter it
+        if a.cmd not in _QUERY_CMDS:
+            _event(a.store, a.project, a.cmd, "block", _labels(e.code))   # observe the block; never alter it
         raise
+    except SessionQueryError as e:
+        payload = {"blocked": True, "reason": e.reason}
+        payload.update(e.detail)
+        print(json.dumps(payload))
+        sys.exit(2 if e.reason.startswith("invalid") else 1)
     except Exception as e:
-        _event(a.store, a.project, a.cmd, "error", {"error": type(e).__name__})
+        if a.cmd not in _QUERY_CMDS:
+            _event(a.store, a.project, a.cmd, "error", {"error": type(e).__name__})
         print(json.dumps({"blocked": True, "reason": "internal error", "error": type(e).__name__})); sys.exit(1)
-    _event(a.store, a.project, a.cmd, "allow", {"ok": result.get("ok")})
+    if a.cmd not in _QUERY_CMDS:
+        _event(a.store, a.project, a.cmd, "allow", {"ok": result.get("ok")})
     print(json.dumps(result))
 
 if __name__ == "__main__":

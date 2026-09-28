@@ -844,17 +844,18 @@ def health(store, window_hours=24):
             "problems": problems, "notes": notes,
             "scorecard": sc, "audit": {"scanner": scanner, "leaks": leaks}, "projects": projects}
 
-def _bodyfile(path):
+def _bodyfile(path, option="--body-file"):
     if not path or not os.path.exists(path):
-        die(reason="missing --body-file", path=path)         # empty file is allowed; missing is an error
+        die(reason=f"missing {option}", path=path)         # empty file is allowed; missing is an error
     return _readfile(path)
 
 def _entry(a):
-    if a.entry_file == "-":
-        return sys.stdin.read().rstrip("\n")
-    if a.entry_file:
-        return _bodyfile(a.entry_file)
-    return a.entry or ""
+    if a.entry_file is None:
+        return a.entry or ""
+    entry = sys.stdin.read().rstrip("\n") if a.entry_file == "-" else _bodyfile(a.entry_file, "--entry-file")
+    if not entry.strip():
+        die(reason='empty --entry-file input; use --entry "" for an intentional empty entry')
+    return entry
 
 def main():
     ap = argparse.ArgumentParser()
@@ -863,6 +864,11 @@ def main():
     ap.add_argument("--session-id"); ap.add_argument("--client", default="cowork")
     ap.add_argument("--body-file"); ap.add_argument("--entry"); ap.add_argument("--entry-file"); ap.add_argument("--expect-hash"); ap.add_argument("--section"); ap.add_argument("--conflict-key")
     a = ap.parse_args()
+    if a.cmd == "session-append":
+        if a.body_file is not None:
+            ap.error("session-append does not accept --body-file; use --entry-file (or --entry-file - for stdin)")
+        if (a.entry is None) == (a.entry_file is None):
+            ap.error("session-append requires exactly one of --entry or --entry-file")
     if not a.store:
         a.store = default_store_root()                     # shared cross-tool default (T-4)
     if a.cmd == "eval":                                     # read-only scorecard, no project needed

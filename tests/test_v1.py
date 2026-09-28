@@ -3,7 +3,7 @@
 path/metadata safety, store-scan — now over the unified V2 store (LocalBackend).
 The concurrency CAS token is the store's 64-hex sha256; bypass-secret probes are
 written into the backend's data/ dir (where blobs live). Run: python tests/test_v1.py"""
-import subprocess, sys, os, json, tempfile, shutil
+import subprocess, sys, os, json, tempfile, shutil, re
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE = os.path.join(ROOT, "skill", "knokeep_state.py")
@@ -12,9 +12,9 @@ proj = "demo"
 results = []
 STALE_HASH = "de" * 32   # a valid 64-hex that never matches real content
 
-def run(*args, project=proj):
+def run(*args, project=proj, input_text=None):
     p = subprocess.run([sys.executable, STATE, *args, "--store", store, "--project", project],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, input=input_text)
     return p.returncode, p.stdout.strip(), p.stderr.strip()
 
 def check(name, cond):
@@ -61,6 +61,56 @@ check("bad session id blocked", rc != 0 and "invalid session id" in err)
 # missing session-id -> auto-generated id, save succeeds; NEVER a TypeError crash (dogfood regression)
 rc, out, err = run("session-append", "--entry", "no id given")
 check("missing session id auto-handled (no crash)", rc == 0 and json.loads(out)["ok"] and "internal error" not in err)
+# Q0 Hermes regression: accepted --body-file silently discarded the supplied text.
+# Reject ambiguous/missing input before touching documents, journal or telemetry.
+def snapshot():
+    saved = {}
+    for root, _, names in os.walk(store):
+        for name in names:
+            path = os.path.join(root, name)
+            with open(path, "rb") as f:
+                saved[os.path.relpath(path, store)] = f.read()
+    return saved
+
+entry_path = bf("file entry: preserve this content")
+for label, args, stdin in (
+    ("wrong body option with stdin", ("--body-file", "-"), "must not silently disappear\n"),
+    ("wrong body option with file", ("--body-file", entry_path), None),
+    ("missing entry source", (), None),
+    ("ambiguous entry sources", ("--entry", "inline", "--entry-file", entry_path), None),
+):
+    before = snapshot()
+    rc, out, err = run("session-append", *args, input_text=stdin)
+    check(label + " rejected without a write", rc == 2 and not out and "--entry" in err and snapshot() == before)
+
+for label, args, stdin, expected, sid in (
+    ("stdin", ("--entry-file", "-"), "line one\nline two\n", "line one\nline two", "20260927-1200-aaaa"),
+    ("file", ("--entry-file", entry_path), None, "file entry: preserve this content", "20260927-1200-bbbb"),
+    ("inline", ("--entry", "inline entry"), None, "inline entry", "20260927-1200-cccc"),
+    ("explicit empty", ("--entry", ""), None, "", "20260927-1200-dddd"),
+):
+    rc, out, err = run("session-append", "--session-id", sid, *args, input_text=stdin)
+    saved = ""
+    if rc == 0:
+        with open(data(proj, "sessions", sid), encoding="utf-8") as f:
+            saved = f.read()
+    # Remove only the timestamp prefix, then verify the full payload.
+    body = re.sub(r"^\[[^\]\n]+\] ?", "", saved.partition("## Journal\n")[2], count=1)
+    check(label + " entry content preserved", rc == 0 and json.loads(out)["ok"] and body == expected + "\n")
+empty_entry_path = bf("")
+for label, path, stdin, hint in (
+    ("empty file", empty_entry_path, None, "empty --entry-file input"),
+    ("empty stdin", "-", "", "empty --entry-file input"),
+    ("blank stdin", "-", " \n\t\n", "empty --entry-file input"),
+    ("empty file path", "", None, "missing --entry-file"),
+    ("missing entry file", os.path.join(store, "missing-entry.txt"), None, "missing --entry-file"),
+):
+    before = snapshot()
+    rc, out, err = run("session-append", "--entry-file", path, input_text=stdin)
+    after = snapshot()
+    # Rejected reads may log telemetry, but must not alter documents or the journal.
+    durable = lambda snap: {k: v for k, v in snap.items() if not k.startswith(".knokeep-eval" + os.sep)}
+    check(label + " rejected without empty journal", rc != 0 and not out and hint in err and durable(before) == durable(after))
 # missing body-file is an error (not silent empty overwrite)
 rc, out, err = run("flush-log", "--body-file", os.path.join(store, "nope.md"))
 check("missing body-file blocked", rc != 0 and "missing --body-file" in err)

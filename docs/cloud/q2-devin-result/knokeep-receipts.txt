@@ -1,0 +1,9 @@
+$ knokeep flush-log
+{"ok": true, "revision": 3, "version_hash": "176593900c9660c3e4a16a663248c7cbdaf0a18c913f74ff150fd9ae87b397f4"}
+exit=0
+$ knokeep session-append
+{"ok": true, "log": "q2-cursor-a1/sessions/q2-devin-successor-a1"}
+exit=0
+$ knokeep bootstrap (post)
+{"version_hash": "c8726ae561c5e89df562a5c136813ba2b23bfb42e484da2ee5b951aaac21bb1f", "revision": 2, "log_hash": "176593900c9660c3e4a16a663248c7cbdaf0a18c913f74ff150fd9ae87b397f4", "state_client": "cursor-cloud", "log_client": "devin-cloud", "client_labels_verified": false, "active": "Devin Cloud successor completed recorded next action; evidence branch push pending.", "next": "None recorded. Awaiting new decision from coordinator.", "conflicts": [], "conflict_count": 0, "settled_count": 0, "resume_line": "resuming: Devin Cloud successor completed recorded next action; evidence branch push pending. / next: None recorded. Awaiting new decision from coordinator. / vc8726ae561c5"}
+exit=0

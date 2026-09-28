@@ -11,7 +11,7 @@
 ## Commands and results
 | Command | Result |
 |---|---|
-| `python3 docs/cloud/evidence/Q7-DEVIN-RECOVERY-DESIGN-20260928-A1/recovery_probe_a2.py` (Linux, Python 3.10.12) | 25/25 PASS, 0 SKIP, `RESULT OK`, exit 0 (`probe_results_A2_linux.txt`) |
+| `python3 docs/cloud/evidence/Q7-DEVIN-RECOVERY-DESIGN-20260928-A1/recovery_probe_a2.py` (Linux, Python 3.10.12) | 24/24 PASS, 0 SKIP, `RESULT OK`, exit 0 (`probe_results_A2_linux.txt`) |
 | `python3 -m pytest -q tests/test_local_backend.py` | 46 passed, 4 skipped (Windows-only), exit 0 |
 | Windows run of `recovery_probe_a2.py` | **UNVERIFIED.** No Windows host was available here. The Windows lock fix below has only been reasoned about, not run. Do not treat the Linux PASS as a Windows PASS. |
 

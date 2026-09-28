@@ -279,7 +279,15 @@ def _inventory_hashes(
                     if stat.S_ISDIR(st.st_mode):
                         subdirs.append((Path(entry.path), child_rel))
                         continue
-                    if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
+                    if not stat.S_ISREG(st.st_mode):
+                        problems.append(child_rel)
+                        continue
+                    try:
+                        st = os.lstat(entry.path)
+                    except OSError:
+                        problems.append(child_rel)
+                        continue
+                    if _is_reparse(st) or not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
                         problems.append(child_rel)
                         continue
                     if budget.used + st.st_size > budget.limit:
@@ -383,6 +391,18 @@ def _analyze_archived_journal(
 ) -> _JournalAnalysis:
     latest, prefix_end, journal_size = _product_iter_records(journal_path)
     return _classify_journal(latest, prefix_end, journal_size, archive_hashes)
+
+
+def _candidate_within_budget(materialized: Dict[str, str]) -> bool:
+    """Candidate tree (files + parent dirs) must fit verify's per-tree budgets."""
+    dirs: Set[str] = set()
+    for key in materialized:
+        parts = key.split("/")
+        if len(parts) > MAX_DEPTH:
+            return False
+        for i in range(1, len(parts)):
+            dirs.add("/".join(parts[:i]))
+    return len(dirs) + len(materialized) <= MAX_TREE_ENTRIES
 
 
 def _normalize_store_path(store: os.PathLike[str] | str) -> Tuple[Optional[Path], Optional[str]]:
@@ -550,6 +570,8 @@ def export_store(
         except (OSError, BackendCorruptionError):
             return {"code": "REFUSE_ARCHIVE_VERIFY_FAILED", "attempt": attempt_name}
 
+        if not _candidate_within_budget(analysis.materialized):
+            return {"code": "REFUSE_BUDGET_EXCEEDED", "attempt": attempt_name}
         materialized_written: Dict[str, str] = {}
         try:
             for key in sorted(analysis.materialized.keys()):
@@ -609,6 +631,8 @@ def export_store(
         manifest_body = json.dumps(manifest_core, indent=1, sort_keys=True).encode("utf-8") + b"\n"
         manifest_core["manifest_sha256"] = _sha256_bytes(manifest_body)
         manifest_bytes = json.dumps(manifest_core, indent=1, sort_keys=True).encode("utf-8") + b"\n"
+        if len(manifest_bytes) > MAX_MANIFEST_BYTES:
+            return {"code": "REFUSE_BUDGET_EXCEEDED", "attempt": attempt_name}
         manifest_path = attempt_dir / "MANIFEST.json"
         try:
             _write_new_file(manifest_path, manifest_bytes)
@@ -664,6 +688,38 @@ _EXPORT_SUCCESS_CODES = frozenset(
     }
 )
 _ROOT_ALLOWED = frozenset({"MANIFEST.json", "ATTEMPT.json", "archive", "candidate-data"})
+_MANIFEST_FIELDS = frozenset(
+    {
+        "schema",
+        "source_inventory_sha256",
+        "journal_prefix_end",
+        "journal_size",
+        "prefix_key_hashes",
+        "candidate_materialized_keys",
+        "findings",
+        "invalid_keys",
+        "case_fold_collisions",
+        "published_mismatch_keys",
+        "unparsed_byte_range",
+        "completeness_proven",
+        "candidate_is_authoritative",
+        "external_anchor_present",
+        "platform",
+        "limits",
+        "durability_notes",
+        "manifest_sha256",
+    }
+)
+_LIMIT_FIELDS = frozenset({"max_total_bytes", "max_tree_entries", "max_depth", "chunk_size"})
+_NOTE_FIELDS: Dict[str, Any] = {
+    "per_file_fsync": bool,
+    "directory_fsync_posix": str,
+    "directory_fsync_after_manifest": str,
+    "directory_fsync_windows": str,
+    "directory_fsync_results": dict,
+    "final_rename_atomic": str,
+    "manifest_hash_is_not_authentication": bool,
+}
 _STR_LIST_FIELDS = (
     "candidate_materialized_keys",
     "findings",
@@ -698,6 +754,8 @@ def _is_relative_label(v: Any) -> bool:
 def _validate_manifest_shape(m: Any) -> Optional[str]:
     if not isinstance(m, dict):
         return "manifest_not_object"
+    if set(m) != _MANIFEST_FIELDS:
+        return "manifest_unknown_or_missing_field"
     if m.get("schema") != "recovery_export_v1":
         return "manifest_schema"
     for field in ("completeness_proven", "candidate_is_authoritative", "external_anchor_present"):
@@ -722,18 +780,27 @@ def _validate_manifest_shape(m: Any) -> Optional[str]:
         return "journal_prefix_end_shape"
     for field in _STR_LIST_FIELDS:
         v = m.get(field)
-        if not isinstance(v, list) or len(v) > MAX_TREE_ENTRIES or not all(isinstance(x, str) for x in v):
+        cap = 2 * MAX_TREE_ENTRIES if field == "published_mismatch_keys" else MAX_TREE_ENTRIES
+        if not isinstance(v, list) or len(v) > cap or not all(isinstance(x, str) for x in v):
             return f"{field}_shape"
+    if not isinstance(m.get("platform"), str):
+        return "platform_shape"
+    lim = m.get("limits")
+    if not isinstance(lim, dict) or set(lim) != _LIMIT_FIELDS or not all(_is_nonneg_int(v) for v in lim.values()):
+        return "limits_shape"
     ur = m.get("unparsed_byte_range", "missing")
     if ur is not None and not (
         isinstance(ur, list) and len(ur) == 2 and all(_is_nonneg_int(x) for x in ur)
     ):
         return "unparsed_byte_range_shape"
     notes = m.get("durability_notes")
-    if not isinstance(notes, dict):
+    if not isinstance(notes, dict) or set(notes) != set(_NOTE_FIELDS):
         return "durability_notes_shape"
-    results = notes.get("directory_fsync_results")
-    if not isinstance(results, dict):
+    for k, typ in _NOTE_FIELDS.items():
+        if not isinstance(notes[k], typ):
+            return "durability_notes_shape"
+    results = notes["directory_fsync_results"]
+    if len(results) > 2 * MAX_TREE_ENTRIES + 1:
         return "durability_notes_shape"
     for k, v in results.items():
         if not _is_relative_label(k):
@@ -754,9 +821,14 @@ def _lstat_kind(path: Path) -> str:
     return "special"
 
 
-def _bounded_file_set(root: Path, counter: List[int]) -> Dict[str, int]:
-    """rel -> st_size via lstat only; rejects links/reparse/hard links/special files."""
+def _bounded_file_set(root: Path) -> Dict[str, int]:
+    """rel -> st_size via lstat only; rejects links/reparse/hard links/special files.
+
+    Regular-file link counts come from os.lstat(path), not DirEntry.stat(),
+    whose Windows metadata does not carry st_nlink. Each tree has its own
+    MAX_TREE_ENTRIES budget, matching what export_store permits."""
     out: Dict[str, int] = {}
+    counter = [0]
     stack: List[Tuple[Path, str]] = [(root, "")]
     while stack:
         dirpath, prefix = stack.pop()
@@ -776,7 +848,12 @@ def _bounded_file_set(root: Path, counter: List[int]) -> Dict[str, int]:
                     continue
                 if not stat.S_ISREG(st.st_mode):
                     raise _VerifyReject("special_file", path=rel)
-                if st.st_nlink > 1:
+                st = os.lstat(ent.path)
+                if _is_reparse(st):
+                    raise _VerifyReject("link_or_reparse", path=rel)
+                if not stat.S_ISREG(st.st_mode):
+                    raise _VerifyReject("special_file", path=rel)
+                if st.st_nlink != 1:
                     raise _VerifyReject("hardlink", path=rel)
                 out[rel] = st.st_size
     return out
@@ -853,16 +930,17 @@ def _verify(root: Path) -> Dict[str, Any]:
     if JOURNAL_REL not in expected_inv:
         raise _VerifyReject("journal_missing")
 
-    counter = [0]
     archive_root = root / "archive"
     candidate_root = root / "candidate-data"
-    archive_sizes = _bounded_file_set(archive_root, counter)
+    archive_sizes = _bounded_file_set(archive_root)
     _check_file_set(archive_sizes, set(expected_inv), "archive")
-    candidate_sizes = _bounded_file_set(candidate_root, counter) if "candidate-data" in top else {}
-    if sum(archive_sizes.values()) + sum(candidate_sizes.values()) > 2 * MAX_TOTAL_BYTES:
+    candidate_sizes = _bounded_file_set(candidate_root) if "candidate-data" in top else {}
+    if sum(archive_sizes.values()) > MAX_TOTAL_BYTES:
+        raise _VerifyReject("verify_byte_budget_exceeded")
+    if sum(candidate_sizes.values()) > MAX_RETAINED_BODY_BYTES:
         raise _VerifyReject("verify_byte_budget_exceeded")
 
-    budget = _Budget(2 * MAX_TOTAL_BYTES)
+    budget = _Budget(MAX_TOTAL_BYTES + MAX_RETAINED_BODY_BYTES)
     _hash_expected(archive_root, archive_sizes, expected_inv, budget, "archive")
 
     analysis = _analyze_archived_journal(archive_root / "journal" / "journal.log", expected_inv)
@@ -902,9 +980,12 @@ def _verify(root: Path) -> Dict[str, Any]:
 
 
 def verify_export(export_dir: os.PathLike[str] | str) -> Dict[str, Any]:
-    """Recompute every derivable field from the archive; never follows links.
+    """Recompute every derivable field from the archive.
 
-    VERIFY_OK means internal consistency only: it does not authenticate the
+    Links, reparse points, hard links and special files are refused by lstat
+    before any data read. That holds only on a cooperative, stable filesystem:
+    a path swapped for a link between the lstat and the open is not detected
+    (no O_NOFOLLOW/openat). VERIFY_OK means internal consistency only: it does not authenticate the
     source, prove completeness, or make the candidate authoritative."""
     root = Path(os.path.abspath(str(export_dir)))
     try:

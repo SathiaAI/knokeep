@@ -200,13 +200,18 @@ class ExportFailureTests(_Base):
 
     def test_output_parent_fsync_failure_after_rename_unconfirmed(self) -> None:
         store = _store(self.td, _frame("k/a", b"one"), {"k/a": b"one"})
-        real = rex._fsync_dir
-        out = self.out
-        with mock.patch.object(rex, "_WINDOWS", False), mock.patch.object(
-            rex, "_fsync_dir", lambda p: "failed" if Path(p) == out else real(p)
-        ):
+        out = self.out.resolve()
+        calls = []
+
+        def modeled(p):
+            calls.append(Path(p))
+            return "failed" if Path(p).resolve() == out else "fsync_ok"
+
+        with mock.patch.object(rex, "_WINDOWS", False), mock.patch.object(rex, "_fsync_dir", modeled):
             r = rex.export_store(store, self.out)
         self.assertEqual(r["code"], "EXPORT_DURABILITY_UNCONFIRMED")
+        self.assertEqual(calls[-1].resolve(), out)
+        self.assertEqual(r["post_manifest_fsync"]["attempt_root_after_manifest"], "fsync_ok")
         self.assertNotIn(r["code"], rex._EXPORT_SUCCESS_CODES)
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(rex._main(["verify", r["output"]]), 0)
@@ -335,7 +340,8 @@ class VerifierTests(_Base):
 
     def test_verify_entry_and_byte_budgets(self) -> None:
         _s, root, _r = self.export_ok()
-        with mock.patch.object(rex, "MAX_TREE_ENTRIES", 3):
+        # archive tree has 8 entries; manifest lists stay within 2*6+1 at limit 6
+        with mock.patch.object(rex, "MAX_TREE_ENTRIES", 6):
             self.assertReject(root, "verify_entry_budget_exceeded")
         with mock.patch.object(rex, "MAX_TOTAL_BYTES", 10):
             self.assertReject(root, "verify_byte_budget_exceeded")
@@ -366,6 +372,137 @@ class VerifierTests(_Base):
         self.assertEqual(v["code"], "VERIFY_OK")
         self.assertFalse(v["source_authenticated"])
         self.assertFalse(v["completeness_proven"])
+
+
+class _NlinkZeroEntry:
+    """DirEntry proxy whose stat() lacks st_nlink, as on Windows."""
+
+    def __init__(self, ent):
+        self._ent = ent
+        self.name = ent.name
+        self.path = ent.path
+
+    def stat(self, follow_symlinks=True):
+        st = self._ent.stat(follow_symlinks=follow_symlinks)
+        fields = list(st[:10])
+        fields[3] = 0
+        return os.stat_result(fields)
+
+
+class _NlinkZeroScandir:
+    def __init__(self, it):
+        self._it = it
+
+    def __enter__(self):
+        self._it.__enter__()
+        return self
+
+    def __exit__(self, *a):
+        return self._it.__exit__(*a)
+
+    def __iter__(self):
+        for e in self._it:
+            yield _NlinkZeroEntry(e)
+
+
+class WindowsDirEntryLinkCountTests(_Base):
+    def _patched_scandir(self):
+        real = os.scandir
+        return mock.patch.object(rex.os, "scandir", lambda p: _NlinkZeroScandir(real(p)))
+
+    def test_source_hardlink_refused_without_direntry_nlink(self) -> None:
+        store = _store(self.td, _frame("k/a", b"x"), {"k/a": b"x"})
+        os.link(store / "data" / "k" / "a", self.td / "outside-link")
+        before = _snapshot(store)
+        with self._patched_scandir():
+            r = rex.export_store(store, self.out)
+        self.assertEqual(r["code"], "REFUSE_SYMLINK_HARDLINK_OR_SPECIAL", r)
+        self.assertEqual(_snapshot(store), before)
+
+    def test_verifier_hardlink_refused_without_direntry_nlink(self) -> None:
+        _s, root, _r = self.export_ok()
+        os.link(root / "candidate-data" / "k" / "a" / "b", self.td / "cand-link")
+        with self._patched_scandir():
+            self.assertReject(root, "hardlink")
+
+
+class BudgetConsistencyTests(_Base):
+    def test_export_at_entry_limit_verifies(self) -> None:
+        # source: locks, journal, data, staging, cas.lock, journal.log, data/k, data/k/a = 8
+        store = _store(self.td, _frame("k/a", b"x"), {"k/a": b"x"})
+        with mock.patch.object(rex, "MAX_TREE_ENTRIES", 8):
+            r = rex.export_store(store, self.out)
+            self.assertIn(r["code"], rex._EXPORT_SUCCESS_CODES, r)
+            self.assertEqual(rex.verify_export(r["output"])["code"], "VERIFY_OK")
+        with mock.patch.object(rex, "MAX_TREE_ENTRIES", 7):
+            self.assertEqual(rex.export_store(store, self.td / "out")["code"], "REFUSE_BUDGET_EXCEEDED")
+
+    def test_candidate_over_entry_budget_refused_by_export(self) -> None:
+        j = _frame("a/b/c/d/e", b"1") + _frame("f/g/h/i/j", b"2")
+        store = _store(self.td, j)
+        with mock.patch.object(rex, "MAX_TREE_ENTRIES", 9):
+            r = rex.export_store(store, self.out)
+        self.assertEqual(r["code"], "REFUSE_BUDGET_EXCEEDED", r)
+        self.assertTrue((self.out / r["attempt"]).is_dir())
+
+    def test_candidate_over_depth_refused_by_export(self) -> None:
+        store = _store(self.td, _frame("a/b/c/d", b"1"))
+        with mock.patch.object(rex, "MAX_DEPTH", 3):
+            r = rex.export_store(store, self.out)
+        self.assertEqual(r["code"], "REFUSE_BUDGET_EXCEEDED", r)
+
+    def test_candidate_bytes_use_retained_body_budget(self) -> None:
+        store = _store(self.td, _frame("k/a", b"x" * 100))
+        r = rex.export_store(store, self.out)
+        self.assertIn(r["code"], rex._EXPORT_SUCCESS_CODES, r)
+        with mock.patch.object(rex, "MAX_RETAINED_BODY_BYTES", 99):
+            self.assertReject(r["output"], "verify_byte_budget_exceeded")
+        self.assertEqual(rex.verify_export(r["output"])["code"], "VERIFY_OK")
+
+
+class MalformedManifestTests(_Base):
+    def test_malformed_encodings_fail_closed(self) -> None:
+        _s, root, _r = self.export_ok()
+        mp = root / "MANIFEST.json"
+        good = mp.read_bytes()
+        cases = {
+            "deep_nesting": ("[" * 100000 + "]" * 100000).encode(),
+            "huge_int": b'{"journal_size": ' + b"9" * 5000 + b"}",
+            "invalid_utf8": b'{"schema": "\xff\xfe' + bytes([0xFF, 0xFE]) + b'"}',
+            "utf8_bom": b"\xef\xbb\xbf" + good,
+            "truncated": good[: len(good) // 2],
+        }
+        for name, raw in cases.items():
+            with self.subTest(name=name):
+                mp.write_bytes(raw)
+                v = rex.verify_export(root)
+                self.assertEqual(v["code"], "REJECT_INCOMPLETE_OR_ALTERED", v)
+                json.dumps(v)
+
+    def test_unknown_nested_field_and_bad_nested_types(self) -> None:
+        _s, root, _r = self.export_ok()
+        muts = {
+            "manifest_unknown_or_missing_field": lambda m: m.update(extra=json.loads("[" * 900 + "]" * 900)),
+            "limits_shape": lambda m: m.update(limits={"max_total_bytes": [[1]]}),
+            "platform_shape": lambda m: m.update(platform={"a": [1]}),
+            "durability_notes_shape": lambda m: m["durability_notes"].update(per_file_fsync=[[True]]),
+        }
+        for reason, mut in muts.items():
+            with self.subTest(reason=reason):
+                mp = root / "MANIFEST.json"
+                saved = mp.read_bytes()
+                _resign(root, mut)
+                self.assertReject(root, reason)
+                mp.write_bytes(saved)
+        self.assertEqual(rex.verify_export(root)["code"], "VERIFY_OK")
+
+    def test_lone_surrogate_path_fails_closed(self) -> None:
+        _s, root, _r = self.export_ok()
+        _resign(root, lambda m: m["source_inventory_sha256"].update({"data/\ud800": "0" * 64}))
+        v = self.assertReject(root)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(rex._main(["verify", str(root)]), 1)
+        json.dumps(v)
 
 
 if __name__ == "__main__":

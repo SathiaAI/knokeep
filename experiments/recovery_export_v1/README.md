@@ -25,7 +25,8 @@ repair the store, switch service, install a candidate, or construct
 | Copy/hash chunk size | 64 KiB |
 | Manifest size read by verify | 16 MiB |
 | Retained latest journal bodies (parser) | 32 MiB |
-| Bytes hashed by verify (archive + candidate) | 128 MiB |
+| Verify archive tree / candidate tree | 10,000 entries each (same as source inventory; export refuses a candidate tree that would exceed it or depth 64) |
+| Verify archive bytes / candidate bytes | 64 MiB / 32 MiB (same as export) |
 
 Refuses symlinks, hard links (`st_nlink > 1`), special files, output/store
 overlap (after `realpath` + `normcase`), busy lock, missing/unreadable journal
@@ -85,3 +86,12 @@ python3 -m unittest discover -s experiments/recovery_export_v1 -p 'test_*.py' -v
 
 Linux results are produced in CI/coordinator runs. **Windows: UNVERIFIED** until
 reproduced (held-lock byte read, overlap, junction/reparse rules).
+
+## Link, hard-link and TOCTOU scope
+
+- Links, reparse points, hard links and special files are refused by `lstat` before any data read.
+  - Regular-file link counts come from `os.lstat(path)`, not `DirEntry.stat()`, whose Windows metadata lacks `st_nlink`.
+  - This holds only on a cooperative, stable filesystem. A path swapped for a link between the `lstat` and the `open` is not detected; `O_NOFOLLOW` / `openat` are not used.
+- Completed exports keep `ATTEMPT.json` (status "incomplete"), and the manifest does not cover it.
+- Empty directories are neither archived nor verified.
+- There is no service restore or in-place repair.

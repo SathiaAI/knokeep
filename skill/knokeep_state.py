@@ -21,6 +21,7 @@ _ROOT = os.path.dirname(_HERE)
 sys.path.insert(0, _ROOT)   # store package (parent) — the shared V2 engine
 from store import gate
 from store.local import LocalBackend
+from store.health_inspect import inspect_local_store, read_project_summaries
 from store.backend import BackendBusyError
 from store.types import OK, STALE, EXISTS, ERROR, ErrorKind
 from store.config import default_store_root
@@ -867,6 +868,7 @@ def health(store, window_hours=24):
     """One-shot health verdict: scorecard + independent audit + per-project freshness.
     Verdict reflects RECENT activity (default 24h): 'attention' (exit 1) if the gate
     errored in the window or a leak is present now; else 'healthy'. Missing gitleaks is a note."""
+    store_check = inspect_local_store(store)
     sc = evaluate(store)
     recent_errors = 0
     ev = os.path.join(os.path.realpath(store), EVENTS_DIR, "events.jsonl")
@@ -892,21 +894,13 @@ def health(store, window_hours=24):
         leaks = a.get("leaks"); scanner = a.get("scanner")
     except Exception:
         pass
-    projects = []
-    try:
-        b = _backend(store)
-        for key in b.list(""):
-            if not key.endswith("/system_state") or key.count("/") != 1:
-                continue                                     # top-level project state docs only
-            blob = b.read(key)
-            if blob is None:
-                continue
-            fm, _ = parse(blob.body.decode("utf-8"))
-            projects.append({"project": key[: -len("/system_state")],
-                             "revision": fm.get("revision"), "updated": fm.get("updated")})
-    except Exception:
-        pass
+    projects = read_project_summaries(store) if store_check.get("ok") else []
     problems, notes = [], []
+    if not store_check.get("ok"):
+        for code in store_check.get("reasons") or []:
+            problems.append("store:" + code)
+    if store_check.get("indeterminate"):
+        notes.append("store_inspect_indeterminate (journal changed during read)")
     if recent_errors > 0: problems.append("errors_last_%dh=%d" % (window_hours, recent_errors))
     if leaks: problems.append("leaks>0")
     if sc.get("errors", 0) > 0 and recent_errors == 0:
@@ -914,7 +908,7 @@ def health(store, window_hours=24):
     if leaks is None: notes.append("audit_unavailable (gitleaks not found)")
     verdict = "healthy" if not problems else "attention"
     return {"verdict": verdict, "window_hours": window_hours, "recent_errors": recent_errors,
-            "problems": problems, "notes": notes,
+            "problems": problems, "notes": notes, "store": store_check,
             "scorecard": sc, "audit": {"scanner": scanner, "leaks": leaks}, "projects": projects}
 
 def _bodyfile(path, option="--body-file"):

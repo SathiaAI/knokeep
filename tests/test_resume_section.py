@@ -77,8 +77,10 @@ def test_duplicate_heading_is_ambiguous_and_reported():
     assert w == ["duplicate heading: Active State"]
 
 
-def test_resume_view_still_truncates_to_400_chars():
-    assert len(both("## Active State\n" + "x" * 500 + "\n")[0]) == 400
+def test_resume_view_truncation_is_explicit():
+    active, _, warnings = both("## Active State\n" + "x" * 500 + "\n")
+    assert len(active) == 400
+    assert warnings == ["truncated preview: Active State; read the full section before acting"]
 
 
 def _cli(store, *args, stdin=None):
@@ -107,3 +109,24 @@ def test_bootstrap_duplicate_heading_warns_in_resume_line(tmp_path):
     assert res["active"] == "" and res["next"] == "B"
     assert res["section_warnings"] == ["duplicate heading: Active State"]
     assert "[!] duplicate heading: Active State" in res["resume_line"]
+    assert res["active_full"] == "" and res["next_full"] == "B"
+
+
+@pytest.mark.parametrize("size", [399, 400, 401])
+def test_bootstrap_preserves_full_decision_and_marks_preview_boundary(tmp_path, size):
+    assert _cli(tmp_path, "init")[0] == 0
+    lh = json.loads(_cli(tmp_path, "bootstrap")[1])["log_hash"]
+    # Characters, not UTF-8 bytes; exclusion after a long prefix must survive.
+    active = "é" * size
+    next_step = "Continue the review. " * 24 + "Never approve a held order."
+    body = tmp_path / "long-log.md"
+    body.write_bytes((f"## Active State\r\n{active}\r\n## Next Step\r\n{next_step}\r\n").encode())
+    assert _cli(tmp_path, "flush-log", "--body-file", str(body), "--expect-hash", lh)[0] == 0
+    rc, output, _ = _cli(tmp_path, "bootstrap")
+    res = json.loads(output)
+    assert rc == 0
+    assert res["active_full"] == active and res["next_full"] == next_step
+    assert res["active"] == active[:400] and res["next"] == next_step[:400]
+    assert res["truncated_fields"] == (["active", "next"] if size > 400 else ["next"])
+    assert "read next_full before acting" in res["resume_line"]
+    assert ("read active_full before acting" in res["resume_line"]) == (size > 400)

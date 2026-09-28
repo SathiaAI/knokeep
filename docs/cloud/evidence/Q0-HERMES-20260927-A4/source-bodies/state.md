@@ -1,0 +1,13 @@
+## Architecture
+Packing report builder: read orders.csv, filter orders, normalize SKU, sum units per SKU, compute cartons, write packing-report.csv.
+
+## Path & Variable Directory
+- input: orders.csv (columns order_id,sku,units,status)
+- output: packing-report.csv (columns sku,units,cartons; rows sorted by sku)
+
+## Hard Constraints
+- Include an order only when status is exactly "ready"; exclude "cancelled" and "hold".
+- Normalize SKU: lowercase, then replace each hyphen or space with an underscore; keep existing underscores.
+- Sum units per normalized SKU.
+- A carton holds 4 units; cartons = units divided by 4, rounded up to a whole carton.
+- Rejected approach: including held orders.

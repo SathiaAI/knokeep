@@ -1,0 +1,11 @@
+179	./orders.csv
+668	./store/.knokeep-eval/events.jsonl
+402	./store/data/q0-hermes-a4/session_log
+612	./store/data/q0-hermes-a4/sessions/hermes-a4
+800	./store/data/q0-hermes-a4/system_state
+2579	./store/journal/journal.log
+1	./store/locks/advisory.lock
+1	./store/locks/cas.lock
+52	./store/locks/fence-alloc/3bcc6b6bfa941164ded4b88bdd4f2b0a21126a829622de02d6aba6138f8d16b6.fence
+52	./store/locks/fence-alloc/9968b526baf1efe922fc71a647fac8bcd28f44ae49873ca1320eb3740ccfeec4.fence
+53	./store/locks/fence-alloc/d41aa7cdf48c1c7b36178abfcbec7fb773c5ed2f1256197974c377eb2e015755.fence

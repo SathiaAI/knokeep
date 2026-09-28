@@ -1,0 +1,1 @@
+Reply with exactly the text OK-HERMES-A4 and nothing else. Do not use any tools.

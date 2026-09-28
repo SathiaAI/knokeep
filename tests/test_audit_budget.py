@@ -138,7 +138,10 @@ check(
 
 # --- budgets fail closed with machine reasons (both walks) --------------------
 r = make_store()
-nest(os.path.join(r, "data", "p"), 1100)
+# macOS rejects the snapshot helper's 1100-level absolute paths before audit runs.
+# Eighty levels still exceed the product's 64-level limit without hitting PATH_MAX.
+probe_depth = 80 if sys.platform == "darwin" else 1100
+nest(os.path.join(r, "data", "p"), probe_depth)
 before = snapshot(r)
 try:
     tree = hi._data_tree_safe_for_audit(hi.Path(r) / "data", hi.Path(r).resolve())
@@ -146,7 +149,7 @@ try:
     ok = tree == ["audit_depth_budget_exceeded"] and "audit blocked: audit_depth_budget_exceeded" in reasons(findings)
 except RecursionError:
     ok = False
-check("1100-deep tree: depth budget, no RecursionError", ok)
+check(f"{probe_depth}-deep tree: depth budget, no RecursionError", ok)
 check("depth budget: bytes unchanged", snapshot(r) == before)
 p = bootstrap(r)
 check("bootstrap refuses depth budget", p.returncode != 0 and "audit_depth_budget_exceeded" in p.stderr)

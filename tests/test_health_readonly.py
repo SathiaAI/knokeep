@@ -384,6 +384,121 @@ if hasattr(os, "symlink"):
     except OSError:
         check("symlink tests skipped (privilege)", True)
 
+# --- pass 3 regressions -----------------------------------------------------
+
+malformed_root = tempfile.mkdtemp(prefix="kk_health_malform_")
+b_m = LocalBackend(malformed_root)
+gate.persist(
+    b_m,
+    "mf/system_state",
+    b"---\nrevision: 1\n---\nm\n",
+    ctx=create_ctx(),
+    doc_type="system_state",
+)
+b_m.close()
+ev_d = os.path.join(malformed_root, ".knokeep-eval")
+os.makedirs(ev_d, exist_ok=True)
+with open(os.path.join(ev_d, "events.jsonl"), "w", encoding="utf-8") as f:
+    f.write("[]\n")
+    f.write("null\n")
+    f.write('{"decision":"block","findings":[null]}\n')
+    f.write('{"decision":"block","reasons":7}\n')
+rc, hj, combined = run_health(malformed_root)
+check("malformed telemetry lines: attention", hj.get("verdict") == "attention")
+check(
+    "malformed telemetry: unreadable code",
+    "telemetry:telemetry_unreadable" in hj.get("problems", []),
+)
+check("malformed telemetry: no traceback", "Traceback" not in combined)
+
+dangle_ev_root = tempfile.mkdtemp(prefix="kk_health_dangle_ev_")
+b_de = LocalBackend(dangle_ev_root)
+gate.persist(
+    b_de,
+    "de/system_state",
+    b"---\nrevision: 1\n---\nde\n",
+    ctx=create_ctx(),
+    doc_type="system_state",
+)
+b_de.close()
+ev_d2 = os.path.join(dangle_ev_root, ".knokeep-eval")
+os.makedirs(ev_d2, exist_ok=True)
+if hasattr(os, "symlink"):
+    try:
+        os.symlink(
+            os.path.join(ev_d2, "missing-target-never-created"),
+            os.path.join(ev_d2, "events.jsonl"),
+        )
+        rc, hj, _ = run_health(dangle_ev_root)
+        check(
+            "dangling events symlink: attention",
+            hj.get("verdict") == "attention",
+        )
+        check(
+            "dangling events symlink: telemetry unreadable",
+            "telemetry:telemetry_unreadable" in hj.get("problems", []),
+        )
+    except OSError:
+        check("dangling events symlink skipped", True)
+else:
+    check("dangling events symlink skipped (no symlink)", True)
+
+empty_journal_root = tempfile.mkdtemp(prefix="kk_health_empty_journal_")
+os.makedirs(os.path.join(empty_journal_root, "journal"))
+open(os.path.join(empty_journal_root, "journal", "journal.log"), "wb").close()
+rc, hj, _ = run_health(empty_journal_root)
+check(
+    "empty journal missing data dir: attention",
+    hj.get("verdict") == "attention",
+)
+check(
+    "empty journal missing data: layout reason",
+    "store:data_layout_missing" in hj.get("problems", []),
+)
+
+sys.path.insert(0, os.path.join(ROOT, "tools"))
+import knokeep_audit
+
+with mock.patch.object(
+    knokeep_audit,
+    "audit",
+    return_value={"scanner": "gitleaks:none", "leaks": 0},
+):
+    h_audit = knokeep_state.health(good_root)
+check(
+    "gitleaks none not treated as clean scan",
+    h_audit.get("audit", {}).get("scanner") == "unavailable"
+    and h_audit.get("audit", {}).get("leaks") is None,
+)
+check(
+    "gitleaks none notes unavailable",
+    any("audit_unavailable" in n for n in h_audit.get("notes", [])),
+)
+
+if hasattr(os, "symlink"):
+    try:
+        audit_out = tempfile.mkdtemp(prefix="kk_health_audit_out_")
+        nested_root = tempfile.mkdtemp(prefix="kk_health_audit_nested_")
+        b_n = LocalBackend(nested_root)
+        gate.persist(
+            b_n,
+            "n/system_state",
+            b"---\nrevision: 1\n---\nn\n",
+            ctx=create_ctx(),
+            doc_type="system_state",
+        )
+        b_n.close()
+        trap = os.path.join(nested_root, "data", "n", "trap")
+        os.symlink(audit_out, trap)
+        rc, hj, _ = run_health(nested_root)
+        check(
+            "nested data symlink blocks audit path",
+            rc != 0
+            and any(p.startswith("audit:") for p in hj.get("problems", [])),
+        )
+    except OSError:
+        check("nested audit symlink skipped", True)
+
 # --- redaction --------------------------------------------------------------
 
 secret_key = "sekret/proj/system_state"
@@ -431,6 +546,9 @@ for d in (
     trav_root,
     tele_root,
     inj_root,
+    malformed_root,
+    dangle_ev_root,
+    empty_journal_root,
 ) + tuple(symlink_roots):
     if os.path.exists(d):
         import shutil

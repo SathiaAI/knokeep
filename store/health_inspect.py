@@ -75,7 +75,7 @@ def inspect_local_store(store: str) -> dict:
     size_before: Optional[int] = None
     journal_present = False
     try:
-        journal_present = journal_path.exists() or journal_path.is_symlink()
+        journal_present = os.path.lexists(journal_path)
     except OSError:
         reasons.append("journal_unreadable")
         journal_present = False
@@ -102,6 +102,8 @@ def inspect_local_store(store: str) -> dict:
                 else:
                     if size_before != size_final:
                         indeterminate = True
+        if not reasons:
+            reasons.extend(_check_data_layout(data_dir, root))
     elif not reasons:
         reasons.append("journal_missing")
 
@@ -158,50 +160,149 @@ def read_project_summaries(store: str, *, root: Optional[Path] = None) -> List[d
     return projects
 
 
-def safe_data_dir_for_audit(store: str, *, root: Optional[Path] = None) -> Optional[str]:
-    """Return data directory path for audit only when contained and not a symlink escape."""
+def safe_data_dir_for_audit(
+    store: str, *, root: Optional[Path] = None
+) -> Tuple[Optional[str], List[str]]:
+    """Return data directory for audit when the tree has no symlink/reparse escapes."""
     if root is None:
         root, reasons = resolve_store_root(store)
         if root is None or reasons:
-            return None
+            return None, reasons
     data_dir = root / "data"
-    if not _path_exists(data_dir):
-        return None
-    if os.path.islink(data_dir):
-        return None
-    if not _entry_contained(data_dir, root):
-        return None
-    return str(data_dir)
+    layout_reasons = _check_data_layout(data_dir, root)
+    if layout_reasons:
+        return None, layout_reasons
+    tree_reasons = _data_tree_safe_for_audit(data_dir, root)
+    if tree_reasons:
+        return None, tree_reasons
+    return str(data_dir), []
 
 
 def safe_events_path(store: str, *, root: Optional[Path] = None) -> Optional[Path]:
-    if root is None:
-        root, reasons = resolve_store_root(store)
-        if root is None or reasons:
-            return None
-    ev = root / ".knokeep-eval" / "events.jsonl"
-    if not _path_exists(ev):
+    path, reasons = _telemetry_events_path(store, root=root)
+    if reasons:
         return None
-    if not _is_safe_regular_file(ev, root):
-        return None
-    return ev
+    return path
 
 
-def read_telemetry_bytes(store: str, *, root: Optional[Path] = None) -> Tuple[Optional[bytes], List[str]]:
+def read_telemetry_bytes(
+    store: str, *, root: Optional[Path] = None
+) -> Tuple[Optional[bytes], List[str]]:
     """Read events.jsonl bytes when path is safe; else return reason codes."""
-    ev = safe_events_path(store, root=root)
+    ev, reasons = _telemetry_events_path(store, root=root)
+    if reasons:
+        return None, reasons
     if ev is None:
-        root_res, rs = resolve_store_root(store)
-        if root_res is None:
-            return None, rs
-        candidate = root_res / ".knokeep-eval" / "events.jsonl"
-        if _path_exists(candidate) and not _is_safe_regular_file(candidate, root_res):
-            return None, ["telemetry_unreadable"]
         return None, []
     raw = _read_bounded_regular_file(ev)
     if raw is None:
         return None, ["telemetry_unreadable"]
     return raw, []
+
+
+def _telemetry_events_path(
+    store: str, *, root: Optional[Path] = None
+) -> Tuple[Optional[Path], List[str]]:
+    if root is None:
+        root, reasons = resolve_store_root(store)
+        if root is None or reasons:
+            return None, reasons
+    eval_dir = root / ".knokeep-eval"
+    ev = eval_dir / "events.jsonl"
+    if os.path.lexists(eval_dir):
+        dir_reasons = _check_optional_dir_entry(eval_dir, root)
+        if dir_reasons:
+            return None, dir_reasons
+    if not os.path.lexists(ev):
+        return None, []
+    try:
+        st = os.lstat(ev)
+    except OSError:
+        return None, ["telemetry_unreadable"]
+    if _is_reparse_point(st) or stat.S_ISLNK(st.st_mode):
+        return None, ["telemetry_unreadable"]
+    if not stat.S_ISREG(st.st_mode):
+        return None, ["telemetry_unreadable"]
+    if not _entry_contained(ev, root):
+        return None, ["telemetry_unreadable"]
+    return ev, []
+
+
+def _check_data_layout(data_dir: Path, root: Path) -> List[str]:
+    if not os.path.lexists(data_dir):
+        return ["data_layout_missing"]
+    try:
+        st = os.lstat(data_dir)
+    except OSError:
+        return ["data_unreadable"]
+    if _is_reparse_point(st) or stat.S_ISLNK(st.st_mode):
+        return ["store_symlink_escape"]
+    if not stat.S_ISDIR(st.st_mode):
+        return ["data_layout_missing"]
+    if not _entry_contained(data_dir, root):
+        return ["store_symlink_escape"]
+    return []
+
+
+def _check_optional_dir_entry(path: Path, root: Path) -> List[str]:
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return ["telemetry_unreadable"]
+    if _is_reparse_point(st) or stat.S_ISLNK(st.st_mode):
+        return ["telemetry_unreadable"]
+    if not stat.S_ISDIR(st.st_mode):
+        return ["telemetry_unreadable"]
+    if not _entry_contained(path, root):
+        return ["telemetry_unreadable"]
+    return []
+
+
+def _data_tree_safe_for_audit(data_dir: Path, root: Path) -> List[str]:
+    """Walk data/ without following symlinks; external scanners are not a boundary."""
+    reasons: List[str] = []
+
+    def walk(dirpath: Path) -> None:
+        if reasons:
+            return
+        try:
+            with os.scandir(dirpath) as it:
+                for ent in it:
+                    if reasons:
+                        return
+                    try:
+                        est = ent.stat(follow_symlinks=False)
+                    except OSError:
+                        reasons.append("data_unreadable")
+                        return
+                    if _is_reparse_point(est) or stat.S_ISLNK(est.st_mode):
+                        reasons.append("store_symlink_escape")
+                        return
+                    full = Path(ent.path)
+                    if not _entry_contained(full, root):
+                        reasons.append("store_symlink_escape")
+                        return
+                    if stat.S_ISDIR(est.st_mode):
+                        walk(full)
+                    elif not stat.S_ISREG(est.st_mode):
+                        reasons.append("data_layout_unsafe")
+                        return
+        except OSError:
+            reasons.append("data_unreadable")
+
+    walk(data_dir)
+    return reasons
+
+
+def _is_reparse_point(st: os.stat_result) -> bool:
+    if stat.S_ISLNK(st.st_mode):
+        return True
+    attrs = getattr(st, "st_file_attributes", None)
+    if attrs is not None:
+        flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        if flag and (attrs & flag):
+            return True
+    return False
 
 
 def _parse_frontmatter(text: str) -> dict:

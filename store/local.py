@@ -376,39 +376,59 @@ class LocalBackend:
                 "LocalBackend: staging/ and data/ must be on the same volume"
             )
 
-        # Journal kept open for the life of the adapter ("already open" per
-        # contract §4.1's write-order description) and appended-to under
-        # cas.lock in write().
-        self._journal_fh = open(self._journal_path, "ab")
-
-        # One-time case-insensitivity probe (JUDGMENT CALL #5 above).
-        self._case_insensitive = self._detect_case_insensitive()
-
-        # Resume: replay the journal to re-materialize any key whose
-        # published blob is missing or torn (contract §3). This MUST hold
-        # the same cas.lock write() uses: two LocalBackend instances (e.g.
-        # in different processes) can be constructed concurrently, and
-        # without the lock one process's resume-rebuild of a key can race
-        # another process's in-flight write() to that same key (both doing
-        # an O_EXCL create for the same path at once) — a real race found
-        # by tests/test_local_backend.py's two-process tests, not a
-        # theoretical concern.
-        resume_lock = _FileLock(self._cas_lock_path)
-        if not resume_lock.acquire(self._lock_timeout_s):
-            raise RuntimeError(
-                "LocalBackend: could not acquire cas.lock to resume/scavenge on startup"
+        if not self._journal_path.is_file() and self._data_dir_has_published_files():
+            raise BackendCorruptionError(
+                "journal.log is missing but data/ contains published blobs; "
+                "the journal is the durability source of truth and is not recreated"
             )
+
+        self._journal_fh = None
         try:
-            self._resume()
-            # Startup scavenger: remove staging temps older than TTL, left
-            # behind by a process that crashed between mkstemp and the
-            # final os.replace/unlink (contract §3/§4.1). Guarded by the
-            # same lock so it never races a concurrent publish's mkstemp.
-            self._scavenge_staging()
-        finally:
-            resume_lock.release()
+            # Journal kept open for the life of the adapter ("already open" per
+            # contract §4.1's write-order description) and appended-to under
+            # cas.lock in write(). "ab" creates journal.log only for a genuinely
+            # new empty store (no published blobs under data/).
+            self._journal_fh = open(self._journal_path, "ab")
+
+            # One-time case-insensitivity probe (JUDGMENT CALL #5 above).
+            self._case_insensitive = self._detect_case_insensitive()
+
+            # Resume: replay the journal to re-materialize any key whose
+            # published blob is missing or torn (contract §3). This MUST hold
+            # the same cas.lock write() uses: two LocalBackend instances (e.g.
+            # in different processes) can be constructed concurrently, and
+            # without the lock one process's resume-rebuild of a key can race
+            # another process's in-flight write() to that same key (both doing
+            # an O_EXCL create for the same path at once) — a real race found
+            # by tests/test_local_backend.py's two-process tests, not a
+            # theoretical concern.
+            resume_lock = _FileLock(self._cas_lock_path)
+            if not resume_lock.acquire(self._lock_timeout_s):
+                raise RuntimeError(
+                    "LocalBackend: could not acquire cas.lock to resume/scavenge on startup"
+                )
+            try:
+                self._resume()
+                # Startup scavenger: remove staging temps older than TTL, left
+                # behind by a process that crashed between mkstemp and the
+                # final os.replace/unlink (contract §3/§4.1). Guarded by the
+                # same lock so it never races a concurrent publish's mkstemp.
+                self._scavenge_staging()
+            finally:
+                resume_lock.release()
+        except Exception:
+            self.close()
+            raise
 
     # -- construction helpers -------------------------------------------------
+
+    def _data_dir_has_published_files(self) -> bool:
+        if not self._data_dir.exists():
+            return False
+        for path in self._data_dir.rglob("*"):
+            if path.is_file():
+                return True
+        return False
 
     def _detect_case_insensitive(self) -> bool:
         name = "case-probe-" + secrets.token_hex(8)
@@ -569,12 +589,16 @@ class LocalBackend:
         the last valid record) and "size" (file size seen at open), so a
         caller can tell a clean EOF from a scan that stopped on unparsable
         bytes (see `_recover_key_before_decision`)."""
+        if not self._journal_path.is_file():
+            raise BackendCorruptionError(
+                "journal.log is missing; published data/ cannot be treated as authoritative"
+            )
         try:
             f = open(self._journal_path, "rb")
         except FileNotFoundError:
-            if _scan_state is not None:
-                _scan_state["end"] = _scan_state["size"] = 0
-            return
+            raise BackendCorruptionError(
+                "journal.log is missing; published data/ cannot be treated as authoritative"
+            ) from None
         with f:
             # Callers hold cas.lock. Treat on-disk framing as untrusted:
             # never pass a claimed length larger than the remaining file to
@@ -753,6 +777,10 @@ class LocalBackend:
     # -- journal + publish (contract §3/§4.1 write order) -------------------
 
     def _journal_append(self, key: str, raw: bytes, last_accepted_fence: int = 0) -> None:
+        if not self._journal_path.is_file():
+            raise BackendCorruptionError(
+                "journal.log is missing; cannot append a durability commit"
+            )
         # H1 Increment 2, Phase 1: `last_accepted_fence` defaults to 0 so
         # every pre-Phase-1 call site (tests/test_local_backend.py's crash-
         # simulation tests reach into this private method directly, per its
@@ -960,6 +988,8 @@ class LocalBackend:
         try:
             self._recover_key_before_decision(k, rel_path, data_path, for_write=True)
         except _RecoveryIncomplete:
+            return ERROR(ErrorKind.CORRUPTION)
+        except BackendCorruptionError:
             return ERROR(ErrorKind.CORRUPTION)
         except PermissionError:
             return ERROR(ErrorKind.PERMISSION)
@@ -1330,8 +1360,12 @@ class LocalBackend:
     # -- test/ops convenience (not part of StoreBackend protocol) ----------
 
     def close(self) -> None:
+        fh = self._journal_fh
+        if fh is None:
+            return
+        self._journal_fh = None
         with contextlib.suppress(Exception):
-            self._journal_fh.close()
+            fh.close()
 
 
 __all__ = ["LocalBackend", "BackendCorruptionError"]

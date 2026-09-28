@@ -21,7 +21,14 @@
 PATH="$HOME/.local/bin:$PATH" python3 -m pytest tests/test_local_backend.py -q
 ```
 
-48 passed, 4 skipped (Windows-only), including subprocess crash regressions and the opaque-suffix startup guard.
+52 passed, 4 skipped (Windows-only), including journal-presence guards and subprocess crash regressions.
+
+## Journal presence
+
+- **Missing `journal.log` with nonempty `data/`:** construction raises `BackendCorruptionError`; the journal file is not created and `data/` bytes are untouched.
+- **Genuinely new store:** empty `data/` still creates `journal.log` on first open.
+- **Runtime journal deletion:** `read`/`list`/`write` recovery refuse; `data/` alone is never authoritative.
+- **Constructor failure after opening the journal:** `close()` runs so handles (notably on Windows) are not leaked.
 
 ## Limits
 

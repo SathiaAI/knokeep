@@ -1436,3 +1436,69 @@ def test_startup_opaque_suffix_preserves_bytes_and_fails_read(tmp_path):
         assert _data_path(root, key).read_bytes() == data_before
     finally:
         fresh.close()
+
+
+def test_missing_journal_with_nonempty_data_fails_without_creating_log(tmp_path):
+    root = tmp_path / "store-root"
+    root.mkdir()
+    (root / "data" / "orphan").mkdir(parents=True)
+    (root / "data" / "orphan" / "blob").write_bytes(b"published-without-journal")
+    journal = root / "journal" / "journal.log"
+    assert not journal.exists()
+
+    with pytest.raises(BackendCorruptionError, match="journal.log is missing"):
+        LocalBackend(root)
+
+    assert not journal.exists()
+    assert (root / "data" / "orphan" / "blob").read_bytes() == b"published-without-journal"
+
+
+def test_genuinely_empty_store_still_creates_journal(tmp_path):
+    root = tmp_path / "store-root"
+    backend = LocalBackend(root)
+    try:
+        assert (root / "journal" / "journal.log").is_file()
+        r = gate.persist(backend, "new/k", b"first", ctx=create_ctx(), doc_type="system_state")
+        assert isinstance(r, OK)
+        assert backend.read("new/k").body == b"first"
+    finally:
+        backend.close()
+
+
+def test_runtime_journal_deletion_fails_read_and_list(tmp_path):
+    root = tmp_path / "store-root"
+    key = "live/k"
+    backend = LocalBackend(root)
+    try:
+        r = gate.persist(backend, key, b"authoritative", ctx=create_ctx(), doc_type="system_state")
+        assert isinstance(r, OK)
+        journal = root / "journal" / "journal.log"
+        data_bytes = _data_path(root, key).read_bytes()
+        journal.unlink()
+        assert not journal.exists()
+        assert _data_path(root, key).read_bytes() == data_bytes
+        with pytest.raises(BackendCorruptionError, match="journal.log is missing"):
+            backend.read(key)
+        with pytest.raises(BackendCorruptionError, match="journal.log is missing"):
+            list(backend.list(""))
+    finally:
+        backend.close()
+
+    with pytest.raises(BackendCorruptionError, match="journal.log is missing"):
+        LocalBackend(root)
+
+
+def test_constructor_closes_journal_handle_when_resume_fails(tmp_path, monkeypatch):
+    root = tmp_path / "store-root"
+    LocalBackend(root).close()
+
+    def _boom(self):
+        raise RuntimeError("resume failed for test")
+
+    monkeypatch.setattr(LocalBackend, "_resume", _boom)
+    with pytest.raises(RuntimeError, match="resume failed"):
+        LocalBackend(root)
+    monkeypatch.undo()
+
+    again = LocalBackend(root)
+    again.close()

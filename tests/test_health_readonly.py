@@ -3,21 +3,23 @@
 import hashlib
 import json
 import os
-import stat
 import struct
 import subprocess
 import sys
 import tempfile
 import time
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE = os.path.join(ROOT, "skill", "knokeep_state.py")
 sys.path.insert(0, ROOT)
 
 from store import gate
+from store import health_inspect as hi
 from store.local import LocalBackend
-from store.types import sha256_hex, OK
+from store.types import OK
 from tests.ctx_helpers import create_ctx
+import skill.knokeep_state as knokeep_state
 
 results = []
 
@@ -186,26 +188,201 @@ check("store:store_missing in problems", "store:store_missing" in hj.get("proble
 check("missing path not created", not os.path.exists(missing) and not before_exists)
 check("missing parent unchanged", assert_unchanged(missing_parent, snap_before, snap_after))
 
-# --- unreadable store (injected permission error) ---------------------------
+# --- data without journal (unverified) --------------------------------------
 
-if os.name != "nt":
-    unread_root = tempfile.mkdtemp(prefix="kk_health_unread_")
-    os.makedirs(os.path.join(unread_root, "journal"))
-    with open(os.path.join(unread_root, "journal", "journal.log"), "wb") as f:
-        f.write(b"")
-    os.chmod(unread_root, 0)
+data_only_root = tempfile.mkdtemp(prefix="kk_health_data_only_")
+os.makedirs(os.path.join(data_only_root, "data", "orphan"))
+with open(os.path.join(data_only_root, "data", "orphan", "system_state"), "wb") as f:
+    f.write(b"---\nrevision: 1\n---\norphan\n")
+rc, hj, _ = run_health(data_only_root)
+check(
+    "data without journal: attention",
+    rc != 0 and hj.get("verdict") == "attention",
+)
+check(
+    "data without journal: journal_missing",
+    "store:journal_missing" in hj.get("problems", []),
+)
+check(
+    "data without journal: store not ok",
+    hj.get("store", {}).get("ok") is False,
+)
+
+# --- journal changed during inspection (deterministic probe) ------------------
+
+race_root = tempfile.mkdtemp(prefix="kk_health_race_")
+b_race = LocalBackend(race_root)
+gate.persist(
+    b_race,
+    "race/system_state",
+    b"---\nrevision: 1\n---\nrace\n",
+    ctx=create_ctx(),
+    doc_type="system_state",
+)
+b_race.close()
+real_inspect = hi._inspect_journal
+
+
+def _race_inspect(journal_path):
+    reasons, latest = real_inspect(journal_path)
+    with open(journal_path, "ab") as fh:
+        fh.write(b"x")
+    return reasons, latest
+
+
+with mock.patch.object(hi, "_inspect_journal", side_effect=_race_inspect):
+    raced = hi.inspect_local_store(race_root)
+check("race probe: indeterminate", raced.get("indeterminate") is True)
+check("race probe: not ok", raced.get("ok") is False)
+check(
+    "race probe: inspect_indeterminate reason",
+    "inspect_indeterminate" in (raced.get("reasons") or []),
+)
+rc_race, hj_race, _ = run_health(race_root)
+check("race probe health: attention", hj_race.get("verdict") == "attention")
+
+# --- indeterminate forces attention even if inspect reports ok:true -----------
+
+with mock.patch.object(
+    knokeep_state,
+    "inspect_local_store",
+    return_value={"ok": True, "reasons": [], "indeterminate": True},
+):
+    h_ind = knokeep_state.health(good_root)
+check(
+    "indeterminate alone forces attention",
+    h_ind.get("verdict") == "attention",
+)
+check(
+    "indeterminate maps to store problem",
+    "store:inspect_indeterminate" in h_ind.get("problems", []),
+)
+
+# --- journal key traversal rejected without traceback -------------------------
+
+trav_root = tempfile.mkdtemp(prefix="kk_health_trav_")
+os.makedirs(os.path.join(trav_root, "journal"))
+bad_key = "../../outside"
+bk = bad_key.encode("utf-8")
+payload = b"escape"
+digest = hashlib.sha256(payload).digest()
+with open(os.path.join(trav_root, "journal", "journal.log"), "wb") as f:
+    f.write(
+        b"KKJ2"
+        + struct.pack(">I", len(bk))
+        + bk
+        + struct.pack(">Q", len(payload))
+        + payload
+        + digest
+        + struct.pack(">Q", 0)
+    )
+rc, hj, combined = run_health(trav_root)
+check("traversal key: structured health", rc != 0 and hj.get("verdict") == "attention")
+check(
+    "traversal key: journal_bad_key",
+    "store:journal_bad_key" in hj.get("problems", []),
+)
+check("traversal key: no traceback", "Traceback" not in combined)
+
+# --- corrupt telemetry on otherwise valid store -----------------------------
+
+tele_root = tempfile.mkdtemp(prefix="kk_health_tele_")
+b6 = LocalBackend(tele_root)
+gate.persist(
+    b6,
+    "t/system_state",
+    b"---\nrevision: 1\n---\nt\n",
+    ctx=create_ctx(),
+    doc_type="system_state",
+)
+b6.close()
+ev_dir = os.path.join(tele_root, ".knokeep-eval")
+os.makedirs(ev_dir, exist_ok=True)
+with open(os.path.join(ev_dir, "events.jsonl"), "wb") as f:
+    f.write(b"\xff")
+rc, hj, combined = run_health(tele_root)
+check("corrupt telemetry: attention", hj.get("verdict") == "attention")
+check(
+    "corrupt telemetry: reason code",
+    "telemetry:telemetry_unreadable" in hj.get("problems", []),
+)
+check("corrupt telemetry: no traceback", "Traceback" not in combined)
+
+# --- injected journal unreadable (no chmod) -----------------------------------
+
+inj_root = tempfile.mkdtemp(prefix="kk_health_inj_")
+b7 = LocalBackend(inj_root)
+gate.persist(
+    b7,
+    "i/system_state",
+    b"---\nrevision: 1\n---\ni\n",
+    ctx=create_ctx(),
+    doc_type="system_state",
+)
+b7.close()
+journal_file = os.path.join(inj_root, "journal", "journal.log")
+_real_open = open
+
+
+def _deny_journal_open(path, *args, **kwargs):
+    if str(path).endswith("journal.log"):
+        raise PermissionError(13, "injected")
+    return _real_open(path, *args, **kwargs)
+
+
+with mock.patch("builtins.open", side_effect=_deny_journal_open):
+    inj = hi.inspect_local_store(inj_root)
+check(
+    "injected permission: journal unreadable",
+    inj.get("ok") is False and "journal_unreadable" in (inj.get("reasons") or []),
+)
+
+# --- symlink escape via published system_state (Linux) ------------------------
+
+symlink_roots = []
+if hasattr(os, "symlink"):
     try:
-        rc, hj, _ = run_health(unread_root)
+        outside = tempfile.mkdtemp(prefix="kk_health_outside_")
+        symlink_roots.append(outside)
+        secret = os.path.join(outside, "secret.txt")
+        with open(secret, "w", encoding="utf-8") as f:
+            f.write("outside-bytes")
+        sym_root = tempfile.mkdtemp(prefix="kk_health_sym_")
+        symlink_roots.append(sym_root)
+        b8 = LocalBackend(sym_root)
+        body_sym = b"---\nrevision: 1\n---\nfrom-journal\n"
+        gate.persist(
+            b8,
+            "sym/system_state",
+            body_sym,
+            ctx=create_ctx(),
+            doc_type="system_state",
+        )
+        b8.close()
+        sym_state = os.path.join(sym_root, "data", "sym", "system_state")
+        os.remove(sym_state)
+        os.symlink(secret, sym_state)
+        rc, hj, _ = run_health(sym_root)
         check(
-            "unreadable store flagged",
+            "symlink published blob flagged",
             rc != 0
             and (
-                "store:store_unreadable" in hj.get("problems", [])
-                or "store:journal_unreadable" in hj.get("problems", [])
+                "store:store_symlink_escape" in hj.get("problems", [])
+                or "store:data_unpublished" in hj.get("problems", [])
             ),
         )
-    finally:
-        os.chmod(unread_root, stat.S_IRWXU)
+        link_parent = tempfile.mkdtemp(prefix="kk_health_rootlink_")
+        symlink_roots.append(link_parent)
+        link_path = os.path.join(link_parent, "linked-root")
+        os.symlink(sym_root, link_path)
+        linked = hi.inspect_local_store(link_path)
+        check(
+            "symlink store root rejected",
+            linked.get("ok") is False
+            and "store_symlink_escape" in (linked.get("reasons") or []),
+        )
+    except OSError:
+        check("symlink tests skipped (privilege)", True)
 
 # --- redaction --------------------------------------------------------------
 
@@ -249,15 +426,16 @@ for d in (
     missing_parent,
     redact_root,
     mut_root,
-):
+    data_only_root,
+    race_root,
+    trav_root,
+    tele_root,
+    inj_root,
+) + tuple(symlink_roots):
     if os.path.exists(d):
         import shutil
 
         shutil.rmtree(d, ignore_errors=True)
-if os.name != "nt":
-    import shutil
-
-    shutil.rmtree(unread_root, ignore_errors=True)
 
 passed = sum(1 for _, c in results if c)
 print(f"\n{passed}/{len(results)} passed")

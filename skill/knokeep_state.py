@@ -21,7 +21,14 @@ _ROOT = os.path.dirname(_HERE)
 sys.path.insert(0, _ROOT)   # store package (parent) — the shared V2 engine
 from store import gate
 from store.local import LocalBackend
-from store.health_inspect import inspect_local_store, read_project_summaries
+from store.health_inspect import (
+    inspect_local_store,
+    read_project_summaries,
+    store_aux_reads_allowed,
+    safe_data_dir_for_audit,
+    read_telemetry_bytes,
+    resolve_store_root,
+)
 from store.backend import BackendBusyError
 from store.types import OK, STALE, EXISTS, ERROR, ErrorKind
 from store.config import default_store_root
@@ -864,43 +871,136 @@ def evaluate(store):
     }
     return sc
 
+def _scorecard_from_events_raw(raw: bytes):
+    """Parse telemetry bytes into the Layer-3 scorecard (health-only safe reader)."""
+    rows = []
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None, ["telemetry_unreadable"]
+    for ln in text.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            rows.append(json.loads(ln))
+        except Exception:
+            return None, ["telemetry_unreadable"]
+    def _has(r, label):
+        rs = r.get("reasons") or []
+        fs = [f.get("reason", "") for f in (r.get("findings") or [])]
+        return any(label in str(x) for x in rs + fs) or label in str(r.get("reason", ""))
+    allow = [r for r in rows if r.get("decision") == "allow"]
+    block = [r for r in rows if r.get("decision") == "block"]
+    error = [r for r in rows if r.get("decision") == "error"]
+    boot = [r for r in rows if r.get("op") == "bootstrap"]
+    park = [r for r in rows if r.get("op") == "park"]
+    sc = {
+        "events": len(rows),
+        "writes_allowed": len(allow),
+        "blocks_total": len(block),
+        "parks_total": len(park),
+        "whole_doc_parks": sum(1 for r in park if r.get("scope") == "whole_doc"),
+        "section_parks": sum(1 for r in park if r.get("scope") == "section"),
+        "secret_blocks": sum(1 for r in block if _has(r, "key") or _has(r, "secret")
+                             or _has(r, "token") or _has(r, "private key") or _has(r, "URI")),
+        "concurrency_blocks": sum(1 for r in block if _has(r, "stale") or _has(r, "lock_timeout")
+                                  or _has(r, "BUSY") or _has(r, "conflict")),
+        "bootstrap_refusals": sum(1 for r in boot if r.get("decision") == "block"),
+        "clean_resumes": sum(1 for r in boot if r.get("decision") == "allow"),
+        "errors": len(error),
+        "note": "leaks past the gate are NOT measurable here - run the Layer-2 audit scan",
+    }
+    return sc, []
+
+def _empty_scorecard():
+    return {
+        "events": 0,
+        "writes_allowed": 0,
+        "blocks_total": 0,
+        "parks_total": 0,
+        "whole_doc_parks": 0,
+        "section_parks": 0,
+        "secret_blocks": 0,
+        "concurrency_blocks": 0,
+        "bootstrap_refusals": 0,
+        "clean_resumes": 0,
+        "errors": 0,
+        "note": "leaks past the gate are NOT measurable here - run the Layer-2 audit scan",
+    }
+
 def health(store, window_hours=24):
     """One-shot health verdict: scorecard + independent audit + per-project freshness.
     Verdict reflects RECENT activity (default 24h): 'attention' (exit 1) if the gate
     errored in the window or a leak is present now; else 'healthy'. Missing gitleaks is a note."""
     store_check = inspect_local_store(store)
-    sc = evaluate(store)
+    root, _root_reasons = resolve_store_root(store)
+    aux_ok = store_aux_reads_allowed(store_check)
+    telemetry_problems = []
+    sc = _empty_scorecard()
     recent_errors = 0
-    ev = os.path.join(os.path.realpath(store), EVENTS_DIR, "events.jsonl")
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=window_hours)
-    if os.path.exists(ev):
-        for ln in open(ev, encoding="utf-8"):
-            ln = ln.strip()
-            if not ln:
-                continue
-            try:
-                r = json.loads(ln)
-                if r.get("decision") == "error":
-                    ts = datetime.datetime.strptime(r.get("ts", ""), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
-                    if ts >= cutoff:
-                        recent_errors += 1
-            except Exception:
-                pass
+    if aux_ok:
+        raw, t_reasons = read_telemetry_bytes(store, root=root)
+        telemetry_problems.extend(t_reasons)
+        if raw is not None and not t_reasons:
+            parsed, parse_reasons = _scorecard_from_events_raw(raw)
+            telemetry_problems.extend(parse_reasons)
+            if parsed is not None:
+                sc = parsed
+                try:
+                    text = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    telemetry_problems.append("telemetry_unreadable")
+                else:
+                    for ln in text.splitlines():
+                        ln = ln.strip()
+                        if not ln:
+                            continue
+                        try:
+                            r = json.loads(ln)
+                            if r.get("decision") == "error":
+                                ts = datetime.datetime.strptime(
+                                    r.get("ts", ""), "%Y-%m-%dT%H:%M:%SZ"
+                                ).replace(tzinfo=datetime.timezone.utc)
+                                if ts >= cutoff:
+                                    recent_errors += 1
+                        except Exception:
+                            telemetry_problems.append("telemetry_unreadable")
+                            break
+    elif root is not None:
+        raw, t_reasons = read_telemetry_bytes(store, root=root)
+        if t_reasons:
+            telemetry_problems.extend(t_reasons)
+        elif raw is not None:
+            _, parse_reasons = _scorecard_from_events_raw(raw)
+            telemetry_problems.extend(parse_reasons)
+
     leaks = None; scanner = "unavailable"
-    try:                                                    # Layer-2 audit, best-effort; scan the published blobs only
-        sys.path.insert(0, os.path.join(_ROOT, "tools"))
-        import knokeep_audit
-        a = knokeep_audit.audit(_data_dir(store))
-        leaks = a.get("leaks"); scanner = a.get("scanner")
-    except Exception:
-        pass
-    projects = read_project_summaries(store) if store_check.get("ok") else []
+    if aux_ok:
+        try:
+            sys.path.insert(0, os.path.join(_ROOT, "tools"))
+            import knokeep_audit
+            audit_dir = safe_data_dir_for_audit(store, root=root)
+            if audit_dir:
+                a = knokeep_audit.audit(audit_dir)
+                leaks = a.get("leaks"); scanner = a.get("scanner")
+        except Exception:
+            pass
+    projects = read_project_summaries(store, root=root) if aux_ok else []
     problems, notes = [], []
-    if not store_check.get("ok"):
-        for code in store_check.get("reasons") or []:
-            problems.append("store:" + code)
+    for code in store_check.get("reasons") or []:
+        problems.append("store:" + code)
+    if store_check.get("indeterminate") and not any(
+        p == "store:inspect_indeterminate" for p in problems
+    ):
+        problems.append("store:inspect_indeterminate")
+    for code in telemetry_problems:
+        problems.append("telemetry:" + code)
     if store_check.get("indeterminate"):
-        notes.append("store_inspect_indeterminate (journal changed during read)")
+        notes.append(
+            "store_inspect_indeterminate (journal changed during read; not a linearizability guarantee)"
+        )
     if recent_errors > 0: problems.append("errors_last_%dh=%d" % (window_hours, recent_errors))
     if leaks: problems.append("leaks>0")
     if sc.get("errors", 0) > 0 and recent_errors == 0:

@@ -4,36 +4,46 @@
 
 Verified: `fc744c7c8d44e679582ed8ece8df49214985e53b` on `fix/cursor-health-readonly-a1`.
 
-## Reproduction (before fix)
+## Round 1 (232c81f / b808d73)
 
-Synthetic store with one good KKJ2 record plus a trailing frame declaring `UINT64_MAX` body length:
+Initial read-only inspector and CI wiring. Codex review on `b808d73` found five contract gaps (see below).
 
-- `LocalBackend(...)` → `OverflowError`
-- `python skill/knokeep_state.py health --store <store>` → exit 0, `"verdict": "healthy"` (backend failure swallowed in project enumeration)
+## Codex failures on b808d73 (before this round)
 
-## Change summary
+| # | Issue | Before |
+|---|--------|--------|
+| 1 | Root with `data/` but no journal | `inspect ok:true`, health healthy |
+| 2 | Journal appended during `_inspect_journal` | `indeterminate:true` but `ok:true`, health could stay healthy |
+| 3 | `inspect_local_store` patched to `{ok:true, indeterminate:true}` | health healthy (note only) |
+| 4 | Journal key `../../outside` | `ValueError` traceback from `_safe_join` |
+| 5 | `.knokeep-eval/events.jsonl` containing `\xff` | `UnicodeDecodeError` in `evaluate()`, no JSON verdict |
 
-- Added `store/health_inspect.py`: read-only journal framing/digest walk with bounded body lengths, published-blob consistency checks, symlink containment, and machine-readable `reasons` (no keys, bodies, or absolute paths in diagnostics).
-- `health()` in `skill/knokeep_state.py` runs inspection first; store problems become `store:<reason>` entries in `problems`, nonzero exit via existing `attention` verdict. Project metadata uses `read_project_summaries()` instead of `LocalBackend`.
-- Added `tests/test_health_readonly.py` and wired it into CI `SKILL_TESTS`.
+Static review also noted: project `system_state` symlink reads, broken root-symlink check, audit/telemetry running on unsafe layout, chmod-based unreadable test, unbounded body retention in inspector.
 
-## Tests run
+## Round 2 change summary
+
+- **Journal missing:** always `journal_missing` when `journal.log` absent (including data-only roots); `ok:false`.
+- **Indeterminate:** `inspect_indeterminate` reason; `ok:false`; final journal size observed after published checks; health always adds `store:inspect_indeterminate` to `problems` (even if inspect reports `ok:true`).
+- **Keys/paths:** gate `_valid_key_shape` before path joins; `_safe_join` failures → `store_symlink_escape` / `journal_bad_key`; no tracebacks.
+- **Telemetry:** health uses safe bounded reads via `read_telemetry_bytes` / `_scorecard_from_events_raw`; corrupt UTF-8/JSON → `telemetry:telemetry_unreadable`.
+- **Containment:** reject symlink store roots; `_is_safe_regular_file` for journal, data blobs, telemetry; skip audit/projects/scorecard when `store_aux_reads_allowed` is false; journal stores expected hashes only.
+- **Tests:** regressions for all five Codex cases, injected `open` permission error (replaces chmod), Linux symlink cases with skip on `OSError`.
+
+## Tests run (this round)
 
 | Command | Exit |
 |---------|------|
-| `python3 tests/test_health_readonly.py` | 0 (19/19) |
+| `python3 tests/test_health_readonly.py` | 0 (36/36) |
 | `python3 tests/test_eval.py` | 0 (10/10) |
-
-Initial failure during development: unreadable-store case raised uncaught `PermissionError` from `Path.exists()`; fixed by catching `OSError` on path probes.
 
 ## Commit
 
-`232c81f` on `fix/cursor-health-readonly-a1` (pushed).
+(See latest push on `fix/cursor-health-readonly-a1`.)
 
 ## Residual limits
 
-- Health still reports Layer-2 audit as unavailable when gitleaks is missing (disclosed in `notes`; not a secret-free guarantee).
-- Concurrent journal growth during inspection sets `indeterminate` note; verdict still fails closed if any reason is found.
-- Project listing reads published `data/<project>/system_state` files only (not keys absent from disk).
-- Inspector targets LocalBackend on-disk layout only (no Postgres/S3 health).
-- `store/local.py` frame-length hardening remains out of scope for this branch (separate Codex work).
+- Layer-2 audit still optional when gitleaks is missing (disclosed in `notes`).
+- Journal change detection uses file size before/after the inspection pass (documented: not a linearizability guarantee).
+- Inspector targets LocalBackend on-disk layout only.
+- `evaluate()` CLI behavior unchanged for malformed telemetry; only `health` fails closed.
+- `store/local.py` journal hardening remains separate Codex work.

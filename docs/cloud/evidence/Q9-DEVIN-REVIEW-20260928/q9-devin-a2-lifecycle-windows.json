@@ -1,0 +1,48 @@
+{
+  "platform": "win32",
+  "cases": [
+    {
+      "case": "fsynced-writer-process-crash-export",
+      "passed": true,
+      "code": "EXPORT_INCOMPLETE_HUMAN_DECISION_REQUIRED",
+      "child_exit": 73
+    },
+    {
+      "case": "writer-crash-source-byte-preservation",
+      "passed": true
+    },
+    {
+      "case": "injected-partial-append-process-exit",
+      "passed": true,
+      "code": "EXPORT_INCOMPLETE_HUMAN_DECISION_REQUIRED",
+      "child_exit": 73,
+      "limitation": "Fault-injected partial append, not a randomized OS kill or power-loss test"
+    },
+    {
+      "case": "partial-append-source-byte-preservation",
+      "passed": true
+    },
+    {
+      "case": "exporter-process-crash-incomplete-rejected",
+      "passed": true,
+      "code": "REJECT_INCOMPLETE_OR_ALTERED",
+      "child_exit": 73
+    },
+    {
+      "case": "retry-preserves-original-incomplete-attempt",
+      "passed": true
+    },
+    {
+      "case": "second-export-refuses-existing-final",
+      "passed": true
+    },
+    {
+      "case": "exporter-crash-and-retries-source-byte-preservation",
+      "passed": true
+    }
+  ],
+  "passed": 8,
+  "total": 8,
+  "service_restored": false,
+  "limits": "Synthetic stores only; actual process exits, not power loss or hostile concurrent filesystem."
+}

@@ -1,0 +1,52 @@
+test_busy_lock_refused (test_export.RecoveryExportTests.test_busy_lock_refused) ... ok
+test_case_fold_collision (test_export.RecoveryExportTests.test_case_fold_collision) ... ok
+test_clean_parse_still_not_complete (test_export.RecoveryExportTests.test_clean_parse_still_not_complete) ... ok
+test_coherent_rollback_still_unproven (test_export.RecoveryExportTests.test_coherent_rollback_still_unproven) ... ok
+test_deep_empty_directories_refused (test_export.RecoveryExportTests.test_deep_empty_directories_refused) ... ok
+test_directory_symlink_refused (test_export.RecoveryExportTests.test_directory_symlink_refused) ... ok
+test_empty_journal_export_verifies (test_export.RecoveryExportTests.test_empty_journal_export_verifies) ... ok
+test_interrupted_attempt_retained (test_export.RecoveryExportTests.test_interrupted_attempt_retained) ... ok
+test_invalid_keys_not_materialized (test_export.RecoveryExportTests.test_invalid_keys_not_materialized) ... ok
+test_output_overlap_refused (test_export.RecoveryExportTests.test_output_overlap_refused) ... ok
+test_partial_legacy_v2_tail (test_export.RecoveryExportTests.test_partial_legacy_v2_tail) ... ok
+test_product_parser_used_via_unbound_iter (test_export.RecoveryExportTests.test_product_parser_used_via_unbound_iter) ... ok
+test_repeated_key_materializes_latest_only (test_export.RecoveryExportTests.test_repeated_key_materializes_latest_only) ... ok
+test_source_unchanged_after_export (test_export.RecoveryExportTests.test_source_unchanged_after_export) ... ok
+test_verify_rejects_archive_tamper (test_export.RecoveryExportTests.test_verify_rejects_archive_tamper) ... ok
+test_verify_rejects_manifest_skip_list_tamper (test_export.RecoveryExportTests.test_verify_rejects_manifest_skip_list_tamper) ... ok
+test_candidate_bytes_use_retained_body_budget (test_export_review.BudgetConsistencyTests.test_candidate_bytes_use_retained_body_budget) ... ok
+test_candidate_over_depth_refused_by_export (test_export_review.BudgetConsistencyTests.test_candidate_over_depth_refused_by_export) ... ok
+test_candidate_over_entry_budget_refused_by_export (test_export_review.BudgetConsistencyTests.test_candidate_over_entry_budget_refused_by_export) ... ok
+test_export_at_entry_limit_verifies (test_export_review.BudgetConsistencyTests.test_export_at_entry_limit_verifies) ... ok
+test_absolute_path_manifest_rejected (test_export_review.DurabilityManifestTests.test_absolute_path_manifest_rejected) ... ok
+test_intermediate_parents_fsynced_and_paths_relative (test_export_review.DurabilityManifestTests.test_intermediate_parents_fsynced_and_paths_relative) ... skipped 'POSIX directory fsync specific; Windows covered by unsupported test'
+test_directory_fsync_failure_is_not_success (test_export_review.ExportFailureTests.test_directory_fsync_failure_is_not_success) ... ok
+test_output_parent_fsync_failure_after_rename_unconfirmed (test_export_review.ExportFailureTests.test_output_parent_fsync_failure_after_rename_unconfirmed) ... ok
+test_partial_write_failure_refuses (test_export_review.ExportFailureTests.test_partial_write_failure_refuses) ... ok
+test_source_change_during_copy_refused_and_attempt_kept (test_export_review.ExportFailureTests.test_source_change_during_copy_refused_and_attempt_kept) ... ok
+test_windows_directory_durability_is_unsupported_not_ok (test_export_review.ExportFailureTests.test_windows_directory_durability_is_unsupported_not_ok) ... ok
+test_actual_bytes_counted_not_st_size (test_export_review.InventoryBudgetTests.test_actual_bytes_counted_not_st_size) ... ok
+test_entry_budget_counts_while_scanning (test_export_review.InventoryBudgetTests.test_entry_budget_counts_while_scanning) ... ok
+test_retained_history_body_cap (test_export_review.InventoryBudgetTests.test_retained_history_body_cap) ... ok
+test_lone_surrogate_path_fails_closed (test_export_review.MalformedManifestTests.test_lone_surrogate_path_fails_closed) ... ok
+test_malformed_encodings_fail_closed (test_export_review.MalformedManifestTests.test_malformed_encodings_fail_closed) ... ok
+test_unknown_nested_field_and_bad_nested_types (test_export_review.MalformedManifestTests.test_unknown_nested_field_and_bad_nested_types) ... ok
+test_archive_symlink_rejected_before_reading_target (test_export_review.VerifierTests.test_archive_symlink_rejected_before_reading_target) ... ok
+test_candidate_dir_symlink_and_hardlink_rejected (test_export_review.VerifierTests.test_candidate_dir_symlink_and_hardlink_rejected) ... ok
+test_consistent_hash_does_not_suppress_derivable_corruption (test_export_review.VerifierTests.test_consistent_hash_does_not_suppress_derivable_corruption) ... ok
+test_extra_root_entry_and_candidate_extra (test_export_review.VerifierTests.test_extra_root_entry_and_candidate_extra) ... ok
+test_incomplete_attempt_root_rejected_even_with_manifest (test_export_review.VerifierTests.test_incomplete_attempt_root_rejected_even_with_manifest) ... ok
+test_io_error_during_verify_refuses (test_export_review.VerifierTests.test_io_error_during_verify_refuses) ... ok
+test_malformed_field_types_refuse_without_exception (test_export_review.VerifierTests.test_malformed_field_types_refuse_without_exception) ... ok
+test_manifest_traversal_rejected_before_reading (test_export_review.VerifierTests.test_manifest_traversal_rejected_before_reading) ... ok
+test_missing_and_extra_files (test_export_review.VerifierTests.test_missing_and_extra_files) ... ok
+test_non_object_and_oversized_manifest (test_export_review.VerifierTests.test_non_object_and_oversized_manifest) ... ok
+test_verify_entry_and_byte_budgets (test_export_review.VerifierTests.test_verify_entry_and_byte_budgets) ... ok
+test_verify_ok_is_not_authentication (test_export_review.VerifierTests.test_verify_ok_is_not_authentication) ... ok
+test_source_hardlink_refused_without_direntry_nlink (test_export_review.WindowsDirEntryLinkCountTests.test_source_hardlink_refused_without_direntry_nlink) ... ok
+test_verifier_hardlink_refused_without_direntry_nlink (test_export_review.WindowsDirEntryLinkCountTests.test_verifier_hardlink_refused_without_direntry_nlink) ... ok
+
+----------------------------------------------------------------------
+Ran 47 tests in 2.580s
+
+OK (skipped=1)

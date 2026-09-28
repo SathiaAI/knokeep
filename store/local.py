@@ -124,7 +124,7 @@ from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
 
 from . import gate
-from .backend import BackendBusyError, Lock
+from .backend import BackendBusyError, BackendCorruptionError, Lock
 from .context import Overwrite
 from .gate import ScannedBody, ScannedKey
 from .types import (
@@ -349,6 +349,11 @@ class LocalBackend:
         # it despite holding different file locks.
         self._fence_lock = threading.Lock()
         self._last_accepted_fence: Dict[str, int] = {}
+        # True when journal.log cannot be replayed to EOF without stopping on
+        # unparsable bytes — startup recovery must not publish, and read/list
+        # fail closed until the journal is repaired out of band.
+        self._journal_ambiguous = False
+        self._cas_lock_reentry = threading.local()
 
         for d in (
             self._root,
@@ -415,6 +420,133 @@ class LocalBackend:
         finally:
             with contextlib.suppress(OSError):
                 lower.unlink()
+
+    def _cas_lock_enter(self) -> bool:
+        """Bounded acquire of cas.lock; re-entrant within one thread."""
+        depth = getattr(self._cas_lock_reentry, "depth", 0)
+        if depth > 0:
+            self._cas_lock_reentry.depth = depth + 1
+            return True
+        fl = _FileLock(self._cas_lock_path)
+        if not fl.acquire(self._lock_timeout_s):
+            return False
+        self._cas_lock_reentry.lock = fl
+        self._cas_lock_reentry.depth = 1
+        return True
+
+    def _cas_lock_exit(self) -> None:
+        depth = getattr(self._cas_lock_reentry, "depth", 0)
+        if depth <= 1:
+            fl = getattr(self._cas_lock_reentry, "lock", None)
+            if fl is not None:
+                fl.release()
+            self._cas_lock_reentry.depth = 0
+            self._cas_lock_reentry.lock = None
+        else:
+            self._cas_lock_reentry.depth = depth - 1
+
+    def _scan_journal_latest(
+        self,
+    ) -> Tuple[Dict[str, Tuple[bytes, int]], Dict[str, int]]:
+        scan_state: Dict[str, int] = {}
+        latest: Dict[str, Tuple[bytes, int]] = {}
+        for key, raw, last_accepted_fence in self._iter_journal_records(scan_state):
+            latest[key] = (raw, last_accepted_fence)
+        return latest, scan_state
+
+    def _try_parse_one_record_at(self, data: bytes, pos: int) -> Optional[int]:
+        """If a complete record starts at `pos`, return the offset just past it."""
+        size = len(data)
+        if pos + 4 > size:
+            return None
+        is_v2 = data[pos : pos + 4] == _JOURNAL_V2_MAGIC
+        p = pos + 4
+        if is_v2:
+            if p + 4 > size:
+                return None
+            (key_len,) = struct.unpack(">I", data[p : p + 4])
+            p += 4
+        else:
+            (key_len,) = struct.unpack(">I", data[pos : pos + 4])
+        trailer_len = 32 + (8 if is_v2 else 0)
+        if not 1 <= key_len <= gate._MAX_KEY_LEN:
+            return None
+        if p + key_len + 8 > size:
+            return None
+        key_end = p + key_len
+        p = key_end
+        (body_len,) = struct.unpack(">Q", data[p : p + 8])
+        p += 8
+        if p + body_len + trailer_len > size:
+            return None
+        body = data[p : p + body_len]
+        p += body_len
+        digest = data[p : p + 32]
+        if len(digest) < 32 or hashlib.sha256(body).digest() != digest:
+            return None
+        p += 32
+        if is_v2:
+            if p + 8 > size:
+                return None
+            p += 8
+        try:
+            data[pos + 4 + (4 if is_v2 else 0) : key_end].decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        return p
+
+    def _suffix_hides_complete_records(self, validated_end: int) -> bool:
+        """True when a complete journal record starts strictly after the last
+        trusted offset (prefix + opaque suffix + later durable record). A torn
+        in-flight tail at EOF is NOT ambiguous — only scan for v2 magic-aligned
+        complete records past the trusted prefix, never legacy byte-alignment
+        inside another record's body."""
+        try:
+            data = self._journal_path.read_bytes()
+        except OSError:
+            return True
+        size = len(data)
+        if validated_end >= size:
+            return False
+        pos = validated_end
+        while pos + 4 <= size:
+            if data[pos : pos + 4] != _JOURNAL_V2_MAGIC:
+                pos += 1
+                continue
+            if pos > validated_end and self._try_parse_one_record_at(data, pos) is not None:
+                return True
+            pos += 4
+        return False
+
+    @staticmethod
+    def _journal_has_unparsed_tail(scan_state: Dict[str, int]) -> bool:
+        return scan_state.get("end", 0) != scan_state.get("size", 0)
+
+    def _journal_scan_complete_for_read(self, scan_state: Dict[str, int]) -> bool:
+        if not self._journal_has_unparsed_tail(scan_state):
+            return True
+        return not self._suffix_hides_complete_records(scan_state["end"])
+
+    def _journal_scan_complete_for_write(self, scan_state: Dict[str, int]) -> bool:
+        if self._journal_has_unparsed_tail(scan_state):
+            return False
+        return True
+
+    def _materialize_from_journal(self, latest: Dict[str, Tuple[bytes, int]]) -> None:
+        for key, (raw, last_accepted_fence) in latest.items():
+            rel_path = self._key_to_relpath(key)
+            data_path = self._safe_join(self._data_dir, rel_path)
+            expected_hash = sha256_hex(raw)
+            needs_rebuild = True
+            if data_path.exists():
+                try:
+                    if sha256_hex(data_path.read_bytes()) == expected_hash:
+                        needs_rebuild = False
+                except OSError:
+                    needs_rebuild = True
+            if needs_rebuild:
+                self._publish(rel_path, data_path, raw, create=not data_path.exists())
+            self._last_accepted_fence[key] = last_accepted_fence
 
     def _iter_journal_records(
         self, _scan_state: Optional[Dict[str, int]] = None
@@ -503,27 +635,20 @@ class LocalBackend:
                 yield key, body, last_accepted_fence
 
     def _resume(self) -> None:
-        latest: Dict[str, Tuple[bytes, int]] = {}
-        for key, raw, last_accepted_fence in self._iter_journal_records():
-            latest[key] = (raw, last_accepted_fence)  # last record per key wins
-        for key, (raw, last_accepted_fence) in latest.items():
-            rel_path = self._key_to_relpath(key)
-            data_path = self._safe_join(self._data_dir, rel_path)
-            expected_hash = sha256_hex(raw)
-            needs_rebuild = True
-            if data_path.exists():
-                try:
-                    if sha256_hex(data_path.read_bytes()) == expected_hash:
-                        needs_rebuild = False
-                except OSError:
-                    needs_rebuild = True
-            if needs_rebuild:
-                self._publish(rel_path, data_path, raw, create=not data_path.exists())
-            # Construction is single-threaded (this instance is not yet
-            # visible to any other thread), so no lock is needed here.
-            self._last_accepted_fence[key] = last_accepted_fence
+        """Replay journal.log under cas.lock. A full scan to EOF is required
+        before ANY recovery publish: unparsable bytes before EOF may hide later
+        durable records, so partial replay must not overwrite a newer published
+        blob with an older prefix-only winner."""
+        latest, scan_state = self._scan_journal_latest()
+        if not self._journal_scan_complete_for_read(scan_state):
+            self._journal_ambiguous = True
+            return
+        self._journal_ambiguous = False
+        self._materialize_from_journal(latest)
 
-    def _recover_key_before_decision(self, key: str, rel_path: Path, data_path: Path) -> None:
+    def _recover_key_before_decision(
+        self, key: str, rel_path: Path, data_path: Path, *, for_write: bool = False
+    ) -> None:
         """Caller holds cas.lock. Re-materializes `key` from the durable
         journal BEFORE write() reads the published file to decide
         create/CAS/generation/fence, so a long-lived instance cannot decide
@@ -549,7 +674,12 @@ class LocalBackend:
         for rec_key, raw, last_accepted_fence in self._iter_journal_records(scan_state):
             if rec_key == key:
                 latest = (raw, last_accepted_fence)
-        if scan_state.get("end", 0) != scan_state.get("size", 0):
+        scan_ok = (
+            self._journal_scan_complete_for_write(scan_state)
+            if for_write
+            else self._journal_scan_complete_for_read(scan_state)
+        )
+        if not scan_ok:
             raise _RecoveryIncomplete()
         if latest is None:
             return
@@ -689,8 +819,30 @@ class LocalBackend:
         return BackendHealth(ok=True, detail=f"local filesystem backend at {self._root}")
 
     def read(self, key: str) -> Optional[Blob]:
+        """Return the latest durable value for `key` (journal is authoritative).
+
+        Under a bounded cas.lock wait, replays journal.log far enough to
+        materialize any committed-but-unpublished record for this key, then
+        reads the published blob. Cost is O(journal bytes) per call (the log is
+        never compacted); there is no size/mtime shortcut. Separate read/list
+        calls are not a cross-key transactional snapshot."""
+        if self._journal_ambiguous:
+            raise BackendCorruptionError(
+                "journal.log cannot be fully replayed; read/list are unavailable"
+            )
         rel_path = self._key_to_relpath(key)
         data_path = self._safe_join(self._data_dir, rel_path)
+        if not self._cas_lock_enter():
+            raise BackendBusyError("cas.lock busy during read")
+        try:
+            try:
+                self._recover_key_before_decision(key, rel_path, data_path, for_write=False)
+            except _RecoveryIncomplete:
+                raise BackendCorruptionError(
+                    "journal.log cannot be fully replayed for this key"
+                ) from None
+        finally:
+            self._cas_lock_exit()
         try:
             raw = data_path.read_bytes()
         except FileNotFoundError:
@@ -700,16 +852,33 @@ class LocalBackend:
         return Blob(body=raw, version_hash=sha256_hex(raw))
 
     def list(self, prefix: str) -> Iterator[str]:
-        # Strong consistency: this reflects the on-disk data/ dir at call
-        # time — a local filesystem has no eventual-consistency window.
-        results: List[str] = []
-        if self._data_dir.exists():
-            for path in self._data_dir.rglob("*"):
-                if path.is_file():
-                    rel = path.relative_to(self._data_dir).as_posix()
-                    if rel.startswith(prefix):
-                        results.append(rel)
-        results.sort()
+        """Keys under `prefix` visible after a journal-aware scan.
+
+        Committed-but-unpublished keys appear once their journal record is
+        reachable by a clean EOF replay (same authority model as read()).
+        The returned iterator is produced only after cas.lock is released."""
+        if self._journal_ambiguous:
+            raise BackendCorruptionError(
+                "journal.log cannot be fully replayed; read/list are unavailable"
+            )
+        if not self._cas_lock_enter():
+            raise BackendBusyError("cas.lock busy during list")
+        try:
+            latest, scan_state = self._scan_journal_latest()
+            if not self._journal_scan_complete_for_read(scan_state):
+                raise BackendCorruptionError(
+                    "journal.log cannot be fully replayed for list"
+                )
+            keys: set[str] = {k for k in latest if k.startswith(prefix)}
+            if self._data_dir.exists():
+                for path in self._data_dir.rglob("*"):
+                    if path.is_file():
+                        rel = path.relative_to(self._data_dir).as_posix()
+                        if rel.startswith(prefix):
+                            keys.add(rel)
+            results = sorted(keys)
+        finally:
+            self._cas_lock_exit()
         return iter(results)
 
     def write(
@@ -789,7 +958,7 @@ class LocalBackend:
         # a failure here leaves THIS write definitely uncommitted; the
         # durable record stays in the journal for the next recovery.
         try:
-            self._recover_key_before_decision(k, rel_path, data_path)
+            self._recover_key_before_decision(k, rel_path, data_path, for_write=True)
         except _RecoveryIncomplete:
             return ERROR(ErrorKind.CORRUPTION)
         except PermissionError:
@@ -1165,4 +1334,4 @@ class LocalBackend:
             self._journal_fh.close()
 
 
-__all__ = ["LocalBackend"]
+__all__ = ["LocalBackend", "BackendCorruptionError"]

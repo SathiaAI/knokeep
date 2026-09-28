@@ -16,13 +16,14 @@ from __future__ import annotations
 import multiprocessing
 import os
 import tempfile
+from pathlib import Path
 import time
 import types
 
 import pytest
 
 from store import gate
-from store.backend import BackendBusyError
+from store.backend import BackendBusyError, BackendCorruptionError
 from store.local import LocalBackend
 from store.types import ERROR, OK, STALE, ErrorKind, sha256_hex
 from tests.ctx_helpers import create_ctx, fenced_ctx, overwrite_ctx
@@ -318,11 +319,10 @@ def test_c3_atomicity_reader_never_sees_torn_publish(tmp_path):
     os.write(fd, new_body[: len(new_body) // 2])  # only half written
     os.close(fd)
 
-    # The published key must still be exactly the old, complete blob — a
-    # reader is never exposed to the half-written staging file.
+    # Staging is half-written; the durable journal commit is authoritative on read.
     blob = backend.read(key)
     assert blob is not None
-    assert blob.body == b"old-complete-value"
+    assert blob.body == new_body
 
     backend.close()
 
@@ -1275,6 +1275,10 @@ def _lock_after_expiry(backend, key, child_expiry, budget_s=15.0):
         time.sleep(0.05)
 
 
+def _data_path(root, key):
+    return root / "data" / Path(*key.split("/"))
+
+
 def _committed_unpublished_cas(root, key):
     """Parent opens first and stays open; the child then commits v1-child to
     the journal and dies before publishing. Returns (parent, base_hash,
@@ -1288,8 +1292,8 @@ def _committed_unpublished_cas(root, key):
     assert proc.returncode == _CRASH_EXIT_CODE, (proc.returncode, proc.stderr[-2000:])
     child_expiry = float(proc.stdout.strip().splitlines()[0])
     assert _journal_size(root) > size_before  # the child's record is durable
-    # Precondition of the defect: the published file still holds the old value.
-    assert parent.read(key).body == b"v0-base"
+    # Published view is still stale on disk until read() or write() replays.
+    assert _data_path(root, key).read_bytes() == b"v0-base"
     return parent, r0.new_hash, sha256_hex(b"v1-child"), child_expiry
 
 
@@ -1298,6 +1302,7 @@ def test_long_lived_instance_recovers_unpublished_commit_before_cas(tmp_path):
     key = "recover/cas"
     parent, base_hash, child_hash, child_expiry = _committed_unpublished_cas(root, key)
     try:
+        assert parent.read(key).body == b"v1-child"
         lease = _lock_after_expiry(parent, key, child_expiry)
         assert lease.expiry_epoch > child_expiry
         stale = gate.persist(
@@ -1323,7 +1328,8 @@ def test_long_lived_instance_create_only_sees_unpublished_creation(tmp_path):
     try:
         proc = _run_crash_child("create", root, key, "child-created")
         assert proc.returncode == _CRASH_EXIT_CODE, (proc.returncode, proc.stderr[-2000:])
-        assert parent.read(key) is None  # committed but not published
+        assert not _data_path(root, key).exists()
+        assert parent.read(key).body == b"child-created"
 
         other = gate.persist(parent, key, b"different-body", ctx=create_ctx(), doc_type="system_state")
         assert isinstance(other, EXISTS), other
@@ -1353,10 +1359,11 @@ def test_recovery_publish_failure_fails_closed_and_keeps_durable_record(tmp_path
         monkeypatch.setattr(parent, "_replace_with_retry", always_busy)
         busy = gate.persist(parent, key, b"v2-stale", ctx=overwrite_ctx(base_hash, lease), doc_type="system_state")
         assert isinstance(busy, ERROR) and busy.kind == ErrorKind.BUSY
-        assert parent.read(key).body == b"v0-base"  # nothing decided, nothing published
+        assert _data_path(root, key).read_bytes() == b"v0-base"  # write failed closed
         assert [b for k, b, _f in parent._iter_journal_records() if k == key][-1] == b"v1-child"
 
         monkeypatch.undo()
+        assert parent.read(key).body == b"v1-child"  # read journals authority after publish unblocked
         stale = gate.persist(parent, key, b"v2-stale", ctx=overwrite_ctx(base_hash, lease), doc_type="system_state")
         assert isinstance(stale, STALE) and stale.current_hash == child_hash
         assert parent.read(key).body == b"v1-child"
@@ -1381,3 +1388,51 @@ def test_write_fails_closed_when_journal_scan_stops_before_eof(tmp_path):
         assert backend.read("torn/other") is None
     finally:
         backend.close()
+
+
+def test_read_list_after_child_crash_without_write(tmp_path):
+    """read/list must observe another process's durable journal commit."""
+    root = tmp_path / "store-root"
+    key = "recover/read-only"
+    parent = LocalBackend(root)
+    try:
+        proc = _run_crash_child("create", root, key, "from-child")
+        assert proc.returncode == _CRASH_EXIT_CODE
+        assert not _data_path(root, key).exists()
+        assert parent.read(key).body == b"from-child"
+        assert key in list(parent.list("recover/"))
+    finally:
+        parent.close()
+
+
+def test_startup_opaque_suffix_preserves_bytes_and_fails_read(tmp_path):
+    """Valid prefix + opaque suffix + later durable record: never clobber."""
+    root = tmp_path / "store-root"
+    key = "ambig/same"
+    backend = LocalBackend(root)
+    r0 = gate.persist(backend, key, b"old-body", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    backend._journal_fh.write(b"\x00\x00\x00\x05ab")
+    backend._journal_fh.flush()
+    os.fsync(backend._journal_fh.fileno())
+    backend._journal_append(key, b"new-body")
+    rel = backend._key_to_relpath(key)
+    data_path = backend._safe_join(backend._data_dir, rel)
+    backend._publish(rel, data_path, b"new-body", create=False)
+    backend.close()
+
+    journal_before = (root / "journal" / "journal.log").read_bytes()
+    data_before = _data_path(root, key).read_bytes()
+    assert data_before == b"new-body"
+
+    fresh = LocalBackend(root)
+    try:
+        assert fresh._journal_ambiguous
+        with pytest.raises(BackendCorruptionError):
+            fresh.read(key)
+        with pytest.raises(BackendCorruptionError):
+            list(fresh.list(""))
+        assert (root / "journal" / "journal.log").read_bytes() == journal_before
+        assert _data_path(root, key).read_bytes() == data_before
+    finally:
+        fresh.close()

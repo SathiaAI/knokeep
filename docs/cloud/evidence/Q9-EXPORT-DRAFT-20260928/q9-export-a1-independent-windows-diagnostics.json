@@ -1,0 +1,94 @@
+[
+  {
+    "case": "repeated-key-history",
+    "exception": "OSError",
+    "errno": 9,
+    "frames": [
+      {
+        "function": "run",
+        "line": 13
+      },
+      {
+        "function": "repeated",
+        "line": 17
+      },
+      {
+        "function": "export_store",
+        "line": 379
+      },
+      {
+        "function": "_fsync_file",
+        "line": 67
+      }
+    ]
+  },
+  {
+    "case": "directory-symlink",
+    "exception": "OSError",
+    "errno": 9,
+    "frames": [
+      {
+        "function": "run",
+        "line": 13
+      },
+      {
+        "function": "linked_directory",
+        "line": 21
+      },
+      {
+        "function": "export_store",
+        "line": 379
+      },
+      {
+        "function": "_fsync_file",
+        "line": 67
+      }
+    ]
+  },
+  {
+    "case": "empty-directory-depth",
+    "exception": "OSError",
+    "errno": 9,
+    "frames": [
+      {
+        "function": "run",
+        "line": 13
+      },
+      {
+        "function": "deep_empty",
+        "line": 25
+      },
+      {
+        "function": "export_store",
+        "line": 379
+      },
+      {
+        "function": "_fsync_file",
+        "line": 67
+      }
+    ]
+  },
+  {
+    "case": "forged-invalid-key-skips-candidate",
+    "exception": "OSError",
+    "errno": 9,
+    "frames": [
+      {
+        "function": "run",
+        "line": 13
+      },
+      {
+        "function": "altered_classification",
+        "line": 27
+      },
+      {
+        "function": "export_store",
+        "line": 379
+      },
+      {
+        "function": "_fsync_file",
+        "line": 67
+      }
+    ]
+  }
+]

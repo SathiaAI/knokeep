@@ -1,0 +1,45 @@
+{
+  "input_sha": "4d7f3c07f56590da0f46863638429b1f1d8ac264",
+  "status": "complete_linux_synthetic_a2",
+  "tests": {
+    "commands": [
+      "PYTHONPATH=<checkout>:<pkg-root> python3 -m unittest discover -s experiments/recovery_export_v1 -p 'test_*.py' -v"
+    ],
+    "exit_code": 0,
+    "summary": "OK",
+    "ran_line": "Ran 16 tests in 0.126s",
+    "test_count": 16,
+    "passed": 16
+  },
+  "limitations": [
+    "Experimental only; passing Linux synthetics do not imply production safety.",
+    "Windows held-lock read, overlap aliases, junction/reparse behavior UNVERIFIED on this host.",
+    "TOCTOU and non-cooperative writers remain; no multi-file atomic snapshot claim.",
+    "Reparse detection follows st_file_attributes when present; Linux coverage is partial.",
+    "Resource budget exceed and some REFUSE_OUTPUT_IO_ERROR paths are not exhaustively tested.",
+    "manifest_sha256 is internal consistency only, not authentication or completeness proof.",
+    "Directory fsync attempted on POSIX only; not a power-loss proof; Windows unsupported."
+  ],
+  "files": [
+    {
+      "original_path": "experiments/recovery_export_v1/__init__.py",
+      "evidence_file": "__init__.py.txt",
+      "sha256": "f466f04ef060c7f65bb744e685ede738aa4d29cb652305eb77d2a82c644b4029"
+    },
+    {
+      "original_path": "experiments/recovery_export_v1/export.py",
+      "evidence_file": "export.py.txt",
+      "sha256": "14b151bbc7c5fee6173766533004bcc5fe8db047b9912cc1362499d8d2383a84"
+    },
+    {
+      "original_path": "experiments/recovery_export_v1/README.md",
+      "evidence_file": "README.md.txt",
+      "sha256": "00af66a8da8ab3348d963363216c1acd4c2f6cdb4b9eec635d4c206adeaf9d20"
+    },
+    {
+      "original_path": "experiments/recovery_export_v1/test_export.py",
+      "evidence_file": "test_export.py.txt",
+      "sha256": "85fdaff2d0f770422d5239a8751bf0d03ddfe5f299fadb99b41f3fed7c8a55f5"
+    }
+  ]
+}

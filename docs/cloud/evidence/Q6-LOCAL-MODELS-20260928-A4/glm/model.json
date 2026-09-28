@@ -1,0 +1,13 @@
+{
+  "modelKey": "zai-org/glm-4.7-flash",
+  "displayName": "Glm 4.7 Flash",
+  "paramsString": "30B",
+  "architecture": "deepseek2",
+  "quantization": {
+    "name": "Q4_K_M",
+    "bits": 4
+  },
+  "selectedVariant": "zai-org/glm-4.7-flash@q4_k_m",
+  "identifier": "knokeep-q6a4-glm",
+  "contextLength": 16384
+}

@@ -1,0 +1,10 @@
+# Q4: preserving an unresolved decision
+
+Two actual fresh Claude Code attempts, product/policy aa5895ede2ee7eb8ae396baa85591562027ed7a2. Both ran through the verified existing Max subscription, not an API-key billing route. Original synthetic before/project/store bytes and original REPORT.md are preserved. Manifests bind byte length and SHA-256. Prompts and tool-action files are labelled derived: machine-local paths are replaced with placeholders; no hidden reasoning or provider runtime IDs are included.
+
+- A1: coordinator supplied the wrong project slug. Receiver disclosed it and saved a parallel record. NOT a clean existing-record qualification. 77.032 seconds, OS exit0. Original packet commitment 0611c7aef5cffe5564677002ef92ebb5019f22dbdb066ebd5c726efa36dd3a37.
+- A2: separately frozen correction of project target and operational run/session IDs, with both target files checked before launch. 60.907 seconds, OS exit0. Final packet commitment 937f953af56def78bb6c7276436a2d534ee10a110501a94410f517584198d3ad. PASS for the declared revised-policy diagnostic: correct mechanical CSV, no guessed priority file, open question retained in both current resume sections, protected inputs unchanged and receipts match bytes. A short stock hash suffix in the original report is wrong; the manifest is authoritative for bytes.
+
+The packet commitments were posted before launch in job41. Full private packets include machine-local dispatch bindings and a precommitted scoring rubric; public assessments and derived prompts expose the scoring and test scope. The corrected run is not silently substituted for the failed setup.
+
+Important limits: the prompt explicitly tells the client how to handle ambiguity; the new policy example is close to this fixture. This is neither blinded nor a causal test against ordinary files. No OS containment was enforced. The published A2 trace has five calls and shows only supplied paths. No reliability percentage follows from this one corrected session. State and log remain separate writes, so this does not resolve checkpoint atomicity.

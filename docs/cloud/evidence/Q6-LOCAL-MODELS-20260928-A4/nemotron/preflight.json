@@ -1,0 +1,12 @@
+{
+  "tools": 0,
+  "fallbacks": 0,
+  "model": "knokeep-q6a4-nemotron",
+  "loopback_route": true,
+  "max_tokens": 4096,
+  "max_iterations": 2,
+  "run_budget_seconds": 150,
+  "temperature_requested": 0,
+  "reasoning_requested": "off",
+  "scope": "actual Hermes AIAgent SDK; zero tools"
+}

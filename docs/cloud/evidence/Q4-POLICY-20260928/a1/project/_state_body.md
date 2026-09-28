@@ -1,0 +1,10 @@
+## Architecture
+Q2 bounded cloud portability toy: `restock.py` reads `stock.csv` and writes `restock.csv` (active SKUs only; free = stock−reserved floored; reorder = threshold−free floored; sorted by sku).
+
+## Path & Variable Directory
+- Project dir: `docs/cloud/q2-work/project`
+- Store: `docs/cloud/q2-work/store` (`PROJECT=q2-cursor-a1`, client label `cursor-cloud`)
+- Invoke: `python3 restock.py stock.csv restock.csv`
+
+## Hard Constraints
+Do not change KnoKeep implementation. Do not implement `priority-review.csv` in this job. No secrets in flushed bodies.

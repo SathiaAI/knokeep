@@ -1,0 +1,114 @@
+{
+  ".gitattributes": {
+    "bytes": 19,
+    "sha256": "3e5e82fc72e044ea9af807a2030b73dbb94800d2cd1775302063b2eee761ba1e"
+  },
+  "ASSESSMENT.md": {
+    "bytes": 5254,
+    "sha256": "496640ee42829fb445ddc9d287b39fe82674d611847301847ad09381285114ab"
+  },
+  "gemma/model.json": {
+    "bytes": 320,
+    "sha256": "612fd41cde298bc3a7ba4635b006b1b57fbbc02f7477ad7dd8a8dd3460d261d4"
+  },
+  "gemma/preflight.json": {
+    "bytes": 292,
+    "sha256": "d15c12f301b3af0b08243dbcab40874858bba2fbfd48d4a12885a63f811a08be"
+  },
+  "gemma/prompt.txt": {
+    "bytes": 1699,
+    "sha256": "a531c0524f645bf5a79648acf52516c875000f64c8fb4470f268ed37c743a570"
+  },
+  "gemma/response.txt": {
+    "bytes": 260,
+    "sha256": "57bfaf12a555f79af8e25db09ca69c8baa6808e0f7fce26f097a9017ae93a055"
+  },
+  "gemma/result.json": {
+    "bytes": 178,
+    "sha256": "8ede5023869d156b3404a9d1884def12e8e4a94138fa6a187c04fa8b33ec0c7c"
+  },
+  "gemma/spec.json": {
+    "bytes": 84,
+    "sha256": "b45f3d245562b89e812a6519965b65416cbf59fbbd97668fca4d0197b302be57"
+  },
+  "glm/model.json": {
+    "bytes": 321,
+    "sha256": "19ed026837dd263f121f2815d482c9cc3ba646ff8c6a9a41b94d256b97c64a77"
+  },
+  "glm/preflight.json": {
+    "bytes": 290,
+    "sha256": "d64835a9c0ab31e99748284cc91baf588333993f8f855471920924b32a513707"
+  },
+  "glm/prompt.txt": {
+    "bytes": 1699,
+    "sha256": "a531c0524f645bf5a79648acf52516c875000f64c8fb4470f268ed37c743a570"
+  },
+  "glm/response.txt": {
+    "bytes": 251,
+    "sha256": "8f621006e0673655967a20540161d792e874218e218159f6d42500409f3df0bb"
+  },
+  "glm/result.json": {
+    "bytes": 177,
+    "sha256": "bbbe3fb68246a4ce91266095e66a9558ad57e58b6c9e3a7f185f6d41ee0bc1ad"
+  },
+  "glm/spec.json": {
+    "bytes": 81,
+    "sha256": "dfec8bdf5a69a6191090e4ac26aa788df5921773a0a69d693a5236faf8e0425e"
+  },
+  "nemotron/model.json": {
+    "bytes": 354,
+    "sha256": "89a01c3bf9b400be5f68fa5120084ce698f58ce2d05cdb2fccc577404b3d64e3"
+  },
+  "nemotron/preflight.json": {
+    "bytes": 295,
+    "sha256": "d53d4ba0a95f7db4b195029391538a360a1ab161f60e637472bd93e458cd18c5"
+  },
+  "nemotron/prompt.txt": {
+    "bytes": 1699,
+    "sha256": "a531c0524f645bf5a79648acf52516c875000f64c8fb4470f268ed37c743a570"
+  },
+  "nemotron/response.txt": {
+    "bytes": 251,
+    "sha256": "8f621006e0673655967a20540161d792e874218e218159f6d42500409f3df0bb"
+  },
+  "nemotron/result.json": {
+    "bytes": 178,
+    "sha256": "40e859cc919cbc2f9e11c9b68a88067f3874f1d218563301c37c688e32f76084"
+  },
+  "nemotron/spec.json": {
+    "bytes": 92,
+    "sha256": "c97db2df835575b93e9c2ae85c63cc8b753aa4bd0829bf067c216319b3893a4f"
+  },
+  "protocol.json": {
+    "bytes": 730,
+    "sha256": "6ad9102d817e6de8d82a6aa19eaef820fd985c43ef9b3d37af8b0e0f6bc43b66"
+  },
+  "qwen/model.json": {
+    "bytes": 307,
+    "sha256": "e00a939784389360c75d43498ea16caccfa52547f2bd241d643c9e1accfe9f28"
+  },
+  "qwen/preflight.json": {
+    "bytes": 291,
+    "sha256": "6dca79d21d0ffc4cf0b23d5a4905c41c768f2545f89393f129d2b271b3a97f3c"
+  },
+  "qwen/prompt.txt": {
+    "bytes": 1699,
+    "sha256": "a531c0524f645bf5a79648acf52516c875000f64c8fb4470f268ed37c743a570"
+  },
+  "qwen/response.txt": {
+    "bytes": 254,
+    "sha256": "545a8c0b37ccd1f0a336c67056e00e26b827b0a6e35f7a32a9fe75ab1c50bfff"
+  },
+  "qwen/result.json": {
+    "bytes": 178,
+    "sha256": "a144c35de13a6a67fa8427ce62d7f80b2ea7798406991106d54d513d1db542bc"
+  },
+  "qwen/spec.json": {
+    "bytes": 77,
+    "sha256": "d09bb82a08371295f5da9f536523fd64de49c6e90d82415e2dc9eeb73d0be31a"
+  },
+  "summary.json": {
+    "bytes": 4461,
+    "sha256": "0157179946b8b9ba578367b02a5d471f56d72e003801fe58b1d954919fc8690e"
+  }
+}

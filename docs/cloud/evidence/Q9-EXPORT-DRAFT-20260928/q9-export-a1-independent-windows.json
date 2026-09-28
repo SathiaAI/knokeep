@@ -1,0 +1,18 @@
+[
+  {
+    "case": "repeated-key-history",
+    "exception": "OSError"
+  },
+  {
+    "case": "directory-symlink",
+    "exception": "OSError"
+  },
+  {
+    "case": "empty-directory-depth",
+    "exception": "OSError"
+  },
+  {
+    "case": "forged-invalid-key-skips-candidate",
+    "exception": "OSError"
+  }
+]

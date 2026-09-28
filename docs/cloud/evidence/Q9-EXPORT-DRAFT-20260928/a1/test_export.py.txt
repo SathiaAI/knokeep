@@ -1,0 +1,217 @@
+"""Synthetic tests for recovery_export_v1 (Linux). Windows: UNVERIFIED."""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import struct
+import sys
+import tempfile
+import threading
+import unittest
+from pathlib import Path
+
+PKG_ROOT = Path(__file__).resolve().parents[2]
+if str(PKG_ROOT) not in sys.path:
+    sys.path.insert(0, str(PKG_ROOT))
+
+from store import health_inspect as hi  # noqa: E402
+
+from experiments.recovery_export_v1 import export as rex  # noqa: E402
+
+MAGIC = b"KKJ2"
+
+
+def _sha(b: bytes) -> str:
+    return hashlib.sha256(b).hexdigest()
+
+
+def _frame(key: str, body: bytes, *, v2: bool = True, fence: int = 0, body_len: int | None = None) -> bytes:
+    kb = key.encode()
+    bl = len(body) if body_len is None else body_len
+    out = (MAGIC if v2 else b"") + struct.pack(">I", len(kb)) + kb
+    out += struct.pack(">Q", bl) + body + hashlib.sha256(body).digest()
+    if v2:
+        out += struct.pack(">Q", fence)
+    return out
+
+
+def _minimal_store(base: Path, journal: bytes, data: dict[str, bytes] | None = None) -> Path:
+    store = base / "store"
+    (store / "locks").mkdir(parents=True)
+    (store / "journal").mkdir()
+    (store / "data").mkdir()
+    (store / "staging").mkdir()
+    (store / "locks" / "cas.lock").write_bytes(b"held\n")
+    (store / "journal" / "journal.log").write_bytes(journal)
+    for rel, body in (data or {}).items():
+        p = store / "data" / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(body)
+    return store
+
+
+class RecoveryExportTests(unittest.TestCase):
+    def test_clean_parse_still_not_complete(self) -> None:
+        key, body = "docs/a", b"#knokeep-gen:1\nok\n"
+        j = _frame(key, body)
+        with tempfile.TemporaryDirectory() as td:
+            store = _minimal_store(Path(td), j, {"docs/a": body})
+            out = Path(td) / "out"
+            out.mkdir()
+            r = rex.export_store(store, out)
+            self.assertTrue(r["code"].startswith("EXPORT_"))
+            self.assertFalse(r["completeness_proven"])
+            self.assertFalse(r["candidate_is_authoritative"])
+            v = rex.verify_export(Path(r["output"]))
+            self.assertEqual(v["code"], "VERIFY_OK")
+
+    def test_parser_stop_offset_agrees_with_health_inspect(self) -> None:
+        j = _frame("a/k", b"x") + b"GARBAGE"
+        with tempfile.TemporaryDirectory() as td:
+            store = _minimal_store(Path(td), j, {"a/k": b"x"})
+            jp = store / "journal" / "journal.log"
+            latest, end, size, _ = rex._journal_prefix_scan(jp)
+            reasons: list[str] = []
+            st: dict = {"end": 0, "size": 0}
+            list(hi._iter_journal_records(jp, st, reasons))
+            self.assertEqual(end, st["end"])
+            self.assertEqual(size, st["size"])
+            self.assertIn("a/k", latest)
+
+    def test_partial_legacy_v2_tail(self) -> None:
+        leg = _frame("a/l", b"legacy", v2=False)
+        v2 = _frame("a/v", b"v2body")
+        j = leg + v2[: len(v2) // 2]
+        with tempfile.TemporaryDirectory() as td:
+            store = _minimal_store(Path(td), j)
+            out = Path(td) / "out"
+            out.mkdir()
+            r = rex.export_store(store, out)
+            self.assertIn("TAIL_UNEXAMINED_AMBIGUOUS", r.get("findings", []))
+            manifest = json.loads((Path(r["output"]) / "MANIFEST.json").read_text())
+            self.assertFalse(manifest["completeness_proven"])
+
+    def test_source_unchanged_after_export(self) -> None:
+        key, body = "doc/x", b"#knokeep-gen:1\nv\n"
+        j = _frame(key, body)
+        with tempfile.TemporaryDirectory() as td:
+            store = _minimal_store(Path(td), j, {"doc/x": body})
+            before = {str(p.relative_to(store)): p.read_bytes() for p in store.rglob("*") if p.is_file()}
+            out = Path(td) / "out"
+            out.mkdir()
+            rex.export_store(store, out)
+            after = {str(p.relative_to(store)): p.read_bytes() for p in store.rglob("*") if p.is_file()}
+            self.assertEqual(before, after)
+
+    def test_busy_lock_refused(self) -> None:
+        key, body = "k/a", b"b"
+        j = _frame(key, body)
+        with tempfile.TemporaryDirectory() as td:
+            store = _minimal_store(Path(td), j, {"k/a": body})
+            lock = store / "locks" / "cas.lock"
+            fh = rex._try_exclusive_lock(lock)
+            self.assertIsNotNone(fh)
+            try:
+                out = Path(td) / "out"
+                out.mkdir()
+                r = rex.export_store(store, out)
+                self.assertEqual(r["code"], "REFUSE_BUSY_WRITER_ACTIVE")
+            finally:
+                rex._release_lock(fh)
+
+    def test_output_overlap_refused(self) -> None:
+        j = _frame("k/a", b"x")
+        with tempfile.TemporaryDirectory() as td:
+            store = _minimal_store(Path(td), j, {"k/a": b"x"})
+            r = rex.export_store(store, store)
+            self.assertEqual(r["code"], "REFUSE_OUTPUT_OVERLAPS_STORE")
+
+    def test_symlink_refused(self) -> None:
+        j = _frame("k/a", b"x")
+        with tempfile.TemporaryDirectory() as td:
+            store = _minimal_store(Path(td), j, {"k/a": b"x"})
+            os.symlink("/etc/passwd", store / "evil")
+            out = Path(td) / "out"
+            out.mkdir()
+            r = rex.export_store(store, out)
+            self.assertEqual(r["code"], "REFUSE_SYMLINK_HARDLINK_OR_SPECIAL")
+
+    def test_invalid_keys_not_materialized(self) -> None:
+        bad = "../escape"
+        j = _frame(bad, b"no")
+        with tempfile.TemporaryDirectory() as td:
+            store = _minimal_store(Path(td), j)
+            out = Path(td) / "out"
+            out.mkdir()
+            r = rex.export_store(store, out)
+            cand = Path(r["output"]) / "candidate-data"
+            self.assertFalse(any(cand.rglob("*")))
+            manifest = json.loads((Path(r["output"]) / "MANIFEST.json").read_text())
+            self.assertIn("INVALID_KEYS_NOT_MATERIALIZED", manifest["findings"])
+
+    def test_case_fold_collision(self) -> None:
+        j = _frame("a/Readme", b"one") + _frame("a/readme", b"two")
+        with tempfile.TemporaryDirectory() as td:
+            store = _minimal_store(Path(td), j)
+            out = Path(td) / "out"
+            out.mkdir()
+            r = rex.export_store(store, out)
+            manifest = json.loads((Path(r["output"]) / "MANIFEST.json").read_text())
+            self.assertIn("CASE_FOLD_COLLISION_NOT_MATERIALIZED", manifest["findings"])
+            self.assertEqual(len(list((Path(r["output"]) / "candidate-data").rglob("*"))), 0)
+
+    def test_interrupted_attempt_retained(self) -> None:
+        key, body = "k/a", b"data"
+        j = _frame(key, body)
+        with tempfile.TemporaryDirectory() as td:
+            store = _minimal_store(Path(td), j, {"k/a": body})
+            out = Path(td) / "out"
+            out.mkdir()
+            marker = {"hit": False}
+
+            def hook(name: str) -> None:
+                if name.startswith("copied:") and not marker["hit"]:
+                    marker["hit"] = True
+                    raise RuntimeError("interrupt")
+
+            with self.assertRaises(RuntimeError):
+                rex.export_store(store, out, hook=hook)
+            incomplete = list(out.glob(".incomplete-*"))
+            self.assertEqual(len(incomplete), 1)
+            foreign = incomplete[0] / "foreign.txt"
+            foreign.write_text("keep", encoding="utf-8")
+            r2 = rex.export_store(store, out)
+            self.assertTrue(r2["code"].startswith("EXPORT_"))
+            self.assertTrue(foreign.read_text(encoding="utf-8") == "keep")
+            self.assertTrue(incomplete[0].exists())
+
+    def test_verify_rejects_tampered_archive(self) -> None:
+        j = _frame("k/a", b"x")
+        with tempfile.TemporaryDirectory() as td:
+            store = _minimal_store(Path(td), j, {"k/a": b"x"})
+            out = Path(td) / "out"
+            out.mkdir()
+            r = rex.export_store(store, out)
+            arch = Path(r["output"]) / "archive" / "data" / "k" / "a"
+            arch.write_bytes(b"tampered")
+            v = rex.verify_export(r["output"])
+            self.assertEqual(v["code"], "REJECT_INCOMPLETE_OR_ALTERED")
+
+    def test_coherent_rollback_still_unproven(self) -> None:
+        body_old = b"#knokeep-gen:1\nold\n"
+        body_new = b"#knokeep-gen:2\nnew\n"
+        j = _frame("doc/r", body_old) + _frame("doc/r", body_new)
+        truncated = j[: _frame("doc/r", body_old).__len__()]
+        with tempfile.TemporaryDirectory() as td:
+            store = _minimal_store(Path(td), truncated, {"doc/r": body_old})
+            out = Path(td) / "out"
+            out.mkdir()
+            r = rex.export_store(store, out)
+            manifest = json.loads((Path(r["output"]) / "MANIFEST.json").read_text())
+            self.assertFalse(manifest["completeness_proven"])
+            self.assertFalse(manifest["candidate_is_authoritative"])
+
+
+if __name__ == "__main__":
+    unittest.main()

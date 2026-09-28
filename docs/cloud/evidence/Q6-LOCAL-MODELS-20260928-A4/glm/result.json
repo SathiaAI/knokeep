@@ -1,0 +1,9 @@
+{
+  "completed": true,
+  "reported_api_calls": 1,
+  "elapsed_s": 4.36,
+  "tool_calls": 0,
+  "tools_after": 0,
+  "fallbacks_after": 0,
+  "observed_completion_calls": []
+}

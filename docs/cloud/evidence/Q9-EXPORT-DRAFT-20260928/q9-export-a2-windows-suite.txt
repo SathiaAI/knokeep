@@ -1,0 +1,21 @@
+test_busy_lock_refused (test_export.RecoveryExportTests.test_busy_lock_refused) ... ok
+test_case_fold_collision (test_export.RecoveryExportTests.test_case_fold_collision) ... ok
+test_clean_parse_still_not_complete (test_export.RecoveryExportTests.test_clean_parse_still_not_complete) ... ok
+test_coherent_rollback_still_unproven (test_export.RecoveryExportTests.test_coherent_rollback_still_unproven) ... ok
+test_deep_empty_directories_refused (test_export.RecoveryExportTests.test_deep_empty_directories_refused) ... ok
+test_directory_symlink_refused (test_export.RecoveryExportTests.test_directory_symlink_refused) ... ok
+test_empty_journal_export_verifies (test_export.RecoveryExportTests.test_empty_journal_export_verifies) ... ok
+test_interrupted_attempt_retained (test_export.RecoveryExportTests.test_interrupted_attempt_retained) ... ok
+test_invalid_keys_not_materialized (test_export.RecoveryExportTests.test_invalid_keys_not_materialized) ... ok
+test_output_overlap_refused (test_export.RecoveryExportTests.test_output_overlap_refused) ... ok
+test_partial_legacy_v2_tail (test_export.RecoveryExportTests.test_partial_legacy_v2_tail) ... ok
+test_product_parser_used_via_unbound_iter (test_export.RecoveryExportTests.test_product_parser_used_via_unbound_iter) ... ok
+test_repeated_key_materializes_latest_only (test_export.RecoveryExportTests.test_repeated_key_materializes_latest_only) ... ok
+test_source_unchanged_after_export (test_export.RecoveryExportTests.test_source_unchanged_after_export) ... ok
+test_verify_rejects_archive_tamper (test_export.RecoveryExportTests.test_verify_rejects_archive_tamper) ... ok
+test_verify_rejects_manifest_skip_list_tamper (test_export.RecoveryExportTests.test_verify_rejects_manifest_skip_list_tamper) ... ok
+
+----------------------------------------------------------------------
+Ran 16 tests in 0.269s
+
+OK

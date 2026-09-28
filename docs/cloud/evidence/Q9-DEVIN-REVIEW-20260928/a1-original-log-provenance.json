@@ -1,0 +1,13 @@
+{
+  "original_sha256": "7981340705da8ea76ebc2771d2c6e23df9f295fa8801388a59e46b298280c429",
+  "public_derivative": "a1-windows-redacted.txt",
+  "transformation": "UTF-8 decoding; local workspace prefix replaced by [WORKSPACE]. Original bytes retained locally.",
+  "head": "891ee85c89bedddf25ee7784acd0fbeb20cbe390",
+  "result": {
+    "run": 38,
+    "passed": 35,
+    "failed": 2,
+    "skipped": 1
+  },
+  "ci_failure_job": "https://github.com/SathiaAI/knokeep/actions/runs/36389892493/job/108823188719"
+}

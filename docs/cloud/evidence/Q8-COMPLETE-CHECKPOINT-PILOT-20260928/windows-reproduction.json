@@ -1,0 +1,57 @@
+{
+  "platform": "Windows",
+  "python": "3.11.15",
+  "original_store_unchanged": true,
+  "copied_journal_unchanged_by_resume_lookup_duplicate": true,
+  "results": [
+    {
+      "operation": "resume",
+      "exit": 0,
+      "receipt": {
+        "status": "ok",
+        "milestone_id": "display-receiver-1",
+        "checkpoint_sha256": "e8144b06a2a134273e8138350203e80ed731f701650372987376f20661f61601",
+        "state": "q8-display inventory at display-receiver-1 (source: pilot/display-units-next.csv).\nAccepted rule (carried from display-source-1): owned release requires revision r3 AND signed_check yes.\nRejected (carried): signed r2 exception (not policy).\nUncontested eligible owned: cedar, oak.\nHeld owned: birch (signed_check no), maple (revision r2), ash (signed_check no in next CSV; was eligible at display-source-1).\nDisputed loan (not released): elm (r3+yes, loan), pine (r3+yes, loan); Q_LOAN open.",
+        "log": "Work: resumed display-source-1 via checkpoint CLI; parsed pilot/display-units-next.csv; wrote eligible-owned-units.csv.\nChange vs predecessor: ash moved eligible->held (signed_check no); oak added eligible; pine added as disputed loan.\nDid not authorize release-loan; Q_LOAN remains open; no new owner approvals supplied.",
+        "open_questions": [
+          {
+            "affected_action_ids": [
+              "release-loan"
+            ],
+            "id": "Q_LOAN",
+            "question": "May loan display units be released when they meet revision r3 and signed-check requirements?"
+          }
+        ],
+        "resolved_questions": [],
+        "completed_actions": [
+          "inventory-owned-eligibility-next"
+        ],
+        "unsealed_legacy_changes": [],
+        "staged": [],
+        "resolved_staged": []
+      }
+    },
+    {
+      "operation": "lookup",
+      "exit": 0,
+      "receipt": {
+        "status": "accepted",
+        "milestone_id": "display-source-1",
+        "checkpoint_sha256": "1477798dc17ff9b539f627e866184a2141fe1fb5fc95f653da406d61bd4db6e3",
+        "current_head_sha256": "e8144b06a2a134273e8138350203e80ed731f701650372987376f20661f61601"
+      }
+    },
+    {
+      "operation": "save",
+      "exit": 0,
+      "receipt": {
+        "status": "accepted",
+        "duplicate": true,
+        "milestone_id": "display-receiver-1",
+        "checkpoint_sha256": "e8144b06a2a134273e8138350203e80ed731f701650372987376f20661f61601",
+        "current_head_sha256": "e8144b06a2a134273e8138350203e80ed731f701650372987376f20661f61601",
+        "current_head_milestone_id": "display-receiver-1"
+      }
+    }
+  ]
+}

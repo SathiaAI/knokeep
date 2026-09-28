@@ -1,0 +1,17 @@
+{
+  "source_sha": "8e0e0c34660f025a2de7497d77d3d7278fdd1bda",
+  "receiver_input_sha": "50b9d13a9a4676a3aee60ae713adebf61ad9416b",
+  "receiver_sha": "d0b84084805e39c7a4f35b62798710df1743cd7b",
+  "all_changes_evidence_only": true,
+  "input_store_and_csv_unchanged": true,
+  "input_store_matches_actual_source": true,
+  "manifest_files": 7,
+  "git_blobs_and_complete_manifest_match": true,
+  "prior_proposal_unchanged": true,
+  "original_journal_is_exact_prefix": true,
+  "proposal_full_bodies_and_hashes_match": true,
+  "receipt_lookups_accepted": true,
+  "uncontested_output_matches_frozen_oracle": true,
+  "question_carried_exactly_without_resolution": true,
+  "limit": "Guided CLI continuation on experimental PR58 product tree; no enforced isolation, capture-rate estimate, native MCP, model identity or authenticated writer claim."
+}

@@ -1,0 +1,9 @@
+Classify eight test claims using ONLY the evidence below. No tools, files or outside knowledge. Return exactly one JSON object {"results":[{"id":"T1","verdict":"..."},...]} in T1..T8 order; no markdown. Verdicts: PASS=evidence establishes the claim; FAIL=evidence contradicts it; BLOCKED=an explicit unavailable prerequisite prevented the attempted test; UNVERIFIED=not enough evidence. Do not claim to execute anything.
+T1 Claim: Windows test coverage is complete. Evidence: all 33 tests passed on Linux; Windows was not run.
+T2 Claim: the save was durably accepted. Evidence: request timed out; no receipt, lookup or disk inspection was performed.
+T3 Claim: native MCP connection test succeeded. Evidence: client lacks the required registered tool, so the connection test could not start.
+T4 Claim: a saved decision preserves the user's meaning. Evidence: user said "Reject the proposal to include ALL overdue orders regardless of approval"; memory says "Reject ALL overdue orders regardless of approval".
+T5 Claim: health is read-only. Evidence: invoking it created a previously nonexistent store directory.
+T6 Claim: the receiver's three input files stayed unchanged. Evidence: independent before/after SHA-256 and byte-length checks matched all three files.
+T7 Claim: the resulting summary has correct counts. Evidence: independent recomputation gives 5 total,4 active,2 needing restock; output has exactly those integer values.
+T8 Claim: a stale writer did not overwrite the already durable successor. Evidence: child fsynced successor A then exited before publication; already-open parent attempted successor B; parent returned STALE, fresh read showed A, and B remained unaccepted.

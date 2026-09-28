@@ -1,0 +1,12 @@
+{
+  "input_sha": "f3893911a01272d47b94108d028204c0dc439133",
+  "source_sha": "8e0e0c34660f025a2de7497d77d3d7278fdd1bda",
+  "store_manifest_files": 6,
+  "git_blobs_match": true,
+  "whole_store_manifest_complete": true,
+  "checkpoint_bodies_and_hashes_match": true,
+  "uncontested_result_matches_frozen_oracle": true,
+  "open_question_carried_exact": true,
+  "duplicate_retry_unchanged_journal_reported_and_final_hash_verified": true,
+  "limit": "Ordinary acknowledged duplicate retry, not independent observation of source-time before bytes or a crash; guided source, no reliability estimate."
+}

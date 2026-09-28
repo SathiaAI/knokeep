@@ -1,0 +1,15 @@
+---
+schema_version: 1
+project_id: q2-cursor-a1
+client: cursor-cloud
+revision: 2
+updated: 2026-09-28T03:03:41Z
+---
+## Completed & Verified
+- [q2-a1-restock] `restock.py` + verified `restock.csv` against `stock.csv` active rows (flask/mug/tea; candle excluded inactive) — output in `docs/cloud/q2-work/project/restock.csv`
+
+## Active State
+Export capture: manifest, result report, KnoKeep receipts checked; evidence branch push pending.
+
+## Next Step
+Implement `priority-review.csv` (`sku,reason,owner`): active items needing replenishment with `lead_days >= 7` only; reason `long lead time`, owner `Procurement`. Reject inactive rows and reject all below-threshold items regardless of lead time. (Conversational criteria — not implemented in this job.)

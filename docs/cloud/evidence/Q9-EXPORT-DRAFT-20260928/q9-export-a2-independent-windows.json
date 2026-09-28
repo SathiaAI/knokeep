@@ -1,0 +1,24 @@
+[
+  {
+    "case": "repeated-key-history",
+    "code": "EXPORT_SYNTACTICALLY_CONSISTENT_COMPLETENESS_UNPROVEN",
+    "latest_body_correct": true,
+    "verify": "VERIFY_OK"
+  },
+  {
+    "case": "directory-symlink",
+    "code": "REFUSE_SYMLINK_HARDLINK_OR_SPECIAL",
+    "expected": "REFUSE_SYMLINK_HARDLINK_OR_SPECIAL"
+  },
+  {
+    "case": "empty-directory-depth",
+    "code": "REFUSE_BUDGET_EXCEEDED",
+    "expected": "REFUSE_BUDGET_EXCEEDED"
+  },
+  {
+    "case": "forged-invalid-key-skips-candidate",
+    "code": "REJECT_INCOMPLETE_OR_ALTERED",
+    "expected": "REJECT_INCOMPLETE_OR_ALTERED",
+    "reason": "Verifier must recompute key validity rather than trust export annotations, even without an authenticity claim."
+  }
+]

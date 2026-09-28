@@ -1,0 +1,10 @@
+---
+schema_version: 1
+project_id: q2-cursor-source-a1
+session_id: q4-cc-receiver-a1
+client: claude-code
+updated: 2026-09-28T04:20:07Z
+append_operations: {"q4-cc-a1-op1":"94c2bc3e4273a592f869c95ebf6e4dd1a1ca0867f7864bad9c36f528d5588e0d"}
+---
+## Journal
+[2026-09-28T04:20:07Z] Recomputed restock for current stock.csv (restock.current.csv, verified). priority-review.csv blocked on contradictory rule, authorization and project-slug questions; recorded in Active State and Next Step.

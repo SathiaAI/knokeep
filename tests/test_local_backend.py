@@ -32,6 +32,74 @@ def _gen(n: int) -> bytes:
     return gate.make_generation_header(n)
 
 
+@pytest.mark.parametrize('v2', [False, True])
+@pytest.mark.parametrize('frame', ['oversize-key', 'overflow-body', 'missing-digest', 'missing-fence'])
+def test_journal_lengths_checked_before_allocating_and_writes_fail_closed(tmp_path, monkeypatch, v2, frame):
+    """Corrupt lengths must not reach file.read(n) as allocation requests.
+
+    A bounded read spy makes even UINT32 key-length coverage safe on the
+    unfixed parser. The existing durable prefix remains readable on restart;
+    subsequent writes refuse the malformed tail and never append behind it.
+    """
+    import builtins
+    import hashlib
+    import struct
+
+    backend = LocalBackend(tmp_path)
+    assert isinstance(gate.persist(backend, 'p/good', b'good', ctx=create_ctx(), doc_type='system_state'), OK)
+    prefix = b'KKJ2' if v2 else b''
+    if frame == 'oversize-key':
+        tail = prefix + struct.pack('>I', 2**32-1)
+    else:
+        key = b'p/bad'
+        length = 2**64-1 if frame == 'overflow-body' else 1
+        tail = prefix + struct.pack('>I', len(key)) + key + struct.pack('>Q', length)
+        if frame != 'overflow-body':
+            tail += b'x'
+        if frame == 'missing-fence':
+            # On legacy this is a valid record; truncate the digest instead.
+            tail += hashlib.sha256(b'x').digest()[:32 if v2 else 31]
+    backend._journal_fh.write(tail)
+    backend._journal_fh.flush()
+    original = backend._journal_path.read_bytes()
+    real_open = builtins.open
+
+    class BoundedRead:
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.wrapped.close()
+        def __getattr__(self, name):
+            return getattr(self.wrapped, name)
+        def read(self, n=-1):
+            assert 0 <= n <= len(original), 'untrusted journal length reached allocation'
+            return self.wrapped.read(n)
+
+    def guarded_open(path, mode='r', *args, **kwargs):
+        opened = real_open(path, mode, *args, **kwargs)
+        return BoundedRead(opened) if str(path) == str(backend._journal_path) and mode == 'rb' else opened
+
+    monkeypatch.setattr(builtins, 'open', guarded_open)
+    try:
+        result = gate.persist(backend, 'p/new', b'new', ctx=create_ctx(), doc_type='system_state')
+        assert result == ERROR(ErrorKind.CORRUPTION)
+        assert backend._journal_path.read_bytes() == original
+        assert backend.read('p/new') is None
+        backend.close()
+        fresh = LocalBackend(tmp_path)
+        try:
+            assert fresh.read('p/good').body == b'good'
+            assert fresh.read('p/bad') is None
+            assert gate.persist(fresh, 'p/new', b'new', ctx=create_ctx(), doc_type='system_state') == ERROR(ErrorKind.CORRUPTION)
+            assert fresh._journal_path.read_bytes() == original
+        finally:
+            fresh.close()
+    finally:
+        backend.close()
+
+
 # ---------------------------------------------------------------------------
 # C8 — crash-after-journal-before-publish replay
 # ---------------------------------------------------------------------------

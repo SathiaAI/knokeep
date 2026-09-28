@@ -60,7 +60,7 @@ Fixed `_scorecard_from_events_raw` malformed error-`ts` path returning a four-tu
 
 ## Commit
 
-`c64fc794416ba50c2292b3ebdaac1ef95e8563fa` on `fix/cursor-health-readonly-a1` (round 4; prior rounds unchanged in history).
+`6fe0815` on `fix/cursor-health-readonly-a1` (round 4; prior rounds unchanged in history).
 
 ## Residual limits
 

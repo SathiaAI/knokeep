@@ -119,7 +119,7 @@ def main():
            '--no-chrome', '--disable-slash-commands', '--model', spec['model'],
            '--output-format', 'stream-json', '--verbose', '--permission-mode', 'dontAsk',
            '--permission-prompts', 'none', '--tools', tools,
-           '--allowedTools', 'Read,Write,Edit,Glob,Grep,Bash(python *)',
+           '--allowedTools', 'Read,Write,Edit,Glob,Grep,Bash',
            '--add-dir', spec['product_dir'], spec['store_dir'],
            '--resume' if spec.get('resume') else '--session-id', spec['session_id'],
            '--', prompt]

@@ -1,0 +1,8 @@
+unit,revision,signed_check,ownership
+cedar,r3,yes,owned
+birch,r3,no,owned
+maple,r2,yes,owned
+elm,r3,yes,loan
+ash,r3,no,owned
+oak,r3,yes,owned
+pine,r3,yes,loan

@@ -128,11 +128,25 @@ _CHILD = textwrap.dedent("""
         if mode == "kill_after_proposal" and "/proposals/" in k:
             os._exit(77)
         return r
+    orig_lock = LocalBackend.lock
+    def lock(self, key, ttl_s):
+        # Barrier belongs AFTER the proposal write releases cas.lock.
+        # Waiting inside _commit would prevent the second proposal staging.
+        if mode == 'race' and key.endswith('/HEAD'):
+            from pathlib import Path
+            import time
+            Path(pin).with_suffix('.ready').write_text('staged')
+            end = time.monotonic() + 10
+            while not (Path(store).parent/'go').exists():
+                if time.monotonic() > end:
+                    raise RuntimeError('race barrier timeout')
+                time.sleep(.01)
+        return orig_lock(self, key, ttl_s)
     def publish(self, rel, data_path, raw, **kw):
         if mode == "kill_before_head_publish" and rel.as_posix().endswith("HEAD"):
             os._exit(78)  # head journal record already fsynced by _commit
         return orig_publish(self, rel, data_path, raw, **kw)
-    LocalBackend._commit, LocalBackend._publish = commit, publish
+    LocalBackend._commit, LocalBackend._publish, LocalBackend.lock = commit, publish, lock
     be = LocalBackend(store)
     p = json.load(open(pin))
     # TEST-ONLY short lease TTL (0.5s) so a killed holder expires quickly.
@@ -186,17 +200,34 @@ def test_two_processes_same_predecessor(tmp_path):
     for mid in ("a", "b"):
         pin = tmp_path / f"{mid}.json"
         pin.write_text(json.dumps(_p(mid, _ref(r1))))
-        procs.append(subprocess.Popen([sys.executable, str(script), "none",
+        procs.append(subprocess.Popen([sys.executable, str(script), "race",
                                        str(tmp_path / "store"), str(pin)],
                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
-    outs = [json.loads(p.communicate(timeout=60)[0]) for p in procs]
-    statuses = sorted(o["status"] for o in outs)
-    assert statuses == ["accepted", "staged_stale"]
+    import time
+    deadline = time.monotonic() + 15
+    try:
+        while not all((tmp_path/f'{mid}.ready').exists() for mid in ('a','b')):
+            assert time.monotonic() < deadline, 'both writers must stage before head race'
+            time.sleep(.01)
+        (tmp_path/'go').write_text('go')
+        outs = []
+        for proc in procs:
+            stdout, stderr = proc.communicate(timeout=20)
+            assert proc.returncode == 0, (stdout,stderr)
+            outs.append(json.loads(stdout))
+    finally:
+        for proc in procs:
+            if proc.poll() is None:
+                proc.kill(); proc.communicate(timeout=5)
+    assert sum(o['status']=='accepted' for o in outs) == 1
+    assert sum(o['status'] in ('staged_stale','staged_busy') for o in outs) == 1
     be = _be(tmp_path)
     res = cp.resume(be, P)
-    loser = [o for o in outs if o["status"] == "staged_stale"][0]["milestone_id"]
+    loser = [o for o in outs if o["status"] != "accepted"][0]["milestone_id"]
     assert res["staged"] == [loser]
     assert cp.lookup(be, P, loser)["status"] == "staged"
+    # A busy contender retries its unchanged proposal only after both exit.
+    assert cp.save(be, P, _p(loser, _ref(r1)))['status'] == 'staged_stale'
 
 
 def test_long_lived_writer_cannot_overwrite_fsynced_unpublished_successor(tmp_path):
@@ -209,3 +240,15 @@ def test_long_lived_writer_cannot_overwrite_fsynced_unpublished_successor(tmp_pa
     assert r3['status'] == 'staged_stale'
     assert cp.resume(be, P)['milestone_id'] == 'm2'
     assert cp.lookup(be, P, 'm2')['status'] == 'accepted'
+
+
+def test_long_lived_retry_reconciles_fsynced_unpublished_head(tmp_path):
+    be = _be(tmp_path)
+    one = cp.save(be, P, _p('m1'))
+    two = _p('m2', _ref(one))
+    out = _run_child(tmp_path, 'kill_before_head_publish', two)
+    assert out.returncode == 78, out.stderr
+    import time; time.sleep(.6)
+    again = cp.save(be, P, two)
+    assert again['status'] == 'accepted' and again['duplicate'] is True
+    assert cp.resume(be, P)['milestone_id'] == 'm2'

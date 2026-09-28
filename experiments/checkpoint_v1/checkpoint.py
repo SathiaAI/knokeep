@@ -18,7 +18,7 @@ from store import gate
 from store.backend import BackendBusyError
 from store.context import AuthContext, CreateOnly, OperationContext, Overwrite
 from store.local import LocalBackend
-from store.types import EXISTS, OK, STALE
+from store.types import ERROR, EXISTS, OK, STALE, commit_class
 
 VERSION = 1
 MAX_OBJECT_BYTES = 256 * 1024
@@ -30,12 +30,18 @@ _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _FIELDS = {
     "version", "milestone_id", "writer", "predecessor", "state", "state_sha256",
     "log", "log_sha256", "open_questions", "completed_actions", "resolves_staged",
-    "legacy_state_sha256", "legacy_log_sha256",
+    "legacy_state_sha256", "legacy_log_sha256", "resolved_questions",
 }
 
 
 class CheckpointError(Exception):
     pass
+
+
+class CheckpointOutcomeUnknown(CheckpointError):
+    def __init__(self, mid, sha):
+        super().__init__('checkpoint acceptance uncertain; lookup before exact retry')
+        self.milestone_id, self.checkpoint_sha256 = mid, sha
 
 
 def _sha(b: bytes) -> str:
@@ -134,6 +140,16 @@ def validate_proposal(p: Any) -> None:
     for ref in refs:
         _reference(ref)
     _need(len({r['milestone_id'] for r in refs}) == len(refs), 'duplicate resolved reference')
+    closed = p['resolved_questions']
+    _need(isinstance(closed, list) and len(closed) <= MAX_LIST, 'resolved_questions must be bounded list')
+    closed_ids = set()
+    for q in closed:
+        _need(isinstance(q,dict) and set(q)=={'id','decision_ref'}, 'resolved question shape')
+        _need(_is_id(q['id']) and q['id'] not in closed_ids, 'duplicate or invalid resolved question')
+        closed_ids.add(q['id'])
+        _need(q['id'] not in question_ids, 'question cannot be both open and closed')
+        _need(isinstance(q['decision_ref'],str) and bool(q['decision_ref'].strip()), 'decision_ref required')
+        texts.append(q['decision_ref'])
     clash = sorted(done & affected)
     _need(not clash, f"completed action(s) with unresolved open question: {clash}")
     _need(len(_canon(p)) <= MAX_OBJECT_BYTES, f"proposal exceeds {MAX_OBJECT_BYTES} bytes")
@@ -145,7 +161,7 @@ def validate_proposal(p: Any) -> None:
 
 
 def build_proposal(*, milestone_id, writer, predecessor, state, log, open_questions=(),
-                   completed_actions=(), resolves_staged=(), legacy_state_sha256=None,
+                   completed_actions=(), resolves_staged=(), resolved_questions=(), legacy_state_sha256=None,
                    legacy_log_sha256=None) -> Dict[str, Any]:
     return {
         "version": VERSION, "milestone_id": milestone_id, "writer": writer,
@@ -153,6 +169,7 @@ def build_proposal(*, milestone_id, writer, predecessor, state, log, open_questi
         "log": log, "log_sha256": _sha(log.encode("utf-8")),
         "open_questions": list(open_questions), "completed_actions": list(completed_actions),
         "resolves_staged": list(resolves_staged),
+        "resolved_questions": list(resolved_questions),
         "legacy_state_sha256": legacy_state_sha256, "legacy_log_sha256": legacy_log_sha256,
     }
 
@@ -204,7 +221,20 @@ def _chain(backend, project: str, head) -> List[Dict[str, Any]]:
     accepted = {c['milestone_id'] for c in out}
     for c in out:
         _check_resolutions(backend, project, c['proposal'], accepted)
+    for index, c in enumerate(out):
+        _question_transition(c['proposal'], out[index+1]['proposal'] if index+1<len(out) else None)
     return out
+
+
+def _question_transition(proposal, previous):
+    old = {q['id']:q for q in previous['open_questions']} if previous else {}
+    new = {q['id']:q for q in proposal['open_questions']}
+    closed = {q['id'] for q in proposal['resolved_questions']}
+    _need(closed <= set(old), 'resolution references a question not open in predecessor')
+    for qid, q in old.items():
+        _need(qid in new or qid in closed, 'predecessor open question silently dropped')
+        if qid in new:
+            _need(new[qid] == q, 'carried question changed without an explicit resolution')
 
 
 def _check_resolutions(backend, project, proposal, accepted):
@@ -239,6 +269,13 @@ def save(backend, project: str, proposal: Dict[str, Any], *,
     old_head, _ = _read_head(backend, project)
     old_chain = _chain(backend, project, old_head) if old_head else []
     _check_resolutions(backend, project, proposal, {c['milestone_id'] for c in old_chain})
+    previous = None
+    if proposal['predecessor']:
+        ref = proposal['predecessor']
+        got = _read_proposal(backend, project, ref['milestone_id'], ref['sha256'])
+        _need(got is not None, 'predecessor proposal missing')
+        previous = got[0]
+    _question_transition(proposal, previous)
     raw = _canon(proposal)
     mid = proposal["milestone_id"]
     my_sha = _sha(raw)
@@ -250,7 +287,11 @@ def save(backend, project: str, proposal: Dict[str, Any], *,
         raise CheckpointError(f"staging failed: {r}")
     # Proposal is durable but only STAGED. Publish head under a lease.
     hk = head_key(project)
-    lease = backend.lock(hk, lease_ttl_s)
+    try:
+        lease = backend.lock(hk, lease_ttl_s)
+    except BackendBusyError:
+        return {'status':'staged_busy','milestone_id':mid,'checkpoint_sha256':my_sha,
+                'retry':'same immutable payload; no predecessor rebase'}
     try:
         head, head_ver = _read_head(backend, project)
         if head is not None:
@@ -277,12 +318,29 @@ def save(backend, project: str, proposal: Dict[str, Any], *,
         pre = CreateOnly() if head is None else Overwrite(expected_hash=head_ver, lease=lease)
         w = gate.persist(backend, hk, body, ctx=_ctx(pre), doc_type="checkpoint_head_v1")
         if isinstance(w, (STALE, EXISTS)):
+            # Write-time backend recovery may just have published a previously
+            # fsynced head. Reconcile against that durable result before saying
+            # this identical lost-ack retry is merely a competing proposal.
+            current, _ = _read_head(backend, project)
+            if current is not None:
+                for c in _chain(backend, project, current):
+                    if c['milestone_id'] == mid and c['sha256'] == my_sha:
+                        return {'status':'accepted','duplicate':True,'milestone_id':mid,
+                                'checkpoint_sha256':my_sha,'current_head_sha256':current['sha256'],
+                                'current_head_milestone_id':current['milestone_id']}
+                stale['current_head_sha256'] = current['sha256']
+                stale['current_head_milestone_id'] = current['milestone_id']
             return stale
         if not isinstance(w, OK):
+            if isinstance(w, ERROR) and commit_class(w) == 'outcome_unknown':
+                raise CheckpointOutcomeUnknown(mid, my_sha)
             raise CheckpointError(f"head publish failed: {w}")
-        readback = lookup(backend, project, mid)
-        _need(readback['status'] == 'accepted' and readback['checkpoint_sha256'] == my_sha,
-              'head write acknowledged but checkpoint readback failed; outcome uncertain')
+        try:
+            readback = lookup(backend, project, mid)
+            _need(readback['status'] == 'accepted' and readback['checkpoint_sha256'] == my_sha,
+                  'checkpoint readback mismatch')
+        except (CheckpointError, OSError):
+            raise CheckpointOutcomeUnknown(mid, my_sha) from None
         return {"status": "accepted", "duplicate": False, "milestone_id": mid,
                 "checkpoint_sha256": my_sha, "current_head_sha256": my_sha,
                 "current_head_milestone_id": mid}
@@ -310,6 +368,7 @@ def resume(backend, project: str) -> Dict[str, Any]:
     return {"status": "ok", "milestone_id": tgt["milestone_id"],
             "checkpoint_sha256": head["sha256"], "state": tgt["state"], "log": tgt["log"],
             "open_questions": tgt["open_questions"],
+            "resolved_questions": tgt['resolved_questions'],
             "completed_actions": tgt["completed_actions"],
             "unsealed_legacy_changes": unsealed, "staged": _staged(backend, project, accepted | resolved),
             "resolved_staged": sorted(resolved)}
@@ -346,7 +405,9 @@ def main(argv=None) -> int:
     lk = sub.add_parser("lookup")
     lk.add_argument("--milestone-id", required=True)
     a = ap.parse_args(argv)
-    _need(_is_id(a.project), 'project invalid')
+    if not _is_id(a.project):
+        print(json.dumps({'status':'error','error':'project invalid'}))
+        return 2
     be = LocalBackend(a.store)
     try:
         if a.op == "save":
@@ -358,6 +419,10 @@ def main(argv=None) -> int:
             out = resume(be, a.project)
         else:
             out = lookup(be, a.project, a.milestone_id)
+    except CheckpointOutcomeUnknown as e:
+        print(json.dumps({'status':'outcome_unknown','milestone_id':e.milestone_id,
+                          'checkpoint_sha256':e.checkpoint_sha256,'next':'lookup before exact retry'}))
+        return 4
     except CheckpointError as e:
         print(json.dumps({"status": "error", "error": str(e)}))
         return 2

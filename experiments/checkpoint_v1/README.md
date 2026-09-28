@@ -19,6 +19,16 @@ experimental resume input. It does **not** prove semantic truth or production re
   `resume` fails closed.
 - Receipts keep `checkpoint_sha256` (this proposal) separate from `current_head_sha256`.
 - Default lease TTL is 30s. The process-kill tests use a 0.5s TTL, test-only.
+- Busy lease acquisition returns `staged_busy`: proposal bytes remain durable but
+  unaccepted. Retry the same payload after contention; never rebase it automatically.
+- `resolved_questions` entries contain an open question ID and nonempty `decision_ref`.
+  Every predecessor question must be carried unchanged or explicitly resolved;
+  dropping it while completing its action is refused. References are caller-declared
+  audit evidence, not authentication or proof that a real decision exists.
+- `resolves_staged` binds each retained proposal ID and its exact SHA-256. Resume
+  distinguishes outstanding staged proposals from explicitly resolved ones; bytes remain.
+- An acknowledged head whose readback fails is `outcome_unknown` (CLI exit4), not a
+  definite failed save. Lookup by ID before retrying. Invalid input uses exit2.
 
 ## Usage
     python -m experiments.checkpoint_v1.checkpoint --store S --project P save --input proposal.json
@@ -32,3 +42,16 @@ experimental resume input. It does **not** prove semantic truth or production re
 - Secret detection reuses the existing scanner rules. It is not a universal guarantee.
 - `writer` is caller-declared. It is not authentication.
 - The open/completed conflict check validates only the declared structure.
+- Maximum canonical proposal size:256KiB; lists and history are bounded at256.
+  The next save at the history ceiling refuses acceptance and retains its staged
+  proposal. There is no rollover or compaction protocol. This limit alone prevents
+  adopting this prototype as a continuously running production store.
+- LocalBackend now recovers the target key from the durable journal before deciding
+  writes (#55). This avoids accepting a stale successor after another process crashes
+  after fsync. The cost is a full journal scan per write; torn/unparsable tails block
+  writes. Existing long-lived read/list calls can still return older published data;
+  use a fresh LocalBackend for authoritative recovery reads (the CLI does this).
+- The initial worker's14 passing tests were insufficient: independent boundary tests
+  first failed10/14, then a long-lived-writer crash test exposed the engine defect.
+  Both failures drove changes. Current focused suite has33 passing tests on Windows;
+  cross-platform experimental CI is separate from the original product CI.

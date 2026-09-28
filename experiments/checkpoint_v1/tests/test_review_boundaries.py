@@ -78,3 +78,43 @@ def test_cli_save_resume_lookup(tmp_path):
         r = subprocess.run(prefix+args,capture_output=True,text=True,timeout=15)
         assert r.returncode == 0, r.stderr
         assert json.loads(r.stdout)['status'] == expected
+
+
+def test_successor_cannot_launder_predecessor_uncertainty(tmp_path):
+    be = LocalBackend(tmp_path)
+    question = {'id':'policy','question':'Which selection rule?','affected_action_ids':['export']}
+    one = cp.save(be, 'p', proposal('one', open_questions=[question]))
+    with pytest.raises(cp.CheckpointError, match='silently dropped'):
+        cp.save(be, 'p', proposal('bad', one, completed_actions=['export']))
+    assert cp.lookup(be,'p','bad')['status']=='not_found'
+    two = cp.save(be,'p',proposal('two',one,open_questions=[question]))
+    assert cp.resume(be,'p')['open_questions']==[question]
+    cp.save(be,'p',proposal('three',two,completed_actions=['export'],
+                           resolved_questions=[{'id':'policy','decision_ref':'approved-decision.md#selection'}]))
+    assert cp.resume(be,'p')['open_questions']==[]
+    assert cp.resume(be,'p')['resolved_questions'][0]['decision_ref']=='approved-decision.md#selection'
+
+
+def test_question_rewording_and_unknown_resolution_rejected(tmp_path):
+    be = LocalBackend(tmp_path)
+    q={'id':'q','question':'Unsettled','affected_action_ids':['export']}
+    one=cp.save(be,'p',proposal('one',open_questions=[q]))
+    with pytest.raises(cp.CheckpointError,match='changed'):
+        cp.save(be,'p',proposal('bad',one,open_questions=[dict(q,question='Settled')]))
+    with pytest.raises(cp.CheckpointError,match='not open'):
+        cp.save(be,'p',proposal('unknown',one,open_questions=[q],resolved_questions=[{'id':'other','decision_ref':'somewhere'}]))
+
+
+def test_acknowledged_write_readback_failure_is_outcome_unknown(tmp_path,monkeypatch,capsys):
+    pin=tmp_path/'proposal.json'; pin.write_text(json.dumps(proposal('one')))
+    real_lookup=cp.lookup
+    def unavailable(*a,**kw):
+        raise OSError('read unavailable')
+    monkeypatch.setattr(cp,'lookup',unavailable)
+    code=cp.main(['--store',str(tmp_path/'store'),'--project','p','save','--input',str(pin)])
+    assert code==4
+    assert json.loads(capsys.readouterr().out)['status']=='outcome_unknown'
+    monkeypatch.setattr(cp,'lookup',real_lookup)
+    be=LocalBackend(tmp_path/'store')
+    assert cp.lookup(be,'p','one')['status']=='accepted'
+    assert cp.save(be,'p',proposal('one'))['duplicate'] is True

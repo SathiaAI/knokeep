@@ -1,0 +1,16 @@
+PASS clean -> {"verdict": "CLEAN_NO_RECOVERY_NEEDED", "findings": [], "prefix_end": 142, "journal_size": 142, "unparsed_bytes": null, "published_mismatch": [], "invalid_keys": [], "ambiguous_frames": []}
+PASS partial-final-legacy -> {"verdict": "INCOMPLETE_HUMAN_DECISION_REQUIRED", "findings": ["TAIL_UNPARSABLE_NO_LATER_FRAME_FOUND"], "prefix_end": 142, "journal_size": 187, "unparsed_bytes": [142, 187], "published_mismatch": [], "invalid_keys": [], "ambiguous_frames": []}
+PASS partial-final-v2-torn-fence -> {"verdict": "INCOMPLETE_HUMAN_DECISION_REQUIRED", "findings": ["TAIL_DAMAGED_AMBIGUOUS"], "prefix_end": 142, "journal_size": 201, "unparsed_bytes": [142, 201], "published_mismatch": [], "invalid_keys": [], "ambiguous_frames": [[146, "a/x", []]]}
+PASS partial-final-v2-torn-body -> {"verdict": "INCOMPLETE_HUMAN_DECISION_REQUIRED", "findings": ["TAIL_UNPARSABLE_NO_LATER_FRAME_FOUND"], "prefix_end": 142, "journal_size": 159, "unparsed_bytes": [142, 159], "published_mismatch": [], "invalid_keys": [], "ambiguous_frames": []}
+PASS damaged-length-covers-later-valid -> {"verdict": "INCOMPLETE_HUMAN_DECISION_REQUIRED", "findings": ["TAIL_DAMAGED_AMBIGUOUS", "PUBLISHED_DATA_DIFFERS_FROM_PREFIX"], "prefix_end": 65, "journal_size": 212, "unparsed_bytes": [65, 212], "published_mismatch": ["a/two"], "invalid_keys": [], "ambiguous_frames": [[94, "a/one", [98]], [98, "a/one", [94]]]}
+PASS forged-frame-inside-body-after-damage -> {"verdict": "INCOMPLETE_HUMAN_DECISION_REQUIRED", "findings": ["TAIL_DAMAGED_AMBIGUOUS", "PUBLISHED_DATA_DIFFERS_FROM_PREFIX"], "prefix_end": 65, "journal_size": 215, "unparsed_bytes": [65, 215], "published_mismatch": ["a/two"], "invalid_keys": [], "ambiguous_frames": [[67, "a/blob", [71, 91, 95]], [71, "a/blob", [67, 91, 95]], [91, "a/two", [67, 71, 95]], [95, "a/two", [67, 71, 91]]]}
+PASS published-newer-than-prefix -> {"verdict": "INCOMPLETE_HUMAN_DECISION_REQUIRED", "findings": ["TAIL_UNPARSABLE_NO_LATER_FRAME_FOUND", "PUBLISHED_DATA_DIFFERS_FROM_PREFIX"], "prefix_end": 142, "journal_size": 151, "unparsed_bytes": [142, 151], "published_mismatch": ["a/one"], "invalid_keys": [], "ambiguous_frames": []}
+PASS traversal-key-in-journal -> {"verdict": "INCOMPLETE_HUMAN_DECISION_REQUIRED", "findings": ["INVALID_KEYS_NOT_MATERIALIZED", "PUBLISHED_DATA_DIFFERS_FROM_PREFIX"], "prefix_end": 131, "journal_size": 131, "unparsed_bytes": null, "published_mismatch": ["a/two", "../escape"], "invalid_keys": ["../escape"], "ambiguous_frames": []}
+PASS missing-journal -> {"verdict": "REFUSE_JOURNAL_MISSING", "ambiguous_frames": []}
+PASS concurrent-writer-holds-lock -> {"verdict": "REFUSE_BUSY_WRITER_ACTIVE", "ambiguous_frames": []}
+PASS journal-growth-during-export -> {"verdict": "REFUSE_STORE_CHANGED_DURING_EXPORT", "ambiguous_frames": []}
+PASS interrupted-export-rerun -> {"verdict": "INCOMPLETE_HUMAN_DECISION_REQUIRED", "findings": ["TAIL_UNPARSABLE_NO_LATER_FRAME_FOUND"], "prefix_end": 142, "journal_size": 143, "unparsed_bytes": [142, 143], "published_mismatch": [], "invalid_keys": [], "ambiguous_frames": []}
+PASS rerun-refuses-overwrite -> {"verdict": "REFUSE_OUTPUT_EXISTS", "ambiguous_frames": []}
+PASS symlink-in-store -> {"verdict": "REFUSE_SYMLINK_OR_SPECIAL", "ambiguous_frames": []}
+RESULT OK
+exit=0

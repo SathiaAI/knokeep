@@ -1,0 +1,5 @@
+{"case": "exit0", "pass": true, "outcome": "exited", "os_exit_code": 0, "elapsed_s": 0.016, "tree_kill": null, "checks": {"outcome_exited": true, "os_exit_0": true, "stdout_kept": true, "stderr_kept": true}}
+{"case": "exit7", "pass": true, "outcome": "exited", "os_exit_code": 7, "elapsed_s": 0.016, "tree_kill": null, "checks": {"outcome_exited": true, "os_exit_7_not_text": true}}
+{"case": "timeout_tree", "pass": true, "outcome": "timeout_killed", "os_exit_code": -9, "elapsed_s": 3.002, "tree_kill": "killpg SIGKILL", "checks": {"outcome_timeout": true, "bounded_elapsed": true, "exit_code_recorded": true, "stdout_before_kill_kept": true}}
+{"case": "timeout_tree_cleanup", "pass": true, "checks": {"child_gone": true, "grandchild_gone": true}}
+{"all_pass": true, "platform": "linux", "python": "3.11.15"}

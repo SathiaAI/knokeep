@@ -1,0 +1,49 @@
+{
+  "cases": [
+    {
+      "case": "read_after_durable_child_crash",
+      "passed": true,
+      "observed": "durable-new",
+      "child_exit": 86
+    },
+    {
+      "case": "read_preserves_journal",
+      "passed": true
+    },
+    {
+      "case": "list_after_durable_child_crash",
+      "passed": true,
+      "observed": [
+        "p/new"
+      ]
+    },
+    {
+      "case": "read_unpublished_creation",
+      "passed": true,
+      "observed": "durable-create"
+    },
+    {
+      "case": "list_and_read_preserve_journal",
+      "passed": true
+    },
+    {
+      "case": "ambiguous_restart_does_not_rollback_view",
+      "passed": true,
+      "before": "later-durable",
+      "after": "later-durable",
+      "error": "BackendCorruptionError"
+    },
+    {
+      "case": "ambiguous_restart_reports_uncertainty",
+      "passed": true,
+      "error": "BackendCorruptionError"
+    },
+    {
+      "case": "ambiguous_restart_preserves_journal",
+      "passed": true,
+      "sha256": "aab5a251f83f754625057ef5bea400bb381576f5bda0c0f832185389824c1e48"
+    }
+  ],
+  "pass": 8,
+  "total": 8
+}

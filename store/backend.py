@@ -19,6 +19,11 @@ class Lock:
     fence: int = 0
 
 
+class BackendCorruptionError(Exception):
+    """Raised by read()/list() when the durable journal cannot be fully replayed
+    (contract §2: CORRUPTION raises; never return false NOT_FOUND or stale bytes)."""
+
+
 class BackendBusyError(Exception):
     """Raised by lock() on acquire-timeout / sharing violation (maps to ERROR{BUSY}
     at the caller layer). JUDGMENT CALL: contract §2 types lock() as returning a
@@ -78,4 +83,4 @@ class StoreBackend(typing.Protocol):
     def health(self) -> BackendHealth: ...
 
 
-__all__ = ["StoreBackend", "Lock", "BackendBusyError"]
+__all__ = ["StoreBackend", "Lock", "BackendBusyError", "BackendCorruptionError"]

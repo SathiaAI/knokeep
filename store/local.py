@@ -66,11 +66,11 @@ JUDGMENT CALLS (each also called out inline at its point of use):
      are length-prefixed (`>I` key length, key bytes, `>Q` body length, body
      bytes, 32-byte sha256 digest of the body) so a record can be parsed
      without scanning for delimiters that might collide with arbitrary body
-     bytes. Replay stops at the first record that fails to parse fully or
-     whose trailing digest does not match — that can only be an in-flight
-     append truncated by a crash (recall the *previous* record's fsync
-     already made it durable), so the safe reading is "ignore the torn
-     tail, keep everything before it."
+     bytes. Replay stops at the first record that fails to parse fully or whose
+     trailing digest does not match. If any bytes remain after that point
+     (end != size), recovery publish is forbidden and read/list report
+     uncertainty — the tail is never treated as a proven-harmless torn
+     final append.
 
   3. Create-only publish uses O_EXCL only as a **name reservation**
      (open+immediately close an empty file), never to stream bytes — the
@@ -124,7 +124,7 @@ from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
 
 from . import gate
-from .backend import BackendBusyError, Lock
+from .backend import BackendBusyError, BackendCorruptionError, Lock
 from .context import Overwrite
 from .gate import ScannedBody, ScannedKey
 from .types import (
@@ -349,6 +349,10 @@ class LocalBackend:
         # it despite holding different file locks.
         self._fence_lock = threading.Lock()
         self._last_accepted_fence: Dict[str, int] = {}
+        # True when journal.log cannot be replayed to EOF without stopping on
+        # unparsable bytes — startup recovery must not publish, and read/list
+        # fail closed until the journal is repaired out of band.
+        self._journal_ambiguous = False
 
         for d in (
             self._root,
@@ -371,39 +375,64 @@ class LocalBackend:
                 "LocalBackend: staging/ and data/ must be on the same volume"
             )
 
-        # Journal kept open for the life of the adapter ("already open" per
-        # contract §4.1's write-order description) and appended-to under
-        # cas.lock in write().
-        self._journal_fh = open(self._journal_path, "ab")
-
-        # One-time case-insensitivity probe (JUDGMENT CALL #5 above).
-        self._case_insensitive = self._detect_case_insensitive()
-
-        # Resume: replay the journal to re-materialize any key whose
-        # published blob is missing or torn (contract §3). This MUST hold
-        # the same cas.lock write() uses: two LocalBackend instances (e.g.
-        # in different processes) can be constructed concurrently, and
-        # without the lock one process's resume-rebuild of a key can race
-        # another process's in-flight write() to that same key (both doing
-        # an O_EXCL create for the same path at once) — a real race found
-        # by tests/test_local_backend.py's two-process tests, not a
-        # theoretical concern.
-        resume_lock = _FileLock(self._cas_lock_path)
-        if not resume_lock.acquire(self._lock_timeout_s):
-            raise RuntimeError(
-                "LocalBackend: could not acquire cas.lock to resume/scavenge on startup"
+        if not self._journal_path.is_file() and self._data_dir_has_published_files():
+            raise BackendCorruptionError(
+                "journal.log is missing but data/ contains published blobs; "
+                "the journal is the durability source of truth and is not recreated"
             )
+
+        self._journal_fh = None
         try:
-            self._resume()
-            # Startup scavenger: remove staging temps older than TTL, left
-            # behind by a process that crashed between mkstemp and the
-            # final os.replace/unlink (contract §3/§4.1). Guarded by the
-            # same lock so it never races a concurrent publish's mkstemp.
-            self._scavenge_staging()
-        finally:
-            resume_lock.release()
+            # Journal kept open for the life of the adapter ("already open" per
+            # contract §4.1's write-order description) and appended-to under
+            # cas.lock in write(). "ab" creates journal.log only for a genuinely
+            # new empty store (no published blobs under data/).
+            self._journal_fh = open(self._journal_path, "ab")
+
+            self._case_insensitive = False
+
+            # Resume: replay the journal to re-materialize any key whose
+            # published blob is missing or torn (contract §3). This MUST hold
+            # the same cas.lock write() uses: two LocalBackend instances (e.g.
+            # in different processes) can be constructed concurrently, and
+            # without the lock one process's resume-rebuild of a key can race
+            # another process's in-flight write() to that same key (both doing
+            # an O_EXCL create for the same path at once) — a real race found
+            # by tests/test_local_backend.py's two-process tests, not a
+            # theoretical concern. The case-insensitivity probe also runs here
+            # so a transient probe file under data/ cannot be mistaken for user
+            # data by a concurrent list() on another instance.
+            resume_lock = _FileLock(self._cas_lock_path)
+            if not resume_lock.acquire(self._lock_timeout_s):
+                raise RuntimeError(
+                    "LocalBackend: could not acquire cas.lock to resume/scavenge on startup"
+                )
+            try:
+                self._case_insensitive = self._detect_case_insensitive()
+                self._resume()
+                # Startup scavenger: remove staging temps older than TTL, left
+                # behind by a process that crashed between mkstemp and the
+                # final os.replace/unlink (contract §3/§4.1). Guarded by the
+                # same lock so it never races a concurrent publish's mkstemp.
+                # An incomplete journal makes staging potentially useful
+                # recovery evidence; preserve it until explicitly reviewed.
+                if not self._journal_ambiguous:
+                    self._scavenge_staging()
+            finally:
+                resume_lock.release()
+        except Exception:
+            self.close()
+            raise
 
     # -- construction helpers -------------------------------------------------
+
+    def _data_dir_has_published_files(self) -> bool:
+        if not self._data_dir.exists():
+            return False
+        for path in self._data_dir.rglob("*"):
+            if path.is_file():
+                return True
+        return False
 
     def _detect_case_insensitive(self) -> bool:
         name = "case-probe-" + secrets.token_hex(8)
@@ -415,6 +444,40 @@ class LocalBackend:
         finally:
             with contextlib.suppress(OSError):
                 lower.unlink()
+
+    def _scan_journal_latest(
+        self,
+    ) -> Tuple[Dict[str, Tuple[bytes, int]], Dict[str, int]]:
+        scan_state: Dict[str, int] = {}
+        latest: Dict[str, Tuple[bytes, int]] = {}
+        for key, raw, last_accepted_fence in self._iter_journal_records(scan_state):
+            latest[key] = (raw, last_accepted_fence)
+        return latest, scan_state
+
+    @staticmethod
+    def _journal_scan_complete(scan_state: Dict[str, int]) -> bool:
+        """True only when the parser consumed journal.log to EOF (end == size).
+
+        Any trailing bytes — torn append, opaque garbage, or a complete record
+        the sequential parser could not reach — forbid recovery publish and make
+        read/list report uncertainty. The tail is never classified as harmless."""
+        return scan_state.get("end", 0) == scan_state.get("size", 0)
+
+    def _materialize_from_journal(self, latest: Dict[str, Tuple[bytes, int]]) -> None:
+        for key, (raw, last_accepted_fence) in latest.items():
+            rel_path = self._key_to_relpath(key)
+            data_path = self._safe_join(self._data_dir, rel_path)
+            expected_hash = sha256_hex(raw)
+            needs_rebuild = True
+            if data_path.exists():
+                try:
+                    if sha256_hex(data_path.read_bytes()) == expected_hash:
+                        needs_rebuild = False
+                except OSError:
+                    needs_rebuild = True
+            if needs_rebuild:
+                self._publish(rel_path, data_path, raw, create=not data_path.exists())
+            self._last_accepted_fence[key] = last_accepted_fence
 
     def _iter_journal_records(
         self, _scan_state: Optional[Dict[str, int]] = None
@@ -437,12 +500,16 @@ class LocalBackend:
         the last valid record) and "size" (file size seen at open), so a
         caller can tell a clean EOF from a scan that stopped on unparsable
         bytes (see `_recover_key_before_decision`)."""
+        if not self._journal_path.is_file():
+            raise BackendCorruptionError(
+                "journal.log is missing; published data/ cannot be treated as authoritative"
+            )
         try:
             f = open(self._journal_path, "rb")
         except FileNotFoundError:
-            if _scan_state is not None:
-                _scan_state["end"] = _scan_state["size"] = 0
-            return
+            raise BackendCorruptionError(
+                "journal.log is missing; published data/ cannot be treated as authoritative"
+            ) from None
         with f:
             # Callers hold cas.lock. Treat on-disk framing as untrusted:
             # never pass a claimed length larger than the remaining file to
@@ -503,25 +570,16 @@ class LocalBackend:
                 yield key, body, last_accepted_fence
 
     def _resume(self) -> None:
-        latest: Dict[str, Tuple[bytes, int]] = {}
-        for key, raw, last_accepted_fence in self._iter_journal_records():
-            latest[key] = (raw, last_accepted_fence)  # last record per key wins
-        for key, (raw, last_accepted_fence) in latest.items():
-            rel_path = self._key_to_relpath(key)
-            data_path = self._safe_join(self._data_dir, rel_path)
-            expected_hash = sha256_hex(raw)
-            needs_rebuild = True
-            if data_path.exists():
-                try:
-                    if sha256_hex(data_path.read_bytes()) == expected_hash:
-                        needs_rebuild = False
-                except OSError:
-                    needs_rebuild = True
-            if needs_rebuild:
-                self._publish(rel_path, data_path, raw, create=not data_path.exists())
-            # Construction is single-threaded (this instance is not yet
-            # visible to any other thread), so no lock is needed here.
-            self._last_accepted_fence[key] = last_accepted_fence
+        """Replay journal.log under cas.lock. A full scan to EOF is required
+        before ANY recovery publish: unparsable bytes before EOF may hide later
+        durable records, so partial replay must not overwrite a newer published
+        blob with an older prefix-only winner."""
+        latest, scan_state = self._scan_journal_latest()
+        if not self._journal_scan_complete(scan_state):
+            self._journal_ambiguous = True
+            return
+        self._journal_ambiguous = False
+        self._materialize_from_journal(latest)
 
     def _recover_key_before_decision(self, key: str, rel_path: Path, data_path: Path) -> None:
         """Caller holds cas.lock. Re-materializes `key` from the durable
@@ -549,8 +607,12 @@ class LocalBackend:
         for rec_key, raw, last_accepted_fence in self._iter_journal_records(scan_state):
             if rec_key == key:
                 latest = (raw, last_accepted_fence)
-        if scan_state.get("end", 0) != scan_state.get("size", 0):
+        if not self._journal_scan_complete(scan_state):
             raise _RecoveryIncomplete()
+        if latest is None and data_path.is_file():
+            raise BackendCorruptionError(
+                f"published blob at {key!r} has no durable journal record"
+            )
         if latest is None:
             return
         raw, last_accepted_fence = latest
@@ -623,6 +685,10 @@ class LocalBackend:
     # -- journal + publish (contract §3/§4.1 write order) -------------------
 
     def _journal_append(self, key: str, raw: bytes, last_accepted_fence: int = 0) -> None:
+        if not self._journal_path.is_file():
+            raise BackendCorruptionError(
+                "journal.log is missing; cannot append a durability commit"
+            )
         # H1 Increment 2, Phase 1: `last_accepted_fence` defaults to 0 so
         # every pre-Phase-1 call site (tests/test_local_backend.py's crash-
         # simulation tests reach into this private method directly, per its
@@ -689,27 +755,76 @@ class LocalBackend:
         return BackendHealth(ok=True, detail=f"local filesystem backend at {self._root}")
 
     def read(self, key: str) -> Optional[Blob]:
+        """Return the latest durable value for `key` (journal is authoritative).
+
+        Under a bounded cas.lock wait, replays journal.log far enough to
+        materialize any committed-but-unpublished record for this key, then
+        reads the published blob while still holding the lock so this call's
+        view matches that synchronized scan. Cost is O(journal bytes) per call.
+        Published files without a journal record raise corruption. Separate
+        read/list calls are not a cross-key transactional snapshot."""
+        if self._journal_ambiguous:
+            raise BackendCorruptionError(
+                "journal.log cannot be fully replayed; read/list are unavailable"
+            )
         rel_path = self._key_to_relpath(key)
         data_path = self._safe_join(self._data_dir, rel_path)
+        lock = _FileLock(self._cas_lock_path)
+        if not lock.acquire(self._lock_timeout_s):
+            raise BackendBusyError("cas.lock busy during read")
         try:
-            raw = data_path.read_bytes()
-        except FileNotFoundError:
-            return None
-        # PERMISSION / other OSErrors propagate per contract §2 ("None ONLY
-        # for NOT_FOUND; PERMISSION/NETWORK/CORRUPTION RAISE").
-        return Blob(body=raw, version_hash=sha256_hex(raw))
+            try:
+                self._recover_key_before_decision(key, rel_path, data_path)
+            except _RecoveryIncomplete:
+                raise BackendCorruptionError(
+                    "journal.log cannot be fully replayed to EOF"
+                ) from None
+            except (_ReplaceBusy, _ReservationRace):
+                raise BackendBusyError(
+                    "recovery publish contended on cas.lock or data path"
+                ) from None
+            except BackendCorruptionError:
+                raise
+            try:
+                raw = data_path.read_bytes()
+            except FileNotFoundError:
+                return None
+            # PERMISSION / other OSErrors propagate per contract §2 ("None ONLY
+            # for NOT_FOUND; PERMISSION/NETWORK/CORRUPTION RAISE").
+            return Blob(body=raw, version_hash=sha256_hex(raw))
+        finally:
+            lock.release()
 
     def list(self, prefix: str) -> Iterator[str]:
-        # Strong consistency: this reflects the on-disk data/ dir at call
-        # time — a local filesystem has no eventual-consistency window.
-        results: List[str] = []
-        if self._data_dir.exists():
-            for path in self._data_dir.rglob("*"):
-                if path.is_file():
-                    rel = path.relative_to(self._data_dir).as_posix()
-                    if rel.startswith(prefix):
-                        results.append(rel)
-        results.sort()
+        """Keys under `prefix` visible after a journal-aware scan.
+
+        Committed-but-unpublished keys appear once their journal record is
+        reachable by a clean EOF replay (same authority model as read()).
+        The returned iterator is produced only after cas.lock is released."""
+        if self._journal_ambiguous:
+            raise BackendCorruptionError(
+                "journal.log cannot be fully replayed; read/list are unavailable"
+            )
+        lock = _FileLock(self._cas_lock_path)
+        if not lock.acquire(self._lock_timeout_s):
+            raise BackendBusyError("cas.lock busy during list")
+        try:
+            latest, scan_state = self._scan_journal_latest()
+            if not self._journal_scan_complete(scan_state):
+                raise BackendCorruptionError(
+                    "journal.log cannot be fully replayed to EOF"
+                )
+            if self._data_dir.exists():
+                for path in self._data_dir.rglob("*"):
+                    if path.is_file():
+                        rel = path.relative_to(self._data_dir).as_posix()
+                        if rel.startswith(prefix) and rel not in latest:
+                            raise BackendCorruptionError(
+                                f"published blob at {rel!r} has no durable journal record"
+                            )
+            results = sorted(k for k in latest if k.startswith(prefix))
+        finally:
+            lock.release()
         return iter(results)
 
     def write(
@@ -791,6 +906,8 @@ class LocalBackend:
         try:
             self._recover_key_before_decision(k, rel_path, data_path)
         except _RecoveryIncomplete:
+            return ERROR(ErrorKind.CORRUPTION)
+        except BackendCorruptionError:
             return ERROR(ErrorKind.CORRUPTION)
         except PermissionError:
             return ERROR(ErrorKind.PERMISSION)
@@ -1161,8 +1278,12 @@ class LocalBackend:
     # -- test/ops convenience (not part of StoreBackend protocol) ----------
 
     def close(self) -> None:
+        fh = self._journal_fh
+        if fh is None:
+            return
+        self._journal_fh = None
         with contextlib.suppress(Exception):
-            self._journal_fh.close()
+            fh.close()
 
 
-__all__ = ["LocalBackend"]
+__all__ = ["LocalBackend", "BackendCorruptionError"]

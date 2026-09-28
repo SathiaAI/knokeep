@@ -11,7 +11,8 @@ health/eval. Skill + MCP share ONE store (the LocalBackend root). Schema v1.
 V2.1 changes vs V1: safe_write/_atomic/Lock/body_hash-CAS and the write-path secret scan
 are gone; the CAS token is the store's 64-hex sha256 (was a 12-hex body hash). Structural
 validation (identifier shape, no-newline metadata) stays skill-side. The bootstrap/health
-out-of-band store audit enumerates via backend.list()/read() and re-scans each blob through
+out-of-band store audit walks published files read-only via health_inspect (including
+unjournaled bypass blobs LocalBackend read/list refuse) and re-scans raw bytes through
 store.gate (content-based: reject non-utf-8/secret-bearing blobs). knokeep_secretgate retired."""
 import sys, os, re, json, datetime, argparse
 import hashlib, random, time, contextlib
@@ -28,6 +29,8 @@ from store.health_inspect import (
     safe_data_dir_for_audit,
     read_telemetry_bytes,
     resolve_store_root,
+    enumerate_project_published_files_for_audit,
+    is_os_metadata_basename,
 )
 from store.backend import BackendBusyError
 from store.types import OK, STALE, EXISTS, ERROR, ErrorKind
@@ -696,38 +699,41 @@ def _is_resolved(backend, project, conflict_key):
         return False
     return bool(fm) and fm.get("conflict_key") == conflict_key and fm.get("project_id") == project
 
-_BENIGN_STORE_FILES = {".ds_store", "thumbs.db", "desktop.ini"}
-
-def _audit_store(backend, project):
+def _audit_store(store, project):
     """Out-of-band store audit (single gate, T-2/T-3). Every in-helper write is
     already gate-scanned, so this catches a BYPASS: a secret or non-text blob
-    written straight to the store. Enumerates via backend.list() (not a raw dir
-    walk) and re-scans each blob's bytes through store.gate — content-based, so a
-    stray binary blob is refused regardless of its file name/extension. Benign
-    OS/tooling files (.DS_Store, Thumbs.db, desktop.ini) are skipped."""
+    written straight to data/ (including unjournaled orphans that LocalBackend
+    read/list refuse). Uses health_inspect's read-only published-file walk — not
+    backend.list/read — and re-scans raw bytes through store.gate (content-based).
+    Every file, including OS metadata names (.DS_Store, Thumbs.db, desktop.ini),
+    is secret-scanned first; those names are exempt ONLY from the non-text/binary
+    check. secret_scan is heuristic, not a guarantee. Walk budget, layout and
+    journal uncertainty are reported as findings, not a silent all-clear."""
     findings = []
-    for key in backend.list(project + "/"):
-        name = key.rsplit("/", 1)[-1].lower()
-        if name in _BENIGN_STORE_FILES:
+    entries, block_reasons, uncertainty_reasons = enumerate_project_published_files_for_audit(
+        store, project
+    )
+    for code in block_reasons:
+        findings.append({"key": project + "/", "reason": f"audit blocked: {code}"})
+    for code in uncertainty_reasons:
+        findings.append({"key": project + "/", "reason": f"store audit uncertain: {code}"})
+    for key, raw in entries:
+        if raw is None:
+            findings.append({"key": key, "reason": "unreadable blob in store"})
             continue
-        try:
-            blob = backend.read(key)
-        except Exception:
-            findings.append({"key": key, "reason": "unreadable blob in store"}); continue
-        if blob is None:
-            continue
-        if not gate._is_acceptable_text(blob.body):
-            findings.append({"key": key, "reason": "non-text/binary content in store"}); continue
-        hits = gate.secret_scan(blob.body)
+        hits = gate.secret_scan(raw)
         if hits:
             findings.append({"key": key, "reasons": hits})
+            continue
+        if not gate._is_acceptable_text(raw) and not is_os_metadata_basename(key):
+            findings.append({"key": key, "reason": "non-text/binary content in store"})
     return findings
 
 
 def bootstrap(store, project):
     _validate_project(project)
     backend = _backend(store)
-    findings = _audit_store(backend, project)
+    findings = _audit_store(store, project)
     if findings:
         die(reason="store contains secrets - refusing to resume", findings=findings[:10])
     sblob = backend.read(_key(project, "state"))

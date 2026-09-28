@@ -16,13 +16,14 @@ from __future__ import annotations
 import multiprocessing
 import os
 import tempfile
+from pathlib import Path
 import time
 import types
 
 import pytest
 
 from store import gate
-from store.backend import BackendBusyError
+from store.backend import BackendBusyError, BackendCorruptionError
 from store.local import LocalBackend
 from store.types import ERROR, OK, STALE, ErrorKind, sha256_hex
 from tests.ctx_helpers import create_ctx, fenced_ctx, overwrite_ctx
@@ -38,8 +39,8 @@ def test_journal_lengths_checked_before_allocating_and_writes_fail_closed(tmp_pa
     """Corrupt lengths must not reach file.read(n) as allocation requests.
 
     A bounded read spy makes even UINT32 key-length coverage safe on the
-    unfixed parser. The existing durable prefix remains readable on restart;
-    subsequent writes refuse the malformed tail and never append behind it.
+    unfixed parser. A malformed tail makes the journal incomplete (end !=
+    size); read/list report corruption and writes refuse without appending.
     """
     import builtins
     import hashlib
@@ -86,12 +87,14 @@ def test_journal_lengths_checked_before_allocating_and_writes_fail_closed(tmp_pa
         result = gate.persist(backend, 'p/new', b'new', ctx=create_ctx(), doc_type='system_state')
         assert result == ERROR(ErrorKind.CORRUPTION)
         assert backend._journal_path.read_bytes() == original
-        assert backend.read('p/new') is None
+        with pytest.raises(BackendCorruptionError):
+            backend.read('p/new')
         backend.close()
         fresh = LocalBackend(tmp_path)
         try:
-            assert fresh.read('p/good').body == b'good'
-            assert fresh.read('p/bad') is None
+            assert fresh._journal_ambiguous
+            with pytest.raises(BackendCorruptionError):
+                fresh.read('p/good')
             assert gate.persist(fresh, 'p/new', b'new', ctx=create_ctx(), doc_type='system_state') == ERROR(ErrorKind.CORRUPTION)
             assert fresh._journal_path.read_bytes() == original
         finally:
@@ -171,15 +174,12 @@ def test_c8_resume_uses_latest_journal_record_for_a_key(tmp_path):
 
 
 def test_c8_resume_ignores_torn_tail_journal_record(tmp_path):
-    """A journal record truncated mid-append (the crash happened DURING the
-    fsync'd append itself, so it was never durable) must be ignored, and
-    everything before it must still resume correctly."""
+    """Trailing bytes after the last complete record forbid recovery publish;
+    journal and any published bytes are preserved and read/list fail closed."""
     root = tmp_path / "store-root"
     backend = LocalBackend(root)
     key = "resume/good"
     backend._journal_append(key, b"good-and-durable")
-    # Simulate a torn trailing record: a well-formed key-length header
-    # claiming a huge body that was never actually written.
     import struct
 
     torn_key = b"resume/torn-tail"
@@ -188,13 +188,17 @@ def test_c8_resume_ignores_torn_tail_journal_record(tmp_path):
     backend._journal_fh.write(b"only-a-few-bytes")
     backend._journal_fh.flush()
     os.fsync(backend._journal_fh.fileno())
+    journal_before = (root / "journal" / "journal.log").read_bytes()
     backend.close()
 
     resumed = LocalBackend(root)
-    blob = resumed.read(key)
-    assert blob is not None and blob.body == b"good-and-durable"
-    assert resumed.read("resume/torn-tail") is None
-    resumed.close()
+    try:
+        assert resumed._journal_ambiguous
+        with pytest.raises(BackendCorruptionError):
+            resumed.read(key)
+        assert (root / "journal" / "journal.log").read_bytes() == journal_before
+    finally:
+        resumed.close()
 
 
 # ---------------------------------------------------------------------------
@@ -318,11 +322,10 @@ def test_c3_atomicity_reader_never_sees_torn_publish(tmp_path):
     os.write(fd, new_body[: len(new_body) // 2])  # only half written
     os.close(fd)
 
-    # The published key must still be exactly the old, complete blob — a
-    # reader is never exposed to the half-written staging file.
+    # Staging is half-written; the durable journal commit is authoritative on read.
     blob = backend.read(key)
     assert blob is not None
-    assert blob.body == b"old-complete-value"
+    assert blob.body == new_body
 
     backend.close()
 
@@ -1064,8 +1067,7 @@ def test_new_records_appended_after_legacy_journal_replay_together(tmp_path):
 
 
 def test_torn_trailer_on_v2_record_drops_only_that_record(tmp_path):
-    """A crash mid-append of the 8-byte fence trailer must drop exactly the
-    torn record and keep everything before it (same rule as a torn body)."""
+    """Incomplete v2 fence trailer leaves end != size: no recovery publish."""
     root = tmp_path / "store-root"
     backend = LocalBackend(root)
     backend._journal_append("torn/keep", b"kept", 7)
@@ -1074,12 +1076,18 @@ def test_torn_trailer_on_v2_record_drops_only_that_record(tmp_path):
     full = _JOURNAL_V2_MAGIC + _legacy_journal_record("torn/tail", b"lost") + b"\x00\x00\x00"  # 3 of 8 trailer bytes
     backend._journal_fh.write(full)
     backend._journal_fh.flush()
+    journal_before = (root / "journal" / "journal.log").read_bytes()
     backend.close()
 
     resumed = LocalBackend(root)
-    assert list(resumed._iter_journal_records()) == [("torn/keep", b"kept", 7)]
-    assert resumed.read("torn/tail") is None
-    resumed.close()
+    try:
+        assert resumed._journal_ambiguous
+        assert list(resumed._iter_journal_records()) == [("torn/keep", b"kept", 7)]
+        with pytest.raises(BackendCorruptionError):
+            resumed.read("torn/keep")
+        assert (root / "journal" / "journal.log").read_bytes() == journal_before
+    finally:
+        resumed.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1275,6 +1283,10 @@ def _lock_after_expiry(backend, key, child_expiry, budget_s=15.0):
         time.sleep(0.05)
 
 
+def _data_path(root, key):
+    return root / "data" / Path(*key.split("/"))
+
+
 def _committed_unpublished_cas(root, key):
     """Parent opens first and stays open; the child then commits v1-child to
     the journal and dies before publishing. Returns (parent, base_hash,
@@ -1288,8 +1300,8 @@ def _committed_unpublished_cas(root, key):
     assert proc.returncode == _CRASH_EXIT_CODE, (proc.returncode, proc.stderr[-2000:])
     child_expiry = float(proc.stdout.strip().splitlines()[0])
     assert _journal_size(root) > size_before  # the child's record is durable
-    # Precondition of the defect: the published file still holds the old value.
-    assert parent.read(key).body == b"v0-base"
+    # Published view is still stale on disk until write() (or a dedicated read test) replays.
+    assert _data_path(root, key).read_bytes() == b"v0-base"
     return parent, r0.new_hash, sha256_hex(b"v1-child"), child_expiry
 
 
@@ -1323,7 +1335,7 @@ def test_long_lived_instance_create_only_sees_unpublished_creation(tmp_path):
     try:
         proc = _run_crash_child("create", root, key, "child-created")
         assert proc.returncode == _CRASH_EXIT_CODE, (proc.returncode, proc.stderr[-2000:])
-        assert parent.read(key) is None  # committed but not published
+        assert not _data_path(root, key).exists()
 
         other = gate.persist(parent, key, b"different-body", ctx=create_ctx(), doc_type="system_state")
         assert isinstance(other, EXISTS), other
@@ -1353,7 +1365,7 @@ def test_recovery_publish_failure_fails_closed_and_keeps_durable_record(tmp_path
         monkeypatch.setattr(parent, "_replace_with_retry", always_busy)
         busy = gate.persist(parent, key, b"v2-stale", ctx=overwrite_ctx(base_hash, lease), doc_type="system_state")
         assert isinstance(busy, ERROR) and busy.kind == ErrorKind.BUSY
-        assert parent.read(key).body == b"v0-base"  # nothing decided, nothing published
+        assert _data_path(root, key).read_bytes() == b"v0-base"  # write failed closed
         assert [b for k, b, _f in parent._iter_journal_records() if k == key][-1] == b"v1-child"
 
         monkeypatch.undo()
@@ -1378,6 +1390,261 @@ def test_write_fails_closed_when_journal_scan_stops_before_eof(tmp_path):
         r1 = gate.persist(backend, "torn/other", b"x", ctx=create_ctx(), doc_type="system_state")
         assert isinstance(r1, ERROR) and r1.kind == ErrorKind.CORRUPTION
         assert _journal_size(root) == size
-        assert backend.read("torn/other") is None
+        with pytest.raises(BackendCorruptionError):
+            backend.read("torn/other")
+    finally:
+        backend.close()
+
+
+def _assert_incomplete_journal_preserves_evidence(root, key, journal_before, data_before):
+    fresh = LocalBackend(root)
+    try:
+        assert fresh._journal_ambiguous
+        with pytest.raises(BackendCorruptionError):
+            fresh.read(key)
+        with pytest.raises(BackendCorruptionError):
+            list(fresh.list(""))
+        assert (root / "journal" / "journal.log").read_bytes() == journal_before
+        assert _data_path(root, key).read_bytes() == data_before
+    finally:
+        fresh.close()
+
+
+def test_incomplete_journal_opaque_only_tail_preserves_published(tmp_path):
+    """Six-byte opaque tail alone: must not replay prefix over published data."""
+    root = tmp_path / "store-root"
+    key = "regress/opaque-only"
+    backend = LocalBackend(root)
+    gate.persist(backend, key, b"old-prefix", ctx=create_ctx(), doc_type="system_state")
+    backend._journal_fh.write(b"\x00\x00\x00\x05ab")
+    backend._journal_fh.flush()
+    os.fsync(backend._journal_fh.fileno())
+    rel = backend._key_to_relpath(key)
+    data_path = backend._safe_join(backend._data_dir, rel)
+    backend._publish(rel, data_path, b"published-later", create=False)
+    journal_before = (root / "journal" / "journal.log").read_bytes()
+    data_before = _data_path(root, key).read_bytes()
+    assert data_before == b"published-later"
+    backend.close()
+    _assert_incomplete_journal_preserves_evidence(root, key, journal_before, data_before)
+
+
+def test_incomplete_journal_opaque_then_legacy_frame_preserves_published(tmp_path):
+    root = tmp_path / "store-root"
+    key = "regress/opaque-legacy"
+    backend = LocalBackend(root)
+    gate.persist(backend, key, b"old-prefix", ctx=create_ctx(), doc_type="system_state")
+    backend._journal_fh.write(b"\x00\x00\x00\x05ab")
+    backend._journal_fh.write(_legacy_journal_record(key, b"new-from-legacy"))
+    backend._journal_fh.flush()
+    os.fsync(backend._journal_fh.fileno())
+    backend._publish(backend._key_to_relpath(key), backend._safe_join(backend._data_dir, backend._key_to_relpath(key)), b"published-later", create=False)
+    journal_before = (root / "journal" / "journal.log").read_bytes()
+    data_before = _data_path(root, key).read_bytes()
+    assert data_before == b"published-later"
+    backend.close()
+    _assert_incomplete_journal_preserves_evidence(root, key, journal_before, data_before)
+
+
+def test_incomplete_journal_torn_v2_fence_preserves_published(tmp_path):
+    root = tmp_path / "store-root"
+    key = "regress/torn-fence"
+    backend = LocalBackend(root)
+    gate.persist(backend, key, b"old-prefix", ctx=create_ctx(), doc_type="system_state")
+    from store.local import _JOURNAL_V2_MAGIC
+
+    torn = _JOURNAL_V2_MAGIC + _legacy_journal_record(key, b"would-be-new") + b"\x00\x00\x00"
+    backend._journal_fh.write(torn)
+    backend._journal_fh.flush()
+    rel = backend._key_to_relpath(key)
+    data_path = backend._safe_join(backend._data_dir, rel)
+    backend._publish(rel, data_path, b"published-later", create=False)
+    journal_before = (root / "journal" / "journal.log").read_bytes()
+    data_before = _data_path(root, key).read_bytes()
+    assert data_before == b"published-later"
+    backend.close()
+    _assert_incomplete_journal_preserves_evidence(root, key, journal_before, data_before)
+
+
+def test_read_list_after_child_crash_without_write(tmp_path):
+    """read/list must observe another process's durable journal commit."""
+    root = tmp_path / "store-root"
+    key = "recover/read-only"
+    parent = LocalBackend(root)
+    try:
+        proc = _run_crash_child("create", root, key, "from-child")
+        assert proc.returncode == _CRASH_EXIT_CODE
+        assert not _data_path(root, key).exists()
+        assert parent.read(key).body == b"from-child"
+        assert key in list(parent.list("recover/"))
+    finally:
+        parent.close()
+
+
+def test_startup_opaque_suffix_preserves_bytes_and_fails_read(tmp_path):
+    """Valid prefix + opaque suffix + later durable record: never clobber."""
+    root = tmp_path / "store-root"
+    key = "ambig/same"
+    backend = LocalBackend(root)
+    r0 = gate.persist(backend, key, b"old-body", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    backend._journal_fh.write(b"\x00\x00\x00\x05ab")
+    backend._journal_fh.flush()
+    os.fsync(backend._journal_fh.fileno())
+    backend._journal_append(key, b"new-body")
+    rel = backend._key_to_relpath(key)
+    data_path = backend._safe_join(backend._data_dir, rel)
+    backend._publish(rel, data_path, b"new-body", create=False)
+    backend.close()
+
+    journal_before = (root / "journal" / "journal.log").read_bytes()
+    data_before = _data_path(root, key).read_bytes()
+    assert data_before == b"new-body"
+
+    fresh = LocalBackend(root)
+    try:
+        assert fresh._journal_ambiguous
+        with pytest.raises(BackendCorruptionError):
+            fresh.read(key)
+        with pytest.raises(BackendCorruptionError):
+            list(fresh.list(""))
+        assert (root / "journal" / "journal.log").read_bytes() == journal_before
+        assert _data_path(root, key).read_bytes() == data_before
+    finally:
+        fresh.close()
+
+
+def test_missing_journal_with_nonempty_data_fails_without_creating_log(tmp_path):
+    root = tmp_path / "store-root"
+    root.mkdir()
+    (root / "data" / "orphan").mkdir(parents=True)
+    (root / "data" / "orphan" / "blob").write_bytes(b"published-without-journal")
+    journal = root / "journal" / "journal.log"
+    assert not journal.exists()
+
+    with pytest.raises(BackendCorruptionError, match="journal.log is missing"):
+        LocalBackend(root)
+
+    assert not journal.exists()
+    assert (root / "data" / "orphan" / "blob").read_bytes() == b"published-without-journal"
+
+
+def test_genuinely_empty_store_still_creates_journal(tmp_path):
+    root = tmp_path / "store-root"
+    backend = LocalBackend(root)
+    try:
+        assert (root / "journal" / "journal.log").is_file()
+        r = gate.persist(backend, "new/k", b"first", ctx=create_ctx(), doc_type="system_state")
+        assert isinstance(r, OK)
+        assert backend.read("new/k").body == b"first"
+    finally:
+        backend.close()
+
+
+def test_ambiguous_startup_preserves_aged_staging_evidence(tmp_path):
+    backend = LocalBackend(tmp_path)
+    assert isinstance(gate.persist(backend, "p/a", b"original", ctx=create_ctx(), doc_type="system_state"), OK)
+    backend._journal_fh.write(b"KKJ2\x00")
+    backend._journal_fh.flush()
+    backend.close()
+    staged = tmp_path / "staging" / "recovery-evidence"
+    staged.write_bytes(b"possibly-relevant-body")
+    old = time.time() - 3600
+    os.utime(staged, (old, old))
+    fresh = LocalBackend(tmp_path)
+    try:
+        assert fresh._journal_ambiguous
+        assert staged.read_bytes() == b"possibly-relevant-body"
+    finally:
+        fresh.close()
+
+
+def test_runtime_journal_deletion_fails_read_and_list(tmp_path):
+    """LocalBackend keeps journal.log open for append for its whole lifetime.
+
+    On Windows the file cannot be deleted while that append handle is open
+    (unlike POSIX unlink-with-open-fd). Close only this fixture's append
+    handle, then remove the path, while keeping the same backend instance
+    for read/list — the adapter must not treat stale data/ as authoritative."""
+    root = tmp_path / "store-root"
+    key = "live/k"
+    backend = LocalBackend(root)
+    try:
+        r = gate.persist(backend, key, b"authoritative", ctx=create_ctx(), doc_type="system_state")
+        assert isinstance(r, OK)
+        journal = root / "journal" / "journal.log"
+        data_bytes = _data_path(root, key).read_bytes()
+        backend._journal_fh.close()
+        backend._journal_fh = None
+        journal.unlink()
+        assert not journal.exists()
+        assert _data_path(root, key).read_bytes() == data_bytes
+        with pytest.raises(BackendCorruptionError, match="journal.log is missing"):
+            backend.read(key)
+        with pytest.raises(BackendCorruptionError, match="journal.log is missing"):
+            list(backend.list(""))
+    finally:
+        backend.close()
+
+    with pytest.raises(BackendCorruptionError, match="journal.log is missing"):
+        LocalBackend(root)
+
+
+def test_constructor_closes_journal_handle_when_resume_fails(tmp_path, monkeypatch):
+    root = tmp_path / "store-root"
+    LocalBackend(root).close()
+
+    def _boom(self):
+        raise RuntimeError("resume failed for test")
+
+    monkeypatch.setattr(LocalBackend, "_resume", _boom)
+    with pytest.raises(RuntimeError, match="resume failed"):
+        LocalBackend(root)
+    monkeypatch.undo()
+
+    again = LocalBackend(root)
+    again.close()
+
+
+def test_orphan_published_blob_without_journal_record(tmp_path):
+    root = tmp_path / "store-root"
+    LocalBackend(root).close()  # genuinely new store: creates empty journal.log
+    orphan = root / "data" / "p" / "orphan"
+    orphan.parent.mkdir(parents=True, exist_ok=True)
+    orphan.write_bytes(b"unjournaled-materialized-view")
+    journal = root / "journal" / "journal.log"
+    assert journal.is_file() and journal.read_bytes() == b""
+
+    backend = LocalBackend(root)
+    try:
+        assert journal.is_file()
+        with pytest.raises(BackendCorruptionError, match="no durable journal record"):
+            backend.read("p/orphan")
+        with pytest.raises(BackendCorruptionError, match="no durable journal record"):
+            list(backend.list("p/"))
+        assert orphan.read_bytes() == b"unjournaled-materialized-view"
+        assert journal.read_bytes() == b""
+    finally:
+        backend.close()
+
+
+def test_read_returns_none_for_missing_key_on_empty_store(tmp_path):
+    root = tmp_path / "store-root"
+    backend = LocalBackend(root)
+    try:
+        assert backend.read("no/such/key") is None
+        assert list(backend.list("no/")) == []
+    finally:
+        backend.close()
+
+
+def test_case_insensitivity_probe_leaves_no_data_files(tmp_path):
+    """Probe markers must not remain under data/ after startup (lock-guarded)."""
+    root = tmp_path / "store-root"
+    backend = LocalBackend(root)
+    try:
+        for path in (root / "data").rglob("*"):
+            if path.is_file():
+                assert not path.name.startswith("case-probe-")
     finally:
         backend.close()

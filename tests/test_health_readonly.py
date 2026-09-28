@@ -486,16 +486,23 @@ gate.persist(
 )
 b_ts.close()
 os.makedirs(os.path.join(bad_ts_root, ".knokeep-eval"), exist_ok=True)
-with open(os.path.join(bad_ts_root, ".knokeep-eval", "events.jsonl"), "w", encoding="utf-8") as f:
-    f.write('{"decision":"error","ts":"not-a-timestamp"}\n')
-    f.write('{"decision":"error","ts":12345}\n')
-rc, hj, combined = run_health(bad_ts_root)
-check("bad error timestamp: attention", hj.get("verdict") == "attention")
-check(
-    "bad error timestamp: telemetry unreadable",
-    "telemetry:telemetry_unreadable" in hj.get("problems", []),
-)
-check("bad error timestamp: no traceback", "Traceback" not in combined)
+# Exercise each row alone: a second invalid row can otherwise short-circuit
+# validation before the malformed timestamp reaches the formerly broken path.
+for label, event in (
+    ("malformed", {"decision": "error", "ts": "not-a-timestamp"}),
+    ("missing", {"decision": "error"}),
+    ("numeric", {"decision": "error", "ts": 12345}),
+    ("null", {"decision": "error", "ts": None}),
+):
+    with open(os.path.join(bad_ts_root, ".knokeep-eval", "events.jsonl"), "w", encoding="utf-8") as f:
+        f.write(json.dumps(event) + "\n")
+    rc, hj, combined = run_health(bad_ts_root)
+    check(f"{label} error timestamp: attention", hj.get("verdict") == "attention")
+    check(
+        f"{label} error timestamp: telemetry unreadable",
+        "telemetry:telemetry_unreadable" in hj.get("problems", []),
+    )
+    check(f"{label} error timestamp: no traceback", "Traceback" not in combined)
 
 if hasattr(os, "symlink"):
     try:

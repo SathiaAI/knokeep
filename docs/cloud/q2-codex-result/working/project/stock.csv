@@ -1,0 +1,5 @@
+sku,stock,reserved,threshold,lead_days,active
+tea,5,2,8,10,yes
+mug,12,1,6,2,yes
+candle,3,1,9,8,no
+flask,4,0,7,6,yes

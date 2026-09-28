@@ -1,0 +1,344 @@
+diff --git a/docs/cloud/q2-codex-result/REPORT.md b/docs/cloud/q2-codex-result/REPORT.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..6a0f73968f326ebd07e23e0860b789a2442838d3
+--- /dev/null
++++ b/docs/cloud/q2-codex-result/REPORT.md
+@@ -0,0 +1,92 @@
++# Q2 Codex Cloud receiver result
++
++## Verdict
++
++**PASS.** The recorded next action was completed in the copied project. The
++result is `working/project/priority-review.csv`, containing only the active,
++below-threshold item whose `lead_days` is at least 7.
++
++## Provenance and environment
++
++- Input HEAD recorded before work: `9b9b42524b610099f8d37d7a9df1d9f00d674ead`.
++- Evidence branch: `q2/codex-cloud-input-a1`.
++- Observed environment: hosted non-interactive Linux workspace with Bash,
++  Python 3, and Git. Cloud provider/runtime identity was unavailable and is
++  **UNVERIFIED**.
++- Observed model identity: **UNVERIFIED** (not exposed to the job).
++- Inherited repository instructions: the receiver brief and platform-provided
++  repository instructions were followed. No native MCP integration is claimed.
++- No network, deployment, package installation, credentials, billing/settings
++  change, main merge, or unrelated repository access was attempted.
++
++## Input verification
++
++Before copying, a Python standard-library verifier read every entry in
++`docs/cloud/q2-receiver-input/manifest.json`, compared byte length and SHA-256,
++and exited 0. All 15 entries matched. The same check was run after producing
++the deliverable and again exited 0 (`INPUT_MANIFEST_RECHECK=PASS files=15`), so
++the supplied input bytes remained unchanged.
++
++The project and store were copied with `pathlib` and `shutil` into `working/`.
++Product code was not edited. As expected, bootstrap appended one event to the
++copied store's evaluation log; the source store was not changed.
++
++## Bootstrap
++
++Command (exit 0):
++
++```text
++python3 skill/knokeep_state.py bootstrap --store docs/cloud/q2-codex-result/working/store --project q2-cursor-a1
++```
++
++Full output:
++
++```json
++{"version_hash": "c8726ae561c5e89df562a5c136813ba2b23bfb42e484da2ee5b951aaac21bb1f", "revision": 2, "log_hash": "54372dc9b2e45945a73534ab3300364fa2196a0fd07778ce09bd4e8fc6ec9879", "state_client": "cursor-cloud", "log_client": "cursor-cloud", "client_labels_verified": false, "active": "Export capture: manifest, result report, KnoKeep receipts checked; evidence branch push pending.", "next": "Implement `priority-review.csv` (`sku,reason,owner`): active items needing replenishment with `lead_days >= 7` only; reason `long lead time`, owner `Procurement`. Reject inactive rows and reject all below-threshold items regardless of lead time. (Conversational criteria — not implemented in this job.)", "conflicts": [], "conflict_count": 0, "settled_count": 0, "resume_line": "resuming: Export capture: manifest, result report, KnoKeep receipts checked; evidence branch push pending. / next: Implement `priority-review.csv` (`sku,reason,owner`): active items needing replenishment with `lead_days >= 7` only; reason `long lead time`, owner `Procurement`. Reject inactive rows and reject all below-threshold items regardless of lead time. (Conversational criteria — not implemented in this job.) / vc8726ae561c5"}
++```
++
++Actual resume line:
++
++```text
++resuming: Export capture: manifest, result report, KnoKeep receipts checked; evidence branch push pending. / next: Implement `priority-review.csv` (`sku,reason,owner`): active items needing replenishment with `lead_days >= 7` only; reason `long lead time`, owner `Procurement`. Reject inactive rows and reject all below-threshold items regardless of lead time. (Conversational criteria — not implemented in this job.) / vc8726ae561c5
++```
++
++The complete copied `system_state` and `session_log` were then read, along with
++all five ordinary project files. The next-step record supplied the selection,
++reason, owner, and rejection rules. The older state body's constraint not to
++implement the file "in this job" described the completed source job; the
++session log explicitly recorded this implementation as the successor's next
++step, and bootstrap reported zero conflicts.
++
++## Completion and verification
++
++Python's standard `csv` module read `stock.csv` and selected rows only when all
++three recorded conditions held: active, free units below threshold, and
++`lead_days >= 7`. It sorted selected rows by SKU and wrote the specified three
++columns. Command exit: 0.
++
++An independent Python standard-library verification then asserted:
++
++- the exact header is `sku,reason,owner`;
++- the exact result row is `tea,long lead time,Procurement`;
++- `tea` satisfies all three source-data conditions;
++- inactive `candle` is rejected;
++- below-lead-threshold `flask` is rejected; and
++- non-replenishment `mug` is rejected.
++
++Verification exit: 0. Output-file evidence:
++
++| File representation | Bytes | SHA-256 |
++| --- | ---: | --- |
++| Generated `working/project/priority-review.csv` (CSV CRLF) | 50 | `c1be8f4d0e044188fc449b30bf1800073e8fa94850d321ef47545d93099231f0` |
++| Committed `working/project/priority-review.csv` (repository-normalized LF) | 48 | `ee9be42c8fcaf313604f0cd97ab43e29ac3657496698f8cb0ad3c177b8f415b3` |
++
++One overly broad final check incorrectly expected the copied store to remain
++byte-identical after bootstrap and exited 1 on
++`store/.knokeep-eval/events.jsonl`. Inspection showed the sole difference was
++the expected bootstrap event appended to the copied log (772 source bytes, 882
++working bytes). This preserved check error does not affect the PASS verdict:
++the supplied input still matches its manifest, the five copied project inputs
++remain byte-identical, and the deliverable verification passed. A corrected
++check verified those properties and the appended event; no second client run
++was made.
+diff --git a/docs/cloud/q2-codex-result/working/project/_log_body.md b/docs/cloud/q2-codex-result/working/project/_log_body.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..36861bfef29ab4dce627e9c2b5b2e222455c4a6c
+--- /dev/null
++++ b/docs/cloud/q2-codex-result/working/project/_log_body.md
+@@ -0,0 +1,8 @@
++## Completed & Verified
++- [q2-a1-restock] `restock.py` + verified `restock.csv` against `stock.csv` active rows (flask/mug/tea; candle excluded inactive) — output in `docs/cloud/q2-work/project/restock.csv`
++
++## Active State
++Export capture: manifest, result report, KnoKeep receipts checked; evidence branch push pending.
++
++## Next Step
++Implement `priority-review.csv` (`sku,reason,owner`): active items needing replenishment with `lead_days >= 7` only; reason `long lead time`, owner `Procurement`. Reject inactive rows and reject all below-threshold items regardless of lead time. (Conversational criteria — not implemented in this job.)
+diff --git a/docs/cloud/q2-codex-result/working/project/_state_body.md b/docs/cloud/q2-codex-result/working/project/_state_body.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..127e50240554e7d026ec7a3a34263cab8be94181
+--- /dev/null
++++ b/docs/cloud/q2-codex-result/working/project/_state_body.md
+@@ -0,0 +1,10 @@
++## Architecture
++Q2 bounded cloud portability toy: `restock.py` reads `stock.csv` and writes `restock.csv` (active SKUs only; free = stock−reserved floored; reorder = threshold−free floored; sorted by sku).
++
++## Path & Variable Directory
++- Project dir: `docs/cloud/q2-work/project`
++- Store: `docs/cloud/q2-work/store` (`PROJECT=q2-cursor-a1`, client label `cursor-cloud`)
++- Invoke: `python3 restock.py stock.csv restock.csv`
++
++## Hard Constraints
++Do not change KnoKeep implementation. Do not implement `priority-review.csv` in this job. No secrets in flushed bodies.
+diff --git a/docs/cloud/q2-codex-result/working/project/priority-review.csv b/docs/cloud/q2-codex-result/working/project/priority-review.csv
+new file mode 100644
+index 0000000000000000000000000000000000000000..71c96d5f07da45dfead159636f4fb55fe0801b5d
+--- /dev/null
++++ b/docs/cloud/q2-codex-result/working/project/priority-review.csv
+@@ -0,0 +1,2 @@
++sku,reason,owner
++tea,long lead time,Procurement
+diff --git a/docs/cloud/q2-codex-result/working/project/restock.csv b/docs/cloud/q2-codex-result/working/project/restock.csv
+new file mode 100644
+index 0000000000000000000000000000000000000000..be1c004e09dad4505813aa3d9d909ec7a82795e3
+--- /dev/null
++++ b/docs/cloud/q2-codex-result/working/project/restock.csv
+@@ -0,0 +1,4 @@
++sku,free_units,reorder_units
++flask,4,3
++mug,11,0
++tea,3,5
+diff --git a/docs/cloud/q2-codex-result/working/project/restock.py b/docs/cloud/q2-codex-result/working/project/restock.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..1f2cddccdcad14c2d8a36ef82540126b906e0960
+--- /dev/null
++++ b/docs/cloud/q2-codex-result/working/project/restock.py
+@@ -0,0 +1,45 @@
++#!/usr/bin/env python3
++"""Compute restock CSV from stock inventory."""
++
++import csv
++import sys
++
++
++def main() -> int:
++    if len(sys.argv) != 3:
++        print("usage: python restock.py stock.csv restock.csv", file=sys.stderr)
++        return 2
++
++    in_path, out_path = sys.argv[1], sys.argv[2]
++    rows = []
++
++    with open(in_path, newline="", encoding="utf-8") as f:
++        reader = csv.DictReader(f)
++        for row in reader:
++            if row.get("active", "").strip().lower() != "yes":
++                continue
++            stock = int(row["stock"])
++            reserved = int(row["reserved"])
++            threshold = int(row["threshold"])
++            free_units = max(0, stock - reserved)
++            reorder_units = max(0, threshold - free_units)
++            rows.append(
++                {
++                    "sku": row["sku"].strip(),
++                    "free_units": free_units,
++                    "reorder_units": reorder_units,
++                }
++            )
++
++    rows.sort(key=lambda r: r["sku"])
++
++    with open(out_path, "w", newline="", encoding="utf-8") as f:
++        writer = csv.DictWriter(f, fieldnames=["sku", "free_units", "reorder_units"])
++        writer.writeheader()
++        writer.writerows(rows)
++
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/docs/cloud/q2-codex-result/working/project/stock.csv b/docs/cloud/q2-codex-result/working/project/stock.csv
+new file mode 100644
+index 0000000000000000000000000000000000000000..bebd60167509a5b8f2548657c57457d8bb713a65
+--- /dev/null
++++ b/docs/cloud/q2-codex-result/working/project/stock.csv
+@@ -0,0 +1,5 @@
++sku,stock,reserved,threshold,lead_days,active
++tea,5,2,8,10,yes
++mug,12,1,6,2,yes
++candle,3,1,9,8,no
++flask,4,0,7,6,yes
+diff --git a/docs/cloud/q2-codex-result/working/store/.knokeep-eval/events.jsonl b/docs/cloud/q2-codex-result/working/store/.knokeep-eval/events.jsonl
+new file mode 100644
+index 0000000000000000000000000000000000000000..c96d9c658a96b6607debd165143c4b2194a7cd8c
+--- /dev/null
++++ b/docs/cloud/q2-codex-result/working/store/.knokeep-eval/events.jsonl
+@@ -0,0 +1,8 @@
++{"ts": "2026-09-28T03:03:20Z", "project": "q2-cursor-a1", "op": "bootstrap", "decision": "allow", "ok": null}
++{"ts": "2026-09-28T03:03:22Z", "project": "q2-cursor-a1", "op": "init", "decision": "allow", "ok": true}
++{"ts": "2026-09-28T03:03:24Z", "project": "q2-cursor-a1", "op": "bootstrap", "decision": "allow", "ok": null}
++{"ts": "2026-09-28T03:03:41Z", "project": "q2-cursor-a1", "op": "flush-state", "decision": "allow", "ok": true}
++{"ts": "2026-09-28T03:03:41Z", "project": "q2-cursor-a1", "op": "flush-log", "decision": "allow", "ok": true}
++{"ts": "2026-09-28T03:03:41Z", "project": "q2-cursor-a1", "op": "session-append", "decision": "allow", "ok": true}
++{"ts": "2026-09-28T03:03:41Z", "project": "q2-cursor-a1", "op": "bootstrap", "decision": "allow", "ok": null}
++{"ts": "2026-09-28T03:25:15Z", "project": "q2-cursor-a1", "op": "bootstrap", "decision": "allow", "ok": null}
+diff --git a/docs/cloud/q2-codex-result/working/store/data/q2-cursor-a1/session_log b/docs/cloud/q2-codex-result/working/store/data/q2-cursor-a1/session_log
+new file mode 100644
+index 0000000000000000000000000000000000000000..3e0341e462c2f998e4de876a0a88b260f38bb777
+--- /dev/null
++++ b/docs/cloud/q2-codex-result/working/store/data/q2-cursor-a1/session_log
+@@ -0,0 +1,15 @@
++---
++schema_version: 1
++project_id: q2-cursor-a1
++client: cursor-cloud
++revision: 2
++updated: 2026-09-28T03:03:41Z
++---
++## Completed & Verified
++- [q2-a1-restock] `restock.py` + verified `restock.csv` against `stock.csv` active rows (flask/mug/tea; candle excluded inactive) — output in `docs/cloud/q2-work/project/restock.csv`
++
++## Active State
++Export capture: manifest, result report, KnoKeep receipts checked; evidence branch push pending.
++
++## Next Step
++Implement `priority-review.csv` (`sku,reason,owner`): active items needing replenishment with `lead_days >= 7` only; reason `long lead time`, owner `Procurement`. Reject inactive rows and reject all below-threshold items regardless of lead time. (Conversational criteria — not implemented in this job.)
+diff --git a/docs/cloud/q2-codex-result/working/store/data/q2-cursor-a1/sessions/q2-cursor-source-a1 b/docs/cloud/q2-codex-result/working/store/data/q2-cursor-a1/sessions/q2-cursor-source-a1
+new file mode 100644
+index 0000000000000000000000000000000000000000..a998900652d8f88f1a3dc5df2631d5916f229c53
+--- /dev/null
++++ b/docs/cloud/q2-codex-result/working/store/data/q2-cursor-a1/sessions/q2-cursor-source-a1
+@@ -0,0 +1,9 @@
++---
++schema_version: 1
++project_id: q2-cursor-a1
++session_id: q2-cursor-source-a1
++client: cowork
++updated: 2026-09-28T03:03:41Z
++---
++## Journal
++[2026-09-28T03:03:41Z] Verified restock.csv; flushed state/log; preparing manifest and result.
+diff --git a/docs/cloud/q2-codex-result/working/store/data/q2-cursor-a1/system_state b/docs/cloud/q2-codex-result/working/store/data/q2-cursor-a1/system_state
+new file mode 100644
+index 0000000000000000000000000000000000000000..66383411fa4d1dc464ab41dd689441e16b471016
+--- /dev/null
++++ b/docs/cloud/q2-codex-result/working/store/data/q2-cursor-a1/system_state
+@@ -0,0 +1,17 @@
++---
++schema_version: 1
++project_id: q2-cursor-a1
++client: cursor-cloud
++revision: 2
++updated: 2026-09-28T03:03:41Z
++---
++## Architecture
++Q2 bounded cloud portability toy: `restock.py` reads `stock.csv` and writes `restock.csv` (active SKUs only; free = stock−reserved floored; reorder = threshold−free floored; sorted by sku).
++
++## Path & Variable Directory
++- Project dir: `docs/cloud/q2-work/project`
++- Store: `docs/cloud/q2-work/store` (`PROJECT=q2-cursor-a1`, client label `cursor-cloud`)
++- Invoke: `python3 restock.py stock.csv restock.csv`
++
++## Hard Constraints
++Do not change KnoKeep implementation. Do not implement `priority-review.csv` in this job. No secrets in flushed bodies.
+diff --git a/docs/cloud/q2-codex-result/working/store/journal/journal.log b/docs/cloud/q2-codex-result/working/store/journal/journal.log
+new file mode 100644
+index 0000000000000000000000000000000000000000..a1d5c9ccbad3a220126f1b803377e2e5a8dc4844
+GIT binary patch
+literal 2459
+zcmc&$TWB0r7+xca4uTI-ups!`fb3#sH`%ml-6e(E25eSxsj+BF**QCNcK2jw=Zxo^
+z+08t7r4I^<P&D{p5DMO+h=xMZD(HjPhbZ_U<V7eAi1?sjlvWh~Gc$Who7xIOmxX1|
+z`OoG5{_p$#Qz}j7Q>oPUNAso~2+4&>MshNgiZ;tq5k+xQf4(qH(~x$ZHc7cfg=E|-
+zz=+`sK2L2`W=;Y6w=is%QBM^h+0=G<;246oSZ8J6JGeV8%Ma(r%;9^@{GPet(E@(+
+z`6GrtZEz6w3A@e|9uNp>q*cYq7<zbys5;yYhlyaM;!-%k1jcX?_Ql*!gaiAzCzT+~
+zQ!<%);PoT#?fC2b;_^zF{C;Bb7r$knzp?el#_HtW={pW@+ZJb=N|j<<ZtqVjC#lre
+zFT1>!#JzP*VA;=`zDp534FVOc%BT|ov(HwnMd3kRxM*OCE-3s<edE=KPff$(>BoO<
+zE<N`24*&1lZhC%g;FH?-8*A^re|*;sLl-4}B|;1=|G$~%jmr~a=g8KCn9W0l2cCmC
+zMEnAu3q>l-Whw;4!va`>O2zF))(<TZlsFQsc)*q|3y9}HTOh%3xDy#oq)7r~=^+W+
+zbHgH31*I?!(dx6$oWO7@T6l8R<y=swh}(1FP=PV3j<a>{Iv5u%>&BqIbk!;$$VQOK
+zUV+Re%*65nhY3u^;kL|0ndXp|Z7v$QM1PiHVwLe8TSwug1+^e;%^aGZoY+4%-p^`l
+z2+`AG1(#H)3s%2mtqksb&};FA-r5gUoqMC0Y7C-}c|`CcXx%{#V3gP;3OvBU;|lCL
+z@oE%G9xqYq1Jhh?;`v0Owz7~!b%*g-!8leaG_`-wb~Y*z^AKkyVV+mAFvUSqTTmqd
+z$E$82>l$Y6Fe<agmtuaMeD>qgM&-3n$DS&lTq*u}-?`&!+4T=*m*2VT%$*7Kue&<U
+z5Bzpbn7^gwO*o3BBqNASRET3e9&5(m18CKeJM_jQ@JJ0kQL4>ih$%04TSB_(64}T#
+zgIZ2eQUn{7f<8+ZY&XzyV_qzf44i%PMc{$*1ErDw7mDUOr0McwlUYqHXz}7fzV`Y8
+zG>ONmnADKwRp2W8(E&qU+Mwf8=3~LJC)o`xKqQAlJ)1&B5YMiIk1PP6dJgkyvDA8Q
+zc(6md%djhLp+JYwF(mhfc-y1G$`l}R1vHGN1dmd^v%Z*1Jtpg#!_a2fnk*NsrtFYV
+z!rpP%Z6y{GZ-=uSm+25ttVvOS(E(tg+EIIv7OX5BqPnwop@yh1+Ob4DL0lJ5ue@z`
+z{RZNj30lME=VG%0UhN%}g*5g<-Mk~E5f^Ojeb_^zDr#wVMHkh$C$Nk$x7++`<=i6^
+zZ|vIn_GoHs`sDWcTfc2Dtls?b)C-^g{Bn4ahBEyQ)9IU1+g9Q(k_W=3NZn-NPybO=
+zomRa0;nCf-_x|A8C$Fx#OyZq9;u=RUd6HlUI@ay9nvosX!@iK1P4rmG;me>1K2ido
+zCRpSSi=$2x6FF;K|HKbQYR~ZOg~2mlFHKxne(Bk8_4If2mTx|MZgTyjH(%*=;(q|1
+C#z@Wp
+
+literal 0
+HcmV?d00001
+
+diff --git a/docs/cloud/q2-codex-result/working/store/locks/advisory.lock b/docs/cloud/q2-codex-result/working/store/locks/advisory.lock
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/docs/cloud/q2-codex-result/working/store/locks/cas.lock b/docs/cloud/q2-codex-result/working/store/locks/cas.lock
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/docs/cloud/q2-codex-result/working/store/locks/fence-alloc/d29dc7046f4f1103085ec8ad648445d8456fab991549a63c3d2eb39661774c43.fence b/docs/cloud/q2-codex-result/working/store/locks/fence-alloc/d29dc7046f4f1103085ec8ad648445d8456fab991549a63c3d2eb39661774c43.fence
+new file mode 100644
+index 0000000000000000000000000000000000000000..0e70fe9ba95fa24131a0f73836327b4aaf7e64af
+--- /dev/null
++++ b/docs/cloud/q2-codex-result/working/store/locks/fence-alloc/d29dc7046f4f1103085ec8ad648445d8456fab991549a63c3d2eb39661774c43.fence
+@@ -0,0 +1 @@
++a5c444af6031b00a84e3e2b964eaa126 1790564651.390441 1
+\ No newline at end of file
+diff --git a/docs/cloud/q2-codex-result/working/store/locks/fence-alloc/d3ac3ca360babd4a92ea1750e8a2543d8b9807b51da5ebe6bdefe654f7332727.fence b/docs/cloud/q2-codex-result/working/store/locks/fence-alloc/d3ac3ca360babd4a92ea1750e8a2543d8b9807b51da5ebe6bdefe654f7332727.fence
+new file mode 100644
+index 0000000000000000000000000000000000000000..985482660d23fd17cb3f1634a59807b0435e088c
+--- /dev/null
++++ b/docs/cloud/q2-codex-result/working/store/locks/fence-alloc/d3ac3ca360babd4a92ea1750e8a2543d8b9807b51da5ebe6bdefe654f7332727.fence
+@@ -0,0 +1 @@
++128fbc583e611a8b9c9f83c06ef9e23c 1790564651.4634006 1
+\ No newline at end of file
+diff --git a/docs/cloud/q2-codex-result/working/store/locks/fence-alloc/f97fd5fe3063a222a842767e0fd860f06f783c4661573112f808be81ba02e141.fence b/docs/cloud/q2-codex-result/working/store/locks/fence-alloc/f97fd5fe3063a222a842767e0fd860f06f783c4661573112f808be81ba02e141.fence
+new file mode 100644
+index 0000000000000000000000000000000000000000..0c13b40b1667632d82ea7129b94bd4ba8b3b7e15
+--- /dev/null
++++ b/docs/cloud/q2-codex-result/working/store/locks/fence-alloc/f97fd5fe3063a222a842767e0fd860f06f783c4661573112f808be81ba02e141.fence
+@@ -0,0 +1 @@
++ec8f471ab0298fb14be6ecae7db0c3f3 1790564651.3117278 1
+\ No newline at end of file

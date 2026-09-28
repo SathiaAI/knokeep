@@ -808,10 +808,19 @@ class LocalBackend:
             # and settle on the stale hash. Observing the fence first means
             # a "not pending" reading is followed by a hash read that
             # postdates the publish that preceded it.
-            owner = self._read_fence_owner(owner_path)
+            try:
+                owner = self._read_fence_owner(owner_path)
+            except PermissionError:
+                # This read runs outside cas.lock, so on Windows a concurrent
+                # lock()'s os.replace of the owner file can refuse it. Unknown
+                # fence state counts as "still pending"; the deadline bounds it.
+                owner_unreadable = True
+                owner = None
+            else:
+                owner_unreadable = False
             with self._fence_lock:
                 last_accepted = self._last_accepted_fence.get(key, 0)
-            pending = (
+            pending = owner_unreadable or (
                 owner is not None
                 and owner[2] > last_accepted
                 and owner[1] > time.time()
@@ -876,7 +885,9 @@ class LocalBackend:
                 f.write(f"{token} {expiry!r}")
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(str(tmp_path), str(path))
+            # Same bounded sharing-violation retry as _publish(): a concurrent
+            # _read_advisory() can hold the destination open on Windows.
+            self._replace_with_retry(tmp_path, path)
         finally:
             with contextlib.suppress(FileNotFoundError):
                 tmp_path.unlink()
@@ -909,7 +920,10 @@ class LocalBackend:
                 f.write(f"{token} {expiry!r} {fence}")
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(str(tmp_path), str(path))
+            # Bounded retry, then _ReplaceBusy: a fence-losing write() reads
+            # this file OUTSIDE cas.lock (_settle_current_hash_after_fence_loss),
+            # and on Windows that open handle can refuse the replace.
+            self._replace_with_retry(tmp_path, path)
             # The rename itself is only durable once the directory entry is:
             # without this, a power loss after lock() returned could revert
             # the owner file to the previous (possibly unexpired) owner,
@@ -930,7 +944,10 @@ class LocalBackend:
         # expiring lock retries at the call-site, the adapter doesn't do it
         # silently on their behalf.
         path = self._advisory_lock_path(key)
-        result = self._try_acquire_advisory(path, ttl_s, key)
+        try:
+            result = self._try_acquire_advisory(path, ttl_s, key)
+        except _ReplaceBusy:
+            raise BackendBusyError("lease file replacement kept failing (sharing violation)") from None
         if result is None:
             raise BackendBusyError(f"key {key!r} is locked")
         token, expiry, new_fence = result
@@ -1041,9 +1058,12 @@ class LocalBackend:
                 return False
             try:
                 self._write_fence_owner(owner_path, token, new_expiry, existing_owner[2])
-            except OSError:
+            except (OSError, _ReplaceBusy):
                 return False
-            self._write_advisory(path, token, new_expiry)
+            try:
+                self._write_advisory(path, token, new_expiry)
+            except _ReplaceBusy:
+                return False
             return True
         finally:
             guard.release()

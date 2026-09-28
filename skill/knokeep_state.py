@@ -852,7 +852,7 @@ def _bodyfile(path):
 def _entry(a):
     if a.entry_file == "-":
         return sys.stdin.read().rstrip("\n")
-    if a.entry_file:
+    if a.entry_file is not None:
         return _bodyfile(a.entry_file)
     return a.entry or ""
 
@@ -863,6 +863,11 @@ def main():
     ap.add_argument("--session-id"); ap.add_argument("--client", default="cowork")
     ap.add_argument("--body-file"); ap.add_argument("--entry"); ap.add_argument("--entry-file"); ap.add_argument("--expect-hash"); ap.add_argument("--section"); ap.add_argument("--conflict-key")
     a = ap.parse_args()
+    if a.cmd == "session-append":
+        if a.body_file is not None:
+            ap.error("session-append does not accept --body-file; use --entry-file (or --entry-file - for stdin)")
+        if (a.entry is None) == (a.entry_file is None):
+            ap.error("session-append requires exactly one of --entry or --entry-file")
     if not a.store:
         a.store = default_store_root()                     # shared cross-tool default (T-4)
     if a.cmd == "eval":                                     # read-only scorecard, no project needed

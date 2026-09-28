@@ -197,12 +197,24 @@ def test_c1_stale_write_reject_race(backend):
     barrier = threading.Barrier(n_threads)
     results = [None] * n_threads
     bodies = [f"writer-{i}".encode() for i in range(n_threads)]
+    setup_lock = threading.Lock()
+    errors = [None] * n_threads
 
     def worker(i):
-        barrier.wait()
-        results[i] = gate.persist(
-            backend, "race1", bodies[i], ctx=fenced_ctx(backend, "race1", base_hash), doc_type="system_state"
-        )
+        try:
+            barrier.wait()
+            # This case races persist(), not advisory-lock setup. Keep the
+            # helper's acquire/release pair together so a descheduled holder
+            # cannot consume every other worker's five-second setup budget.
+            # Release BEFORE persist(): the writes/fences still race.
+            # C7 separately requires a competing acquire to report BUSY.
+            with setup_lock:
+                ctx = fenced_ctx(backend, "race1", base_hash)
+            results[i] = gate.persist(
+                backend, "race1", bodies[i], ctx=ctx, doc_type="system_state"
+            )
+        except Exception as exc:
+            errors[i] = f"{type(exc).__name__}: {exc}"
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
     for t in threads:
@@ -210,6 +222,7 @@ def test_c1_stale_write_reject_race(backend):
     for t in threads:
         t.join()
 
+    assert not any(errors), f"worker exceptions: {errors}; results: {results}"
     oks = [r for r in results if isinstance(r, OK)]
     stales = [r for r in results if isinstance(r, STALE)]
     assert len(oks) == 1, f"expected exactly one OK, got {results}"
@@ -286,6 +299,30 @@ def test_c1_fence_loss_stale_settles_to_winner_hash(backend, monkeypatch):
     allowed = {rb.new_hash, base_hash} if isinstance(backend, GitBackend) else {rb.new_hash}
     assert ra.current_hash in allowed, (ra, rb)
     assert backend.read("settle1").body == b"b-wins"
+
+
+def test_c1_setup_pause_does_not_exhaust_other_workers_lease_budget(backend, monkeypatch):
+    """Issue33: an acquired helper lease can be descheduled before unlock.
+
+    The old setup let seven callers burn their budgets against that lease.
+    Reproduce the legal scheduling pause, retaining the original write-race
+    single-winner, stale-result and no-clobber assertions.
+    """
+    from store.git_backend import GitBackend
+    if not isinstance(backend, GitBackend):
+        pytest.skip("regression for observed Windows Git setup contention")
+    original = backend.unlock
+    delayed = False
+
+    def pause_once(lease):
+        nonlocal delayed
+        if not delayed:
+            delayed = True
+            time.sleep(6)  # exceeds fenced_ctx's unchanged five-second budget
+        return original(lease)
+
+    monkeypatch.setattr(backend, "unlock", pause_once)
+    test_c1_stale_write_reject_race(backend)
 
 
 def test_c1_fence_loss_settle_is_bounded_when_owner_never_writes(backend, monkeypatch):

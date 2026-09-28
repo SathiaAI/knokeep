@@ -1,0 +1,8 @@
+order_id,sku,units,status
+oa1,Blue-Mug,2,ready
+oa2,blue_mug,3,ready
+oa3,BLUE-MUG,9,cancelled
+oa4,Green-Tea,4,ready
+oa5,green_tea,1,hold
+oa6,Blue Mug,1,ready
+oa7,Green Tea,2,ready

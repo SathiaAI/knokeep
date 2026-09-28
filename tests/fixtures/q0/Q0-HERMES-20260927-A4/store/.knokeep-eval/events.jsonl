@@ -1,0 +1,6 @@
+{"ts": "2026-09-28T01:09:22Z", "project": "q0-hermes-a4", "op": "init", "decision": "allow", "ok": true}
+{"ts": "2026-09-28T01:09:25Z", "project": "q0-hermes-a4", "op": "bootstrap", "decision": "allow", "ok": null}
+{"ts": "2026-09-28T01:09:44Z", "project": "q0-hermes-a4", "op": "flush-state", "decision": "allow", "ok": true}
+{"ts": "2026-09-28T01:09:54Z", "project": "q0-hermes-a4", "op": "flush-log", "decision": "allow", "ok": true}
+{"ts": "2026-09-28T01:10:04Z", "project": "q0-hermes-a4", "op": "session-append", "decision": "allow", "ok": true}
+{"ts": "2026-09-28T01:10:08Z", "project": "q0-hermes-a4", "op": "bootstrap", "decision": "allow", "ok": null}

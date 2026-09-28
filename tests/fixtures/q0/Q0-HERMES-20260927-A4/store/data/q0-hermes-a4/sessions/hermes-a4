@@ -1,0 +1,9 @@
+---
+schema_version: 1
+project_id: q0-hermes-a4
+session_id: hermes-a4
+client: hermes
+updated: 2026-09-28T01:10:04Z
+---
+## Journal
+[2026-09-28T01:10:04Z] Decisions: include only status exactly "ready" (cancelled and hold excluded; including held orders was rejected). SKU normalized by lowercasing and replacing each hyphen or space with an underscore, existing underscores kept. Units summed per normalized SKU; cartons hold 4 units, rounded up. Output packing-report.csv with columns sku,units,cartons sorted by sku. Handoff: next session produces the report from the saved state and log; the rules are settled.

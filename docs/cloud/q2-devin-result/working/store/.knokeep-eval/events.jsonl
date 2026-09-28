@@ -1,0 +1,11 @@
+{"ts": "2026-09-28T03:03:20Z", "project": "q2-cursor-a1", "op": "bootstrap", "decision": "allow", "ok": null}
+{"ts": "2026-09-28T03:03:22Z", "project": "q2-cursor-a1", "op": "init", "decision": "allow", "ok": true}
+{"ts": "2026-09-28T03:03:24Z", "project": "q2-cursor-a1", "op": "bootstrap", "decision": "allow", "ok": null}
+{"ts": "2026-09-28T03:03:41Z", "project": "q2-cursor-a1", "op": "flush-state", "decision": "allow", "ok": true}
+{"ts": "2026-09-28T03:03:41Z", "project": "q2-cursor-a1", "op": "flush-log", "decision": "allow", "ok": true}
+{"ts": "2026-09-28T03:03:41Z", "project": "q2-cursor-a1", "op": "session-append", "decision": "allow", "ok": true}
+{"ts": "2026-09-28T03:03:41Z", "project": "q2-cursor-a1", "op": "bootstrap", "decision": "allow", "ok": null}
+{"ts": "2026-09-28T03:46:15Z", "project": "q2-cursor-a1", "op": "bootstrap", "decision": "allow", "ok": null}
+{"ts": "2026-09-28T03:46:52Z", "project": "q2-cursor-a1", "op": "flush-log", "decision": "allow", "ok": true}
+{"ts": "2026-09-28T03:46:53Z", "project": "q2-cursor-a1", "op": "session-append", "decision": "allow", "ok": true}
+{"ts": "2026-09-28T03:46:53Z", "project": "q2-cursor-a1", "op": "bootstrap", "decision": "allow", "ok": null}

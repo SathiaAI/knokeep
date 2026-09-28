@@ -1,0 +1,7 @@
+$ python3 priority_review.py stock.csv priority-review.csv
+exit=0
+$ cat priority-review.csv
+sku,reason,owner
+tea,long lead time,Procurement
+$ python3 restock.py stock.csv /tmp/restock-recheck.csv && cmp restock.csv /tmp/restock-recheck.csv
+exit=0

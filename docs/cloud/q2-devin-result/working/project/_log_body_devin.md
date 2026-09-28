@@ -1,0 +1,9 @@
+## Completed & Verified
+- [q2-a1-restock] `restock.py` + verified `restock.csv` against `stock.csv` active rows (flask/mug/tea; candle excluded inactive) — output in `docs/cloud/q2-work/project/restock.csv`
+- [q2-a1-priority-review] `priority_review.py` + verified `priority-review.csv` (`sku,reason,owner`): active, free < threshold, lead_days >= 7 → tea only (flask lead 6 rejected; mug not below threshold; candle inactive) — output in `docs/cloud/q2-devin-result/working/project/priority-review.csv`
+
+## Active State
+Devin Cloud successor completed recorded next action; evidence branch push pending.
+
+## Next Step
+None recorded. Awaiting new decision from coordinator.

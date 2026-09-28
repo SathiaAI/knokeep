@@ -40,10 +40,29 @@ Static review also noted: project `system_state` symlink reads, broken root-syml
 
 `e5747df` on `fix/cursor-health-readonly-a1` (round 2; prior history: `232c81f`, `b808d73`).
 
+## Round 3 change summary (50a8b34 follow-up)
+
+- **Telemetry shape validation:** health rejects non-object rows, bad `findings`/`reasons` types; no silent skip or zero scorecard on corrupt lines; no tracebacks.
+- **Optional paths via `lexists`/`lstat`:** dangling or symlink `events.jsonl` (and unsafe `.knokeep-eval` dirs) → `telemetry_unreadable`; missing file still OK.
+- **Audit containment:** recursive pre-scan of `data/` (symlinks/reparse/non-regular) before external scan; problems prefixed `audit:`; `gitleaks:none` treated as unavailable (not clean).
+- **Layout:** empty journal with missing `data/` → `data_layout_missing`; cooperative offline snapshot limits documented in result residual limits.
+
+## Tests run (round 3)
+
+| Command | Exit |
+|---------|------|
+| `python3 tests/test_health_readonly.py` | 0 (46/46) |
+| `python3 tests/test_eval.py` | 0 (10/10) |
+
+## Commit
+
+`17a124a` on `fix/cursor-health-readonly-a1` (round 3; prior: `e5747df`, `50a8b34`).
+
 ## Residual limits
 
-- Layer-2 audit still optional when gitleaks is missing (disclosed in `notes`).
-- Journal change detection uses file size before/after the inspection pass (documented: not a linearizability guarantee).
+- Layer-2 audit optional when gitleaks missing or returns `gitleaks:none` (disclosed in `notes`).
+- Journal change detection uses file size before/after inspection (not a linearizability guarantee).
+- Path and tree checks assume a cooperative offline snapshot; adversarial replacement during health is not claimed safe.
 - Inspector targets LocalBackend on-disk layout only.
 - `evaluate()` CLI behavior unchanged for malformed telemetry; only `health` fails closed.
-- `store/local.py` journal hardening remains separate Codex work.
+- `store/local.py` journal hardening remains separate work.

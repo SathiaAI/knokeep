@@ -1,0 +1,13 @@
+{
+  "modelKey": "google/gemma-4-12b-qat",
+  "displayName": "Gemma 4 12B QAT",
+  "paramsString": "12B",
+  "architecture": "gemma4",
+  "quantization": {
+    "name": "Q4_0",
+    "bits": 4
+  },
+  "selectedVariant": "google/gemma-4-12b-qat@q4_0",
+  "identifier": "knokeep-q6a4-gemma",
+  "contextLength": 16384
+}

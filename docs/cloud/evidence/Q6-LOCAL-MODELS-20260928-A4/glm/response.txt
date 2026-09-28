@@ -1,0 +1,1 @@
+{"results":[{"id":"T1","verdict":"FAIL"},{"id":"T2","verdict":"BLOCKED"},{"id":"T3","verdict":"BLOCKED"},{"id":"T4","verdict":"PASS"},{"id":"T5","verdict":"FAIL"},{"id":"T6","verdict":"PASS"},{"id":"T7","verdict":"PASS"},{"id":"T8","verdict":"PASS"}]}

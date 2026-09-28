@@ -1,0 +1,29 @@
+{
+  "date_utc": "2026-09-28T05:36:05.001183+00:00",
+  "models": [
+    [
+      "gemma",
+      "google/gemma-4-12b-qat"
+    ],
+    [
+      "qwen",
+      "qwen/qwen3.8-27b"
+    ],
+    [
+      "nemotron",
+      "nvidia/nemotron-3-nano-omni"
+    ],
+    [
+      "glm",
+      "zai-org/glm-4.7-flash"
+    ]
+  ],
+  "max_tokens": 4096,
+  "context_length": 16384,
+  "temperature": 0,
+  "reasoning_requested": "off",
+  "gpu_ratio": "LM Studio automatic",
+  "per_model_child_timeout_s": 180,
+  "prompt_source": "unchanged Q6 triage A1 eight cases",
+  "limits": "One trial per model; identical task but not statistical accuracy or tool-use qualification. Model sampling defaults other than temperature may differ."
+}

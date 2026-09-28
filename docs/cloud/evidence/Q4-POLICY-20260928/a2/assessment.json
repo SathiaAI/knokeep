@@ -65,6 +65,7 @@
   "scope": "Explicit instruction/policy-following diagnostic. The policy includes a rejection-scope example close to this fixture. Not blinded, not a baseline comparison, not evidence of generalization or a reliability percentage. No enforced OS containment; visible tool actions are published for scope inspection.",
   "notes": [
     "The short stock.csv hash printed in REPORT.md has a wrong suffix; actual bytes and full manifest hash are correct. Original report remains unchanged.",
-    "Observed five Bash calls stayed in supplied project/store/product paths; no outside-input lookup observed."
+    "Observed five Bash calls stayed in supplied project/store/product paths; no outside-input lookup observed.",
+    "Independent Cowork review verified39 manifest entries but found Rule B wording inaccurate: standalone B selects bowl; an empty set follows only from combining A and B. No disputed deliverable was created. Original record unchanged."
   ]
 }

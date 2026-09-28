@@ -1,0 +1,13 @@
+{
+  "modelKey": "nvidia/nemotron-3-nano-omni",
+  "displayName": "Nemotron 3 Nano Omni",
+  "paramsString": "30B-A3B",
+  "architecture": "nemotron_h_moe",
+  "quantization": {
+    "name": "Q4_K_M",
+    "bits": 4
+  },
+  "selectedVariant": "nvidia/nemotron-3-nano-omni@q4_k_m",
+  "identifier": "knokeep-q6a4-nemotron",
+  "contextLength": 16384
+}

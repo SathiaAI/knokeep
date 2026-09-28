@@ -1,0 +1,8 @@
+{
+  "completed": false,
+  "api_calls": 1,
+  "elapsed_s": 24.985,
+  "tool_calls": 0,
+  "tool_count_after": 0,
+  "fallback_count_after": 0
+}

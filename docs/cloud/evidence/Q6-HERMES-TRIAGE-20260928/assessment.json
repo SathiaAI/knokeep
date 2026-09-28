@@ -1,0 +1,63 @@
+{
+  "scope": "One guided, tool-disabled local Hermes SDK triage probe; no reliability estimate",
+  "model": "GLM-4.7-Flash-Q4_K_M",
+  "correct": 5,
+  "total": 8,
+  "rows": [
+    {
+      "id": "T1",
+      "expected": "UNVERIFIED",
+      "actual": "BLOCKED",
+      "match": false
+    },
+    {
+      "id": "T2",
+      "expected": "UNVERIFIED",
+      "actual": "UNVERIFIED",
+      "match": true
+    },
+    {
+      "id": "T3",
+      "expected": "BLOCKED",
+      "actual": "FAIL",
+      "match": false
+    },
+    {
+      "id": "T4",
+      "expected": "FAIL",
+      "actual": "PASS",
+      "match": false
+    },
+    {
+      "id": "T5",
+      "expected": "FAIL",
+      "actual": "FAIL",
+      "match": true
+    },
+    {
+      "id": "T6",
+      "expected": "PASS",
+      "actual": "PASS",
+      "match": true
+    },
+    {
+      "id": "T7",
+      "expected": "PASS",
+      "actual": "PASS",
+      "match": true
+    },
+    {
+      "id": "T8",
+      "expected": "PASS",
+      "actual": "PASS",
+      "match": true
+    }
+  ],
+  "process": {
+    "os_exit_code": 0,
+    "elapsed_s": 37.218
+  },
+  "runtime_completed": false,
+  "decision": "Not qualified as evidence judge or authoritative memory writer; any limited extraction role still requires machine validation.",
+  "budget_caveat": "700-token output limit hit, continuation requested, one-iteration budget exhausted. Not a fair comparison or a general verdict on GLM. Hermes api_calls is a runtime-reported counter, not independently observed HTTP count."
+}

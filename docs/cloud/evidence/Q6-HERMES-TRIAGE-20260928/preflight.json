@@ -1,0 +1,7 @@
+{
+  "tools": 0,
+  "fallbacks": 0,
+  "model": "GLM-4.7-Flash-Q4_K_M",
+  "loopback_route": true,
+  "scope": "actual installed Hermes AIAgent SDK; not interactive CLI or autonomous tool use"
+}

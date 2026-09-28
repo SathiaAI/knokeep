@@ -1,0 +1,124 @@
+{
+  "source": "Original cloud task Copy patch; 17 Git blob identities verified; original cloud commit unavailable remotely",
+  "files": [
+    {
+      "path": "REPORT.md",
+      "git_blob": "6a0f73968f326ebd07e23e0860b789a2442838d3",
+      "bytes": 5480,
+      "sha256": "44519322c7539c9b29e863c52abc949cb64933df5c6a0bfadfd61cb30712a32c",
+      "recovery": "decoded original cloud text patch"
+    },
+    {
+      "path": "working/project/_log_body.md",
+      "git_blob": "36861bfef29ab4dce627e9c2b5b2e222455c4a6c",
+      "bytes": 642,
+      "sha256": "e076ca1021e23533440d816e55b4257376946fceffaa182c6f22bb62efb605ce",
+      "recovery": "copied existing original bytes, matching cloud patch blob"
+    },
+    {
+      "path": "working/project/_state_body.md",
+      "git_blob": "127e50240554e7d026ec7a3a34263cab8be94181",
+      "bytes": 568,
+      "sha256": "65116ae20c63adc38d7d99158e5e665dee41040de7ffe1be7d869933887369a2",
+      "recovery": "copied existing original bytes, matching cloud patch blob"
+    },
+    {
+      "path": "working/project/priority-review.csv",
+      "git_blob": "71c96d5f07da45dfead159636f4fb55fe0801b5d",
+      "bytes": 48,
+      "sha256": "ee9be42c8fcaf313604f0cd97ab43e29ac3657496698f8cb0ad3c177b8f415b3",
+      "recovery": "decoded original cloud text patch"
+    },
+    {
+      "path": "working/project/restock.csv",
+      "git_blob": "be1c004e09dad4505813aa3d9d909ec7a82795e3",
+      "bytes": 56,
+      "sha256": "35a71039fa7013902d28e9b4892467d5df3e6b76cf1260fd10f1f94b9e5b843a",
+      "recovery": "cloud committed LF representation; input original CRLF preserved separately"
+    },
+    {
+      "path": "working/project/restock.py",
+      "git_blob": "1f2cddccdcad14c2d8a36ef82540126b906e0960",
+      "bytes": 1294,
+      "sha256": "2f5dd8880a820e588dd82e5b5c7081215447bcf1485dfb1e9371ed2ebce8eb73",
+      "recovery": "copied existing original bytes, matching cloud patch blob"
+    },
+    {
+      "path": "working/project/stock.csv",
+      "git_blob": "bebd60167509a5b8f2548657c57457d8bb713a65",
+      "bytes": 116,
+      "sha256": "6464c029fec7222d469ff378b9907edf61e8b78b6e182455ee2214b105c39166",
+      "recovery": "copied existing original bytes, matching cloud patch blob"
+    },
+    {
+      "path": "working/store/.knokeep-eval/events.jsonl",
+      "git_blob": "c96d9c658a96b6607debd165143c4b2194a7cd8c",
+      "bytes": 882,
+      "sha256": "58b0f677a37b5de3900ec697c0b8685c2fc510801211eca4f6004f041a9006a2",
+      "recovery": "original input plus exact appended event from cloud patch"
+    },
+    {
+      "path": "working/store/data/q2-cursor-a1/session_log",
+      "git_blob": "3e0341e462c2f998e4de876a0a88b260f38bb777",
+      "bytes": 756,
+      "sha256": "54372dc9b2e45945a73534ab3300364fa2196a0fd07778ce09bd4e8fc6ec9879",
+      "recovery": "copied existing original bytes, matching cloud patch blob"
+    },
+    {
+      "path": "working/store/data/q2-cursor-a1/sessions/q2-cursor-source-a1",
+      "git_blob": "a998900652d8f88f1a3dc5df2631d5916f229c53",
+      "bytes": 234,
+      "sha256": "037fdf0a00383051fa23bbca9d45faaa958979ceb7d3650ccfba8c4ae5bca89c",
+      "recovery": "copied existing original bytes, matching cloud patch blob"
+    },
+    {
+      "path": "working/store/data/q2-cursor-a1/system_state",
+      "git_blob": "66383411fa4d1dc464ab41dd689441e16b471016",
+      "bytes": 682,
+      "sha256": "c8726ae561c5e89df562a5c136813ba2b23bfb42e484da2ee5b951aaac21bb1f",
+      "recovery": "copied existing original bytes, matching cloud patch blob"
+    },
+    {
+      "path": "working/store/journal/journal.log",
+      "git_blob": "a1d5c9ccbad3a220126f1b803377e2e5a8dc4844",
+      "bytes": 2459,
+      "sha256": "0880497ec2e05d97bd51495251abfbd6aa3e85c26bf2c000475c38e74e8cf703",
+      "recovery": "copied existing original bytes, matching cloud patch blob"
+    },
+    {
+      "path": "working/store/locks/advisory.lock",
+      "git_blob": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recovery": "copied existing original bytes, matching cloud patch blob"
+    },
+    {
+      "path": "working/store/locks/cas.lock",
+      "git_blob": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recovery": "copied existing original bytes, matching cloud patch blob"
+    },
+    {
+      "path": "working/store/locks/fence-alloc/d29dc7046f4f1103085ec8ad648445d8456fab991549a63c3d2eb39661774c43.fence",
+      "git_blob": "0e70fe9ba95fa24131a0f73836327b4aaf7e64af",
+      "bytes": 52,
+      "sha256": "b03e729b2f2b14291f3d230ff8989573161ee35ea72343b2d6dc320cbc8c947f",
+      "recovery": "copied existing original bytes, matching cloud patch blob"
+    },
+    {
+      "path": "working/store/locks/fence-alloc/d3ac3ca360babd4a92ea1750e8a2543d8b9807b51da5ebe6bdefe654f7332727.fence",
+      "git_blob": "985482660d23fd17cb3f1634a59807b0435e088c",
+      "bytes": 53,
+      "sha256": "bcfd989b2dbcf870a685fe35939b9cadf4bdede4f694a4611942be2ed679e564",
+      "recovery": "copied existing original bytes, matching cloud patch blob"
+    },
+    {
+      "path": "working/store/locks/fence-alloc/f97fd5fe3063a222a842767e0fd860f06f783c4661573112f808be81ba02e141.fence",
+      "git_blob": "0c13b40b1667632d82ea7129b94bd4ba8b3b7e15",
+      "bytes": 53,
+      "sha256": "7114440739bb5c43f3e2c994d9c0519373f61f6a77ba322de2c8d5fbf15f52ce",
+      "recovery": "copied existing original bytes, matching cloud patch blob"
+    }
+  ]
+}

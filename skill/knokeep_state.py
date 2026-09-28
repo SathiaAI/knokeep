@@ -468,7 +468,7 @@ def session_append(store, project, session_id, client, entry):
             die(reason="write_error", kind=res.kind.value)
     die(reason="append_retry_exhausted")
 
-def _section(b, h, warnings=None):
+def _section(b, h, warnings=None, limit=400):
     """Read-only resume view of one '## <h>' section (issue #20).
 
     Uses the same line-anchored, CRLF-tolerant heading rules as the writer
@@ -485,7 +485,12 @@ def _section(b, h, warnings=None):
         return ""
     if got is None:
         return ""
-    return got[2].replace("\r\n", "\n").strip()[:400]
+    content = got[2].replace("\r\n", "\n").strip()
+    if limit is not None and len(content) > limit:
+        if warnings is not None:
+            warnings.append(f"truncated preview: {h}; read the full section before acting")
+        return content[:limit]
+    return content
 
 # --- H1 increment 1: bounded_cas_reread_reapply conflict protocol -----------
 # A "## <Heading>" line must be a real level-2 heading: "##" immediately
@@ -693,8 +698,16 @@ def bootstrap(store, project):
     fm, _ = parse(sblob.body.decode("utf-8")) if sblob else ({}, "")
     lfm, lbody = parse(lblob.body.decode("utf-8")) if lblob else ({}, "")
     section_warnings = []
-    active = _section(lbody, "Active State", section_warnings)
-    nxt = _section(lbody, "Next Step", section_warnings)
+    active_full = _section(lbody, "Active State", section_warnings, limit=None)
+    next_full = _section(lbody, "Next Step", section_warnings, limit=None)
+    active, nxt = active_full[:400], next_full[:400]
+    truncated_fields = []
+    for field, heading, full in (("active", "Active State", active_full),
+                                 ("next", "Next Step", next_full)):
+        if len(full) > 400:
+            truncated_fields.append(field)
+            section_warnings.append(
+                f"truncated preview: {heading}; read {field}_full before acting")
     vh = sblob.version_hash if sblob else None
     lh = lblob.version_hash if lblob else None
     rev = int(fm["revision"]) if fm.get("revision") else None
@@ -718,6 +731,8 @@ def bootstrap(store, project):
            "state_client": fm.get("client"), "log_client": lfm.get("client"),
            "client_labels_verified": False,
            "active": active, "next": nxt,
+           "active_full": active_full, "next_full": next_full,
+           "truncated_fields": truncated_fields,
            "conflicts": conflicts, "conflict_count": conflict_count,
            "settled_count": settled_count,
            "resume_line": resume}

@@ -16,6 +16,28 @@ import sys
 import uuid
 
 
+EXPECTED_TOOLS = ['Bash', 'Edit', 'Glob', 'Grep', 'Read', 'Write']
+
+
+def native_executable(path):
+    candidate = Path(path)
+    if not candidate.is_absolute() or not candidate.is_file():
+        raise ValueError('An existing absolute native executable path is required')
+    if candidate.suffix.lower() in ('.cmd', '.bat', '.ps1') or (os.name == 'nt' and candidate.suffix.lower() != '.exe'):
+        raise ValueError('Shell shims can truncate multiline prompts; use the native executable')
+    return hashlib.sha256(candidate.read_bytes()).hexdigest()
+
+
+def product_integrity(directory, expected_sha):
+    prefix = ['git', '-c', 'safe.directory=' + str(Path(directory).resolve())]
+    def query(args):
+        return subprocess.run(prefix + args, cwd=directory, capture_output=True, text=True, timeout=15)
+    head = query(['rev-parse', 'HEAD'])
+    diff = query(['diff', '--no-ext-diff', '--quiet', 'HEAD', '--'])
+    extra = query(['ls-files', '--others', '--exclude-standard'])
+    return head.returncode == 0 and head.stdout.strip() == expected_sha and diff.returncode == 0 and extra.returncode == 0 and not extra.stdout.strip()
+
+
 def load_supervisor(directory):
     spec = importlib.util.spec_from_file_location('bounded', Path(directory) / 'run_bounded.py')
     mod = importlib.util.module_from_spec(spec)
@@ -68,6 +90,9 @@ def main():
     args = ap.parse_args()
     spec = json.loads(Path(args.spec).read_text(encoding='utf-8'))
     uuid.UUID(spec['session_id'])
+    executable_sha256 = native_executable(spec['executable'])
+    if executable_sha256 != spec['executable_sha256']:
+        raise SystemExit('Native executable fingerprint changed; no model launched')
     out = Path(spec['output_dir']).resolve()
     if out.exists():
         raise SystemExit('Output exists; no process launched')
@@ -77,10 +102,8 @@ def main():
     for name in ('product_dir', 'project_dir', 'supervisor_dir'):
         if not Path(spec[name]).is_dir():
             raise SystemExit('Missing directory: ' + name)
-    product = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=spec['product_dir'],
-                             capture_output=True, text=True, timeout=15)
-    if product.returncode or product.stdout.strip() != spec['product_sha']:
-        raise SystemExit('Product commit mismatch; no model launched')
+    if not product_integrity(spec['product_dir'], spec['product_sha']):
+        raise SystemExit('Product commit or clean-tree mismatch; no model launched')
     env = environment(spec['python_dir'])
     auth = subprocess.run([spec['executable'], 'auth', 'status', '--json'], env=env,
                           capture_output=True, text=True, timeout=30,
@@ -111,6 +134,8 @@ def main():
         os.environ.update(previous_env)
     parsed = inspect_stream((out / 'stdout.bin').read_bytes(), spec['session_id'], spec['model'])
     parsed.update(auth_route='claude.ai Max', resume_requested=bool(spec.get('resume')),
+                  executable_sha256=executable_sha256,
+                  product_unchanged=product_integrity(spec['product_dir'], spec['product_sha']),
                   prompt_sha256=hashlib.sha256(prompt.encode('utf-8')).hexdigest(),
                   product_sha=spec['product_sha'], process_outcome=rec['outcome'],
                   os_exit_code=rec['os_exit_code'])
@@ -118,6 +143,8 @@ def main():
         and not parsed['malformed_lines'] and parsed['init_count'] == 1
         and parsed['result_count'] == 1 and parsed['session_continuity']
         and parsed['model_matches'] and not parsed['result_is_error']
+        and parsed['api_key_sources'] == [spec['expected_api_key_source']]
+        and parsed['tool_names'] == EXPECTED_TOOLS and parsed['product_unchanged']
         and all(not m for m in parsed['mcp_servers']))
     (out / 'turn-summary.json').write_text(json.dumps(parsed, indent=2), encoding='utf-8')
     print(json.dumps(parsed), flush=True)

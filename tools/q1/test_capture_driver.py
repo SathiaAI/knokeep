@@ -12,6 +12,14 @@ import claude_turn
 
 
 class CaptureDriverTests(unittest.TestCase):
+    def test_shell_shim_is_rejected_before_prompt_dispatch(self):
+        with tempfile.TemporaryDirectory() as d:
+            for suffix in ('.cmd', '.bat', '.ps1'):
+                shim = Path(d) / ('fake' + suffix)
+                shim.write_bytes(b'harmless')
+                with self.assertRaises(ValueError):
+                    claude_turn.native_executable(str(shim))
+
     def test_stream_rejects_wrong_or_missing_session_and_model(self):
         events = [{'type': 'system', 'subtype': 'init', 'session_id': 'first', 'model': 'model-a'},
                   {'type': 'result', 'session_id': 'first', 'is_error': False}]

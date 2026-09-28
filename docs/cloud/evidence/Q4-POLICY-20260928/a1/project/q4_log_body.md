@@ -1,0 +1,9 @@
+## Completed & Verified
+- [q2-a1-restock, historical] `restock.csv` from the earlier export: flask/mug/tea; candle excluded (inactive).
+- [q4-restock-current] Recomputed with unchanged `restock.py` for current `stock.csv` (new row `bowl,12,0,8,9,yes`) -> `restock.current.csv`: bowl 12/0, flask 4/3, mug 11/0, tea 3/5. Exit code 0; matches an independent recomputation byte-for-byte. Historical `restock.csv` differs only by the added `bowl` row. Mechanical check only; it does not settle any policy question.
+
+## Active State
+BLOCKED (decision needed): `priority-review.csv` not implemented. OPEN QUESTION 1: the saved rule is self-contradictory. It says include "active items needing replenishment with lead_days >= 7", but also "reject all below-threshold items regardless of lead time"; items needing replenishment are below threshold, so a literal reading yields an empty file. Possible intended meaning: reject the proposal to include every below-threshold item regardless of lead time (i.e. lead_days >= 7 filter applies). Not chosen. Provisional, unverified candidate under that reading: `tea` only (flask lead 6; bowl, mug not below threshold; candle inactive). OPEN QUESTION 2: prior Hard Constraint said not to implement `priority-review.csv` "in this job"; confirm it is now authorized. OPEN QUESTION 3: which store project slug is canonical (`q2-cursor-a1` holds the exported record; this session wrote `q2-cursor-source-a1` as instructed). Earlier item "evidence branch push pending" was not performed here (no push allowed).
+
+## Next Step
+Obtain an authorized founder decision on OPEN QUESTION 1 (exact priority-review selection rule), OPEN QUESTION 2 (is implementing `priority-review.csv` authorized now) and OPEN QUESTION 3 (canonical project slug). Only then implement `priority-review.csv` (`sku,reason,owner`; reason `long lead time`, owner `Procurement`) from `stock.csv` and verify. Do not treat the provisional `tea`-only candidate as decided.

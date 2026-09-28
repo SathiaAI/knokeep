@@ -1,0 +1,91 @@
+{
+ "note": "Sanitized extract of provider-stored tool records for the Grok Q2 first pass. Provider card/response IDs removed. Bash OUTPUTS are not present in the provider-stored responses API; only commands are.",
+ "tool_call_order": [
+  "browsePage",
+  "browsePage",
+  "initTerminalSession",
+  "browsePage",
+  "browsePage",
+  "webSearch",
+  "browsePage",
+  "browsePage",
+  "browsePage",
+  "browsePage",
+  "browsePage",
+  "browsePage",
+  "browsePage",
+  "browsePage",
+  "browsePage",
+  "browsePage",
+  "browsePage",
+  "bash",
+  "bash"
+ ],
+ "bash_commands": [
+  {
+   "order": 1,
+   "command": "set -e\nmkdir -p /tmp/q2pkt && cd /tmp/q2pkt\nurls=(\n  \"https://raw.githubusercontent.com/SathiaAI/knokeep/2bccb5e5c33a01391a7e389ff44a741a20ea8be6/docs/cloud/q2-work/store/data/q2-cursor-a1/system_state\"\n  \"https://raw.githubusercontent.com/SathiaAI/knokeep/2bccb5e5c33a01391a7e389ff44a741a20ea8be6/docs/cloud/q2-work/store/data/q2-cursor-a1/session_log\"\n  \"https://raw.githubusercontent.com/SathiaAI/knokeep/2bccb5e5c33a01391a7e389ff44a741a20ea8be6/docs/cloud/q2-work/store/data/q2-cursor-a1/sessions/q2-cursor-source-a1\"\n  \"https://raw.githubusercontent.com/SathiaAI/knokeep/2bccb5e5c33a01391a7e389ff44a741a20ea8be6/docs/cloud/q2-work/project/stock.csv\"\n  \"https://raw.githubusercontent.com/SathiaAI/knokeep/2bccb5e5c33a01391a7e389ff44a741a20ea8be6/docs/cloud/q2-work/project/restock.csv\"\n  \"https://raw.githubusercontent.com/SathiaAI/knokeep/2bccb5e5c33a01391a7e389ff44a741a20ea8be6/docs/cloud/q2-work/project/restock.py\"\n  \"https://raw.githubusercontent.com/SathiaAI/knokeep/2bccb5e5c33a01391a7e389ff44a741a20ea8be6/docs/cloud/q2-work/project/_log_body.md\"\n  \"https://raw.githubusercontent.com/SathiaAI/knokeep/2bccb5e5c33a01391a7e389ff44a741a20ea8be6/docs/cloud/q2-work/project/_state_body.md\"\n  \"https://raw.githubusercontent.com/SathiaAI/knokeep/a4916e36a9eeeae9a62ce62281da12e3f9c213a4/docs/cloud/q2-codex-result/working/project/priority-review.csv\"\n  \"https://raw.githubusercontent.com/SathiaAI/knokeep/592f7faaa0213ea6fef4f428a9ac1aeaf06c3caa/docs/cloud/q2-devin-result/working/project/priority-review.csv\"\n  \"https://raw.githubusercontent.com/SathiaAI/knokeep/4d9c2d00be4e448cdefe123ffb0e13460de150ca/docs/cloud/q2-source-brief.md\"\n  \"https://raw.githubusercontent.com/SathiaAI/knokeep/9b9b42524b610099f8d37d7a9df1d9f00d674ead/docs/cloud/q2-receiver-brief.md\"\n  \"https://raw.githubusercontent.com/SathiaAI/knokeep/a4916e36a9eeeae9a62ce62281da12e3f9c213a4/docs/cloud/q2-codex-result/REPORT.md\"\n  \"https://raw.githubusercontent.com/SathiaAI/knokeep/592f7faaa0213ea6fef4f428a9ac1aeaf06c3caa/docs/cloud/q2-devin-result/REPORT.md\"\n  \"https://raw.githubusercontent.com/SathiaAI/knokeep/592f7faaa0213ea6fef4f428a9ac1aeaf06c3caa/docs/cloud/q2-devin-result/working/store/data/q2-cursor-a1/session_log\"\n)\ni=0\nfor u in \"${urls[@]}\"; do\n  i=$((i+1))\n  f=$(printf \"%02d\" $i)_$(basename \"$u\")\n  curl -fsSL \"$u\" -o \"$f\"\n  echo \"==== $f ====\"\n  echo \"URL=$u\"\n  wc -c \"$f\"\n  sha256sum \"$f\"\n  echo \"----- head -----\"\n  python3 -c \"p='$f'; b=open(p,'rb').read(); print(repr(b[:200])); print('endswith_newline', b.endswith(b'\\\\n')); print('crlf', b'\\\\r\\\\n' in b)\"\ndone\nls -la"
+  },
+  {
+   "order": 2,
+   "command": "cd /tmp/q2pkt\necho \"=== remaining hashes ===\"\nsha256sum 06_restock.py 07__log_body.md 08__state_body.md 09_priority-review.csv 10_priority-review.csv 11_q2-source-brief.md 12_q2-receiver-brief.md\necho \"=== priority bytes ===\"\npython3 - <<'PY'\nfrom pathlib import Path\nfor p in [\"09_priority-review.csv\",\"10_priority-review.csv\",\"05_restock.csv\"]:\n    b=Path(p).read_bytes()\n    print(p, len(b), b)\nPY\necho \"=== compute restock and candidate priority from stock ===\"\npython3 - <<'PY'\nimport csv\nfrom io import StringIO\nfrom pathlib import Path\ntext=Path(\"04_stock.csv\").read_text()\nrows=list(csv.DictReader(StringIO(text)))\nprint(\"rows\", rows)\nrestock=[]\nfor r in rows:\n    if r[\"active\"]!=\"yes\":\n        print(\"exclude inactive\", r[\"sku\"])\n        continue\n    free=max(0,int(r[\"stock\"])-int(r[\"reserved\"]))\n    reorder=max(0,int(r[\"threshold\"])-free)\n    restock.append((r[\"sku\"],free,reorder,int(r[\"lead_days\"])))\nrestock.sort()\nprint(\"restock\", restock)\nprint(\"need replenishment (reorder>0)\", [x for x in restock if x[2]>0])\nprint(\"priority if active+reorder>0+lead>=7\", [x for x in restock if x[2]>0 and x[3]>=7])\nprint(\"priority if only active+lead>=7 ignoring threshold\", [x for x in restock if x[3]>=7])\nprint(\"priority if reject all below-threshold\", [x for x in restock if x[2]==0 and x[3]>=7])\nPY\necho \"=== exact phrase compare ===\"\npython3 - <<'PY'\nsrc=open(\"11_q2-source-brief.md\").read()\nlog=open(\"02_session_log\").read()\n# extract next-task sentences\nimport re\nm=re.search(r\"The agreed next task is.*handoff\\.\", src, re.S)\nprint(\"SOURCE NEXT PARA:\\n\", m.group(0) if m else \"MISSING\")\nm2=re.search(r\"## Next Step\\n.*\", log, re.S)\nprint(\"\\nSAVED NEXT:\\n\", m2.group(0) if m2 else \"MISSING\")\nprint(\"\\nclient fields:\")\nprint(\"state\", [l for l in open(\"01_system_state\") if l.startswith(\"client\")])\nprint(\"log\", [l for l in open(\"02_session_log\") if l.startswith(\"client\")])\nprint(\"journal\", [l for l in open(\"03_q2-cursor-source-a1\") if l.startswith(\"client\")])\nPY\necho \"=== packet sha checks ===\"\necho expected_state c8726ae561c5e89df562a5c136813ba2b23bfb42e484da2ee5b951aaac21bb1f\necho expected_log 54372dc9b2e45945a73534ab3300364fa2196a0fd07778ce09bd4e8fc6ec9879\necho expected_journal 037fdf0a00383051fa23bbca9d45faaa958979ceb7d3650ccfba8c4ae5bca89c\necho expected_stock 6464c029fec7222d469ff378b9907edf61e8b78b6e182455ee2214b105c39166\necho expected_srcbrief d0751774615f2024957b5174fcbe40cbf8d5e2fc82d54441f58da4be90ef0fce\necho expected_recvbrief 7dffdd886193223936c52881ff3af2efc5fd156ed1cd5e52043d8eb518c85839\necho expected_codex_csv ee9be42c8fcaf313604f0cd97ab43e29ac3657496698f8cb0ad3c177b8f415b3\necho expected_codex_report 44519322c7539c9b29e863c52abc949cb64933df5c6a0bfadfd61cb30712a32c\necho expected_devin_report 2680c470f12171a008fa1fb47646d4a481c3df9a40f6292b3790e5230fac4e10\necho expected_devin_log 176593900c9660c3e4a16a663248c7cbdaf0a18c913f74ff150fd9ae87b397f4\nsha256sum 01_system_state 02_session_log 03_q2-cursor-source-a1 04_stock.csv 11_q2-source-brief.md 12_q2-receiver-brief.md 09_priority-review.csv 13_REPORT.md 14_REPORT.md 15_session_log"
+  }
+ ],
+ "web_search_args": [
+  {
+   "query": "site:raw.githubusercontent.com/SathiaAI/knokeep/2bccb5e5c33a01391a7e389ff44a741a20ea8be6/docs/cloud/q2-work"
+  }
+ ],
+ "web_search_results": [
+  {
+   "title": "Q0-CODEX-CLOUD-20260927-RESUME-A1: separate-session store retrieval · Issue #8 · SathiaAI/knokeep · GitHub",
+   "url": "https://github.com/SathiaAI/knokeep/issues/8",
+   "preview": "## Description\npjpoulose\nopened on Sep 27, 2026\nJob ID: `Q0-CODEX-CLOUD-20260927-RESUME-A1` ;…"
+  },
+  {
+   "title": "flush-state ignores --client and records Codex writes as cowork · Issue #7 · SathiaAI/knokeep · GitHub",
+   "url": "https://github.com/SathiaAI/knokeep/issues/7",
+   "preview": "## Description\npjpoulose\nopened on Sep 27, 2026\n## Observed defect\nIn Q0 Codex cloud run…"
+  },
+  {
+   "title": "domain package - github.com/kdeps/kdeps/v2/pkg/domain - Go Packages",
+   "url": "https://pkg.go.dev/github.com/kdeps/kdeps/v2/pkg/domain",
+   "preview": "// Values: \"auto\" (default), \"none\" (disable tools), \"required\" (force any tool call),\n\t// or a…"
+  },
+  {
+   "title": "",
+   "url": "https://raw.githubusercontent.com/SathiaAI/knosky/HEAD/SECURITY.md",
+   "preview": "# Security Policy\nKnoSky is a **local-first** tool: it runs on your machine, indexes your own…"
+  },
+  {
+   "title": "angristan/netclode | DeepWiki",
+   "url": "https://deepwiki.com/angristan/netclode",
+   "preview": "### Configuration (.env file)\nAll secrets and configuration are centralized in `.env`:\n| Variable |…"
+  },
+  {
+   "title": "Transcript: Knightscope Q2 2026 Earnings Conference Call - Knightscope (NASDAQ:KSCP) - Benzinga",
+   "url": "https://www.benzinga.com/news/26/09/61864064/transcript-knightscope-q2-2026-earnings-conference-call",
+   "preview": "Benzinga\nAll sections\nSeptember 18, 2026 7:07 AM 26 min read\n# Transcript: Knightscope Q2 2026…"
+  },
+  {
+   "title": "GitHub - ArielleTolome/n8n-nodes-kie: n8n community nodes for Kie.ai — Flux, Sora 2, Kling 3.0, Veo3, Runway Gen4, Wan, Hailuo, Seedream, GPT-Image-1.5, Ideogram, Recraft, Topaz, ElevenLabs, Suno and more · GitHub",
+   "url": "https://github.com/ArielleTolome/n8n-nodes-kie",
+   "preview": "# GitHub - ArielleTolome/n8n-nodes-kie: n8n community nodes for Kie.ai — Flux, Sora 2, Kling 3.0,…"
+  },
+  {
+   "title": "GitHub - Tencent/WeKnora: Open-source LLM knowledge platform: turn raw documents into a queryable RAG, an autonomous reasoning agent, and a self-maintaining Wiki. · GitHub",
+   "url": "https://github.com/Tencent/WeKnora",
+   "preview": "# GitHub - Tencent/WeKnora: Open-source LLM knowledge platform: turn raw documents into a queryable…"
+  },
+  {
+   "title": "",
+   "url": "https://raw.githubusercontent.com/K-Dense-AI/k-dense-byok/2c613e38052f199526546191c8d8b98c1eb3b15e/web/src/app/page.tsx",
+   "preview": "\"use client\";\nimport { FileTreePanel } from \"@/components/sandbox-panel\";\nimport {…"
+  },
+  {
+   "title": "[New Provider] K.N Cloud — Hourly KVM VPS in Miami, Frankfurt & Amsterdam from $4.99/730h — LowEndTalk",
+   "url": "https://lowendtalk.com/discussion/220374/new-provider-k-n-cloud-hourly-kvm-vps-in-miami-frankfurt-amsterdam-from-4-99-730h",
+   "preview": "#### Howdy, Stranger!\nIt looks like you're new here.\nIf you want to get involved, click one of…"
+  }
+ ]
+}

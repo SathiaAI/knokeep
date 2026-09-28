@@ -1,0 +1,158 @@
+{
+  "assessment.json": {
+    "bytes": 5872,
+    "sha256": "2fcfad5ec96af7e96f964c446fa98e66741457a79c58426d509e8a93d7e4c01b"
+  },
+  "before/project/_log_body.md": {
+    "bytes": 642,
+    "sha256": "e076ca1021e23533440d816e55b4257376946fceffaa182c6f22bb62efb605ce"
+  },
+  "before/project/_state_body.md": {
+    "bytes": 568,
+    "sha256": "65116ae20c63adc38d7d99158e5e665dee41040de7ffe1be7d869933887369a2"
+  },
+  "before/project/restock.csv": {
+    "bytes": 60,
+    "sha256": "e8dca2a1c62370bdecbfe066bba4b2372d4c62abee2e3438ec85f00aeb8823dd"
+  },
+  "before/project/restock.py": {
+    "bytes": 1294,
+    "sha256": "2f5dd8880a820e588dd82e5b5c7081215447bcf1485dfb1e9371ed2ebce8eb73"
+  },
+  "before/project/stock.csv": {
+    "bytes": 135,
+    "sha256": "581c6a1212f47dac082a2dfa7b2c224fd530b635ad99b9469606ffda6088b4f9"
+  },
+  "before/store/.knokeep-eval/events.jsonl": {
+    "bytes": 772,
+    "sha256": "48b111a16d1bd107b74df92961d9530cdf2d8ed26d840cbc82d8b29633f4e27a"
+  },
+  "before/store/data/q2-cursor-a1/session_log": {
+    "bytes": 756,
+    "sha256": "54372dc9b2e45945a73534ab3300364fa2196a0fd07778ce09bd4e8fc6ec9879"
+  },
+  "before/store/data/q2-cursor-a1/sessions/q2-cursor-source-a1": {
+    "bytes": 234,
+    "sha256": "037fdf0a00383051fa23bbca9d45faaa958979ceb7d3650ccfba8c4ae5bca89c"
+  },
+  "before/store/data/q2-cursor-a1/system_state": {
+    "bytes": 682,
+    "sha256": "c8726ae561c5e89df562a5c136813ba2b23bfb42e484da2ee5b951aaac21bb1f"
+  },
+  "before/store/journal/journal.log": {
+    "bytes": 2459,
+    "sha256": "0880497ec2e05d97bd51495251abfbd6aa3e85c26bf2c000475c38e74e8cf703"
+  },
+  "before/store/locks/advisory.lock": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "before/store/locks/cas.lock": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "before/store/locks/fence-alloc/d29dc7046f4f1103085ec8ad648445d8456fab991549a63c3d2eb39661774c43.fence": {
+    "bytes": 52,
+    "sha256": "b03e729b2f2b14291f3d230ff8989573161ee35ea72343b2d6dc320cbc8c947f"
+  },
+  "before/store/locks/fence-alloc/d3ac3ca360babd4a92ea1750e8a2543d8b9807b51da5ebe6bdefe654f7332727.fence": {
+    "bytes": 53,
+    "sha256": "bcfd989b2dbcf870a685fe35939b9cadf4bdede4f694a4611942be2ed679e564"
+  },
+  "before/store/locks/fence-alloc/f97fd5fe3063a222a842767e0fd860f06f783c4661573112f808be81ba02e141.fence": {
+    "bytes": 53,
+    "sha256": "7114440739bb5c43f3e2c994d9c0519373f61f6a77ba322de2c8d5fbf15f52ce"
+  },
+  "project/_log_body.md": {
+    "bytes": 642,
+    "sha256": "e076ca1021e23533440d816e55b4257376946fceffaa182c6f22bb62efb605ce"
+  },
+  "project/_log_body.q4.md": {
+    "bytes": 2194,
+    "sha256": "121b9e462b1cabb82f838d5c0c5d81ebb6cf67ebccbc1ef4ce1584ab27b893b7"
+  },
+  "project/_state_body.md": {
+    "bytes": 568,
+    "sha256": "65116ae20c63adc38d7d99158e5e665dee41040de7ffe1be7d869933887369a2"
+  },
+  "project/_state_body.q4.md": {
+    "bytes": 1010,
+    "sha256": "178e5e27f1c6e48073c40e1e662dbb612886a1a99fa3037637106f4b65518343"
+  },
+  "project/REPORT.md": {
+    "bytes": 2838,
+    "sha256": "6c2914700a6b73befeee76212ab9b27b0094e467b4f952e23520e50c6789c02c"
+  },
+  "project/restock.csv": {
+    "bytes": 71,
+    "sha256": "8b477369f686f4a29b06e8bed27aa41df86aa1dabb4c862e6e8eb61470ecab77"
+  },
+  "project/restock.export-original.csv": {
+    "bytes": 60,
+    "sha256": "e8dca2a1c62370bdecbfe066bba4b2372d4c62abee2e3438ec85f00aeb8823dd"
+  },
+  "project/restock.py": {
+    "bytes": 1294,
+    "sha256": "2f5dd8880a820e588dd82e5b5c7081215447bcf1485dfb1e9371ed2ebce8eb73"
+  },
+  "project/stock.csv": {
+    "bytes": 135,
+    "sha256": "581c6a1212f47dac082a2dfa7b2c224fd530b635ad99b9469606ffda6088b4f9"
+  },
+  "prompt-derived.txt": {
+    "bytes": 2240,
+    "sha256": "a2f264ee47595aaab6c621d0567dcea87b69449df7df614f7df04225914365c4"
+  },
+  "store/.knokeep-eval/events.jsonl": {
+    "bytes": 1334,
+    "sha256": "fa1a2c88872c006943e91a97b94316e6f56e224436910403a7f7e043136d26da"
+  },
+  "store/data/q2-cursor-a1/session_log": {
+    "bytes": 2307,
+    "sha256": "c449eadb4b2684db8bba9485967799d27b12a77b103d9cb4b97b44c24466f4a3"
+  },
+  "store/data/q2-cursor-a1/sessions/q2-cursor-source-a1": {
+    "bytes": 234,
+    "sha256": "037fdf0a00383051fa23bbca9d45faaa958979ceb7d3650ccfba8c4ae5bca89c"
+  },
+  "store/data/q2-cursor-a1/sessions/q4-cc-receiver-a2": {
+    "bytes": 451,
+    "sha256": "53a32d446a45b7223ade9d462ff4270a7ce5e57b1fe2a64297d33e8379067d09"
+  },
+  "store/data/q2-cursor-a1/system_state": {
+    "bytes": 1123,
+    "sha256": "9938c26a3388c8825ac53f521ffb123a9a7a1ffc1f0cfdd605f94de4e739b190"
+  },
+  "store/journal/journal.log": {
+    "bytes": 6596,
+    "sha256": "9ed1e920b262147778b45586e71e3c1d15276f2ed2aa72dc55150e92efe45091"
+  },
+  "store/locks/advisory.lock": {
+    "bytes": 1,
+    "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+  },
+  "store/locks/cas.lock": {
+    "bytes": 1,
+    "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+  },
+  "store/locks/fence-alloc/bc35dd0353b911cc364e2e1c81b24ce9d47167ac45b42b5526b99034df77476d.fence": {
+    "bytes": 53,
+    "sha256": "228afbbce23566fa4a14e5ea498179ce88c034ffd00240ae8c2cbf823950edad"
+  },
+  "store/locks/fence-alloc/d29dc7046f4f1103085ec8ad648445d8456fab991549a63c3d2eb39661774c43.fence": {
+    "bytes": 53,
+    "sha256": "ed2e118e991f58f5d6f243b8df15aef2514d284dcd6ab40dfaab575fede449a6"
+  },
+  "store/locks/fence-alloc/d3ac3ca360babd4a92ea1750e8a2543d8b9807b51da5ebe6bdefe654f7332727.fence": {
+    "bytes": 53,
+    "sha256": "bcfd989b2dbcf870a685fe35939b9cadf4bdede4f694a4611942be2ed679e564"
+  },
+  "store/locks/fence-alloc/f97fd5fe3063a222a842767e0fd860f06f783c4661573112f808be81ba02e141.fence": {
+    "bytes": 52,
+    "sha256": "94dc8ddff50f160d52c4a69a227f1c6de99f5d3e277c8134354a2213f3e0c72a"
+  },
+  "tool-actions-derived.json": {
+    "bytes": 9116,
+    "sha256": "76ecfe9118081fd6b46d0ef32739ded43e7e2045dbd694039450defd704f078f"
+  }
+}

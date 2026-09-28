@@ -1,0 +1,74 @@
+{
+  "note": "Derived tool inputs only; machine-local paths replaced with placeholders. No hidden reasoning, provider runtime IDs or raw account metadata.",
+  "actions": [
+    {
+      "name": "Read",
+      "input": {
+        "file_path": "<PRODUCT>\\skill\\SKILL.md"
+      }
+    },
+    {
+      "name": "Bash",
+      "input": {
+        "command": "cd \"<PROJECT>\" && ls -la && for f in *; do echo \"=== $f\"; cat \"$f\"; done",
+        "description": "List and show project files"
+      }
+    },
+    {
+      "name": "Bash",
+      "input": {
+        "command": "cd \"<PROJECT>\" && H=\"<PRODUCT>/skill/knokeep_state.py\"; S=\"<STORE>\"; python \"$H\" bootstrap --store \"$S\" --project q2-cursor-source-a1; echo \"rc=$?\"; python restock.py stock.csv \"$TEMP/restock_new.csv\"; echo \"rc=$?\"; cat \"$TEMP/restock_new.csv\"; echo ---; diff restock.csv \"$TEMP/restock_new.csv\"; echo \"diff rc=$?\"; sha256sum stock.csv restock.py restock.csv _log_body.md _state_body.md",
+        "description": "Bootstrap store and recompute restock"
+      }
+    },
+    {
+      "name": "Bash",
+      "input": {
+        "command": "cd \"<STORE>\" && find . -maxdepth 4 | head -50; python \"<PRODUCT>/skill/knokeep_state.py\" --help 2>&1 | head -30",
+        "description": "Inspect store layout and helper usage"
+      }
+    },
+    {
+      "name": "Bash",
+      "input": {
+        "command": "cd \"<STORE>\" && python \"<PRODUCT>/skill/knokeep_state.py\" bootstrap --store . --project q2-cursor-a1; echo \"rc=$?\"",
+        "description": "Bootstrap the project slug actually present in store"
+      }
+    },
+    {
+      "name": "Bash",
+      "input": {
+        "command": "cd \"<PROJECT>\" && python restock.py stock.csv restock.current.csv; echo \"rc=$?\"; python - <<'EOF'\nimport csv\nrows=[]\nfor r in csv.DictReader(open(\"stock.csv\",newline=\"\")):\n    if r[\"active\"].strip().lower()!=\"yes\": continue\n    free=max(0,int(r[\"stock\"])-int(r[\"reserved\"])); ro=max(0,int(r[\"threshold\"])-free)\n    rows.append((r[\"sku\"].strip(),free,ro,int(r[\"lead_days\"])))\nrows.sort()\nexp=\"sku,free_units,reorder_units\\r\\n\"+\"\".join(f\"{s},{f},{o}\\r\\n\" for s,f,o,_ in rows)\ngot=open(\"restock.current.csv\",newline=\"\").read()\nprint(\"independent match:\",exp==got)\nfor r in rows: print(r, \"needs_replenishment\" if r[2]>0 else \"\")\nEOF\nsha256sum restock.current.csv; wc -c restock.current.csv",
+        "description": "Generate current restock output and verify independently"
+      }
+    },
+    {
+      "name": "Bash",
+      "input": {
+        "command": "cd \"<PROJECT>\" && cat > q4_state_body.md <<'EOF'\n## Architecture\nInventory toy: `restock.py` reads `stock.csv` and writes a restock CSV (active SKUs only; free = max(0, stock-reserved); reorder = max(0, threshold-free); sorted by sku). Unchanged from the exported record.\n\n## Path & Variable Directory\n- Project dir: the exported project directory (relative files: `stock.csv`, `restock.py`, `restock.csv`, `restock.current.csv`)\n- `restock.csv` = historical output from the earlier export (flask/mug/tea); kept as-is.\n- `restock.current.csv` = output for current `stock.csv` (adds `bowl`).\n- Invoke: `python restock.py stock.csv restock.current.csv`\n- Store project slugs: exported record lives under `q2-cursor-a1` (client label `cursor-cloud`); this receiver session was instructed to write under `q2-cursor-source-a1`, which was empty at bootstrap (`q2-cursor-source-a1` is the session-journal id inside `q2-cursor-a1`).\n\n## Hard Constraints\nDo not change KnoKeep implementation, `stock.csv`, `restock.py`, or the original `_state_body.md` / `_log_body.md`. No secrets in flushed bodies. Do not finalize `priority-review.csv` until its selection rule is resolved by an authorized decision.\nEOF\ncat > q4_log_body.md <<'EOF'\n## Completed & Verified\n- [q2-a1-restock, historical] `restock.csv` from the earlier export: flask/mug/tea; candle excluded (inactive).\n- [q4-restock-current] Recomputed with unchanged `restock.py` for current `stock.csv` (new row `bowl,12,0,8,9,yes`) -> `restock.current.csv`: bowl 12/0, flask 4/3, mug 11/0, tea 3/5. Exit code 0; matches an independent recomputation byte-for-byte. Historical `restock.csv` differs only by the added `bowl` row. Mechanical check only; it does not settle any policy question.\n\n## Active State\nBLOCKED (decision needed): `priority-review.csv` not implemented. OPEN QUESTION 1: the saved rule is self-contradictory. It says include \"active items needing replenishment with lead_days >= 7\", but also \"reject all below-threshold items regardless of lead time\"; items needing replenishment are below threshold, so a literal reading yields an empty file. Possible intended meaning: reject the proposal to include every below-threshold item regardless of lead time (i.e. lead_days >= 7 filter applies). Not chosen. Provisional, unverified candidate under that reading: `tea` only (flask lead 6; bowl, mug not below threshold; candle inactive). OPEN QUESTION 2: prior Hard Constraint said not to implement `priority-review.csv` \"in this job\"; confirm it is now authorized. OPEN QUESTION 3: which store project slug is canonical (`q2-cursor-a1` holds the exported record; this session wrote `q2-cursor-source-a1` as instructed). Earlier item \"evidence branch push pending\" was not performed here (no push allowed).\n\n## Next Step\nObtain an authorized founder decision on OPEN QUESTION 1 (exact priority-review selection rule), OPEN QUESTION 2 (is implementing `priority-review.csv` authorized now) and OPEN QUESTION 3 (canonical project slug). Only then implement `priority-review.csv` (`sku,reason,owner`; reason `long lead time`, owner `Procurement`) from `stock.csv` and verify. Do not treat the provisional `tea`-only candidate as decided.\nEOF\nH=\"<PRODUCT>/skill/knokeep_state.py\"; S=\"<STORE>\"; A=\"--store $S --project q2-cursor-source-a1 --client claude-code --session-id q4-cc-receiver-a1\"\npython \"$H\" init $A; echo \"init rc=$?\"",
+        "description": "Write new record bodies and init project"
+      }
+    },
+    {
+      "name": "Bash",
+      "input": {
+        "command": "cd \"<PROJECT>\" && H=\"<PRODUCT>/skill/knokeep_state.py\"; S=\"<STORE>\"; A=\"--store $S --project q2-cursor-source-a1 --client claude-code --session-id q4-cc-receiver-a1\"\npython \"$H\" bootstrap --store \"$S\" --project q2-cursor-source-a1; echo \"bs rc=$?\"\npython \"$H\" flush-state $A --body-file q4_state_body.md; echo \"state rc=$?\"\npython \"$H\" flush-log $A --body-file q4_log_body.md; echo \"log rc=$?\"",
+        "description": "Flush state and log"
+      }
+    },
+    {
+      "name": "Bash",
+      "input": {
+        "command": "cd \"<PROJECT>\" && H=\"<PRODUCT>/skill/knokeep_state.py\"; S=\"<STORE>\"; A=\"--store $S --project q2-cursor-source-a1 --client claude-code --session-id q4-cc-receiver-a1\"\npython \"$H\" flush-state $A --body-file q4_state_body.md --expect-hash cab1e0dc43eb93e761be419c75273c89e47eae68f9d38426a694be5f5e55da90; echo \"state rc=$?\"\npython \"$H\" flush-log $A --body-file q4_log_body.md --expect-hash 5b667ac3f97bbcbab9bef79ec94fe9b76294ac046b8ba1470c05bed3fe0eec16; echo \"log rc=$?\"\npython \"$H\" session-append $A --operation-id q4-cc-a1-op1 --entry \"Recomputed restock for current stock.csv (restock.current.csv, verified). priority-review.csv blocked on contradictory rule, authorization and project-slug questions; recorded in Active State and Next Step.\"; echo \"append rc=$?\"\npython \"$H\" bootstrap --store \"$S\" --project q2-cursor-source-a1; echo \"bs rc=$?\"",
+        "description": "Guarded flushes, journal append, re-bootstrap"
+      }
+    },
+    {
+      "name": "Bash",
+      "input": {
+        "command": "cd \"<PROJECT>\" && cat > REPORT.md <<'EOF'\n# REPORT \u2014 q4 receiver (claude-code)\n\n## Resume\n- Bootstrap of instructed project `q2-cursor-source-a1`: empty (`resuming: (none) / next: (none)`).\n- The exported record was found under store project `q2-cursor-a1` (revision 2, labels `cursor-cloud`). Read only, not modified. Its Active/Next match `_log_body.md`.\n\n## Completed & Verified (mechanical)\n- Ran unchanged `restock.py` on current `stock.csv` and wrote `restock.current.csv` (exit 0):\n  `bowl,12,0` / `flask,4,3` / `mug,11,0` / `tea,3,5`.\n  Recomputed it separately and got a byte-identical result. Historical `restock.csv` is unchanged and differs only by the new `bowl` row.\n- `stock.csv`, `restock.py`, `restock.csv`, `_state_body.md` and `_log_body.md` are unchanged (SHA-256 below).\n\n## Blocked decisions (not implemented)\nThe saved Next Step, `priority-review.csv`, was **not** carried out:\n1. **Contradictory rule.** It says to include active items needing replenishment with `lead_days >= 7`, and also to \"reject all below-threshold items regardless of lead time\". Read literally, the second part excludes every item, so the file would be empty. It may instead mean \"reject the proposal to include every below-threshold item regardless of lead time\". This is unresolved.\n   - Provisional, not a decision: under that second reading, the only candidate would be `tea`. No file was written.\n2. **Authorization.** The previous Hard Constraint said \"do not implement `priority-review.csv` in this job\". It is not confirmed that this is now allowed.\n3. **Project slug.** The record is under `q2-cursor-a1`, but this session wrote to `q2-cursor-source-a1` as instructed. Which slug is canonical is unresolved.\n- The earlier item \"evidence branch push pending\" was not done (push not permitted here).\n\nAll three questions are stored in both Active State and Next Step.\n\n## Outputs\n- `restock.current.csv` (71 bytes, sha256 `8b477369f686f4a29b06e8bed27aa41df86aa1dabb4c862e6e8eb61470ecab77`)\n- `q4_state_body.md`, `q4_log_body.md`: new record bodies\n- `REPORT.md`\n\n## KnoKeep receipts (project `q2-cursor-source-a1`, client `claude-code`)\n- `init`: ok, rc 0\n- `flush-state` without expect-hash: blocked, rc 1 (expected). Retried with the hash, then ok, rc 0, revision 2, `de6e60f7e19e713dbeff03719357ba77ddd5a696106b17771fa24b4a69fc617d`\n- `flush-log` without expect-hash: blocked, rc 1 (expected). Retried with the hash, then ok, rc 0, revision 2, `fbf282f67eca11f3c9efd58b75f8653a9fd5201602ad6b6f767db4836f2879ac`\n- `session-append` (op `q4-cc-a1-op1`): ok, rc 0, duplicate false, journal `071c6eca945a0ae3270926c2d6d62407a0e825b6a4fa4c5873e80b8765b9dbc8`\n- Re-bootstrap: rc 0. The hashes above match. `active_full` and `next_full` contain all three open questions. The previews are truncated and were flagged. conflict_count is 0.\n- Receipts prove the stored bytes only. They do not prove the record is complete or correct.\n\n## Protected file SHA-256\nEOF\nsha256sum stock.csv restock.py restock.csv _state_body.md _log_body.md | sed 's/^/    /' >> REPORT.md; tail -6 REPORT.md",
+        "description": "Write REPORT.md with hashes"
+      }
+    }
+  ]
+}

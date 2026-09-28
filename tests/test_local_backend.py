@@ -32,6 +32,74 @@ def _gen(n: int) -> bytes:
     return gate.make_generation_header(n)
 
 
+@pytest.mark.parametrize('v2', [False, True])
+@pytest.mark.parametrize('frame', ['oversize-key', 'overflow-body', 'missing-digest', 'missing-fence'])
+def test_journal_lengths_checked_before_allocating_and_writes_fail_closed(tmp_path, monkeypatch, v2, frame):
+    """Corrupt lengths must not reach file.read(n) as allocation requests.
+
+    A bounded read spy makes even UINT32 key-length coverage safe on the
+    unfixed parser. The existing durable prefix remains readable on restart;
+    subsequent writes refuse the malformed tail and never append behind it.
+    """
+    import builtins
+    import hashlib
+    import struct
+
+    backend = LocalBackend(tmp_path)
+    assert isinstance(gate.persist(backend, 'p/good', b'good', ctx=create_ctx(), doc_type='system_state'), OK)
+    prefix = b'KKJ2' if v2 else b''
+    if frame == 'oversize-key':
+        tail = prefix + struct.pack('>I', 2**32-1)
+    else:
+        key = b'p/bad'
+        length = 2**64-1 if frame == 'overflow-body' else 1
+        tail = prefix + struct.pack('>I', len(key)) + key + struct.pack('>Q', length)
+        if frame != 'overflow-body':
+            tail += b'x'
+        if frame == 'missing-fence':
+            # On legacy this is a valid record; truncate the digest instead.
+            tail += hashlib.sha256(b'x').digest()[:32 if v2 else 31]
+    backend._journal_fh.write(tail)
+    backend._journal_fh.flush()
+    original = backend._journal_path.read_bytes()
+    real_open = builtins.open
+
+    class BoundedRead:
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.wrapped.close()
+        def __getattr__(self, name):
+            return getattr(self.wrapped, name)
+        def read(self, n=-1):
+            assert 0 <= n <= len(original), 'untrusted journal length reached allocation'
+            return self.wrapped.read(n)
+
+    def guarded_open(path, mode='r', *args, **kwargs):
+        opened = real_open(path, mode, *args, **kwargs)
+        return BoundedRead(opened) if str(path) == str(backend._journal_path) and mode == 'rb' else opened
+
+    monkeypatch.setattr(builtins, 'open', guarded_open)
+    try:
+        result = gate.persist(backend, 'p/new', b'new', ctx=create_ctx(), doc_type='system_state')
+        assert result == ERROR(ErrorKind.CORRUPTION)
+        assert backend._journal_path.read_bytes() == original
+        assert backend.read('p/new') is None
+        backend.close()
+        fresh = LocalBackend(tmp_path)
+        try:
+            assert fresh.read('p/good').body == b'good'
+            assert fresh.read('p/bad') is None
+            assert gate.persist(fresh, 'p/new', b'new', ctx=create_ctx(), doc_type='system_state') == ERROR(ErrorKind.CORRUPTION)
+            assert fresh._journal_path.read_bytes() == original
+        finally:
+            fresh.close()
+    finally:
+        backend.close()
+
+
 # ---------------------------------------------------------------------------
 # C8 — crash-after-journal-before-publish replay
 # ---------------------------------------------------------------------------
@@ -1135,3 +1203,181 @@ def test_renew_reports_false_once_a_second_instance_superseded_the_durable_owner
     assert a._read_fence_owner(a._fence_owner_path(key))[0] == theirs.token
     a.close()
     b.close()
+
+
+# ---------------------------------------------------------------------------
+# Write-time recovery: a LONG-LIVED instance must complete another process's
+# committed-but-unpublished journal record before deciding a write. The child
+# is a real subprocess that os._exit()s immediately after _journal_append's
+# fsync returns, before _publish runs.
+# ---------------------------------------------------------------------------
+
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+from store.types import EXISTS  # noqa: E402
+
+_CRASH_EXIT_CODE = 86
+_CHILD_TTL_S = 1.0  # explicit short TEST lease, recorded by the child
+
+_CRASH_CHILD = r"""
+import os, sys
+from store import gate
+from store.local import LocalBackend
+from tests.ctx_helpers import create_ctx, overwrite_ctx
+
+mode, root, key, body, base_hash, ttl_s, crash_code = sys.argv[1:8]
+backend = LocalBackend(root)
+if mode == "cas":
+    lease = backend.lock(key, ttl_s=float(ttl_s))
+    sys.stdout.write("%r\n" % lease.expiry_epoch)
+    sys.stdout.flush()
+    ctx = overwrite_ctx(base_hash, lease)
+else:
+    ctx = create_ctx()
+real_append = backend._journal_append
+
+def append_then_die(*args, **kwargs):
+    real_append(*args, **kwargs)  # returns only after the journal fsync
+    os._exit(int(crash_code))  # crash BEFORE _publish
+
+backend._journal_append = append_then_die
+gate.persist(backend, key, body.encode(), ctx=ctx, doc_type="system_state")
+os._exit(0)  # reaching here means the crash point was never hit
+"""
+
+
+def _run_crash_child(mode, root, key, body, base_hash=""):
+    repo_root = _Path(__file__).resolve().parent.parent
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+    return subprocess.run(
+        [sys.executable, "-c", _CRASH_CHILD, mode, str(root), key, body, base_hash,
+         repr(_CHILD_TTL_S), str(_CRASH_EXIT_CODE)],
+        cwd=str(repo_root), env=env, capture_output=True, text=True, timeout=60,
+    )
+
+
+def _journal_size(root):
+    return os.path.getsize(root / "journal" / "journal.log")
+
+
+def _lock_after_expiry(backend, key, child_expiry, budget_s=15.0):
+    deadline = time.monotonic() + budget_s
+    while True:
+        if time.time() > child_expiry:
+            try:
+                return backend.lock(key, ttl_s=30)
+            except Exception:
+                pass
+        assert time.monotonic() < deadline, "child's test lease never became acquirable"
+        time.sleep(0.05)
+
+
+def _committed_unpublished_cas(root, key):
+    """Parent opens first and stays open; the child then commits v1-child to
+    the journal and dies before publishing. Returns (parent, base_hash,
+    child_hash, child_expiry)."""
+    parent = LocalBackend(root)
+    r0 = gate.persist(parent, key, b"v0-base", ctx=create_ctx(), doc_type="system_state")
+    assert isinstance(r0, OK)
+    size_before = _journal_size(root)
+
+    proc = _run_crash_child("cas", root, key, "v1-child", r0.new_hash)
+    assert proc.returncode == _CRASH_EXIT_CODE, (proc.returncode, proc.stderr[-2000:])
+    child_expiry = float(proc.stdout.strip().splitlines()[0])
+    assert _journal_size(root) > size_before  # the child's record is durable
+    # Precondition of the defect: the published file still holds the old value.
+    assert parent.read(key).body == b"v0-base"
+    return parent, r0.new_hash, sha256_hex(b"v1-child"), child_expiry
+
+
+def test_long_lived_instance_recovers_unpublished_commit_before_cas(tmp_path):
+    root = tmp_path / "store-root"
+    key = "recover/cas"
+    parent, base_hash, child_hash, child_expiry = _committed_unpublished_cas(root, key)
+    try:
+        lease = _lock_after_expiry(parent, key, child_expiry)
+        assert lease.expiry_epoch > child_expiry
+        stale = gate.persist(
+            parent, key, b"v2-stale-competitor", ctx=overwrite_ctx(base_hash, lease), doc_type="system_state"
+        )
+        assert isinstance(stale, STALE), stale
+        assert stale.current_hash == child_hash
+        assert parent.read(key).body == b"v1-child"
+        # Fence cache reflects the recovered record (the child's fence).
+        assert parent._last_accepted_fence[key] >= 1
+    finally:
+        parent.close()
+
+    fresh = LocalBackend(root)
+    assert fresh.read(key).body == b"v1-child"  # durable successor survived
+    fresh.close()
+
+
+def test_long_lived_instance_create_only_sees_unpublished_creation(tmp_path):
+    root = tmp_path / "store-root"
+    key = "recover/create"
+    parent = LocalBackend(root)
+    try:
+        proc = _run_crash_child("create", root, key, "child-created")
+        assert proc.returncode == _CRASH_EXIT_CODE, (proc.returncode, proc.stderr[-2000:])
+        assert parent.read(key) is None  # committed but not published
+
+        other = gate.persist(parent, key, b"different-body", ctx=create_ctx(), doc_type="system_state")
+        assert isinstance(other, EXISTS), other
+        assert other.current_hash == sha256_hex(b"child-created")
+        assert parent.read(key).body == b"child-created"
+
+        size = _journal_size(root)
+        retry = gate.persist(parent, key, b"child-created", ctx=create_ctx(), doc_type="system_state")
+        assert isinstance(retry, OK) and retry.new_hash == sha256_hex(b"child-created")
+        assert _journal_size(root) == size  # idempotent retry appends nothing
+    finally:
+        parent.close()
+
+
+def test_recovery_publish_failure_fails_closed_and_keeps_durable_record(tmp_path, monkeypatch):
+    import store.local as local_module
+
+    root = tmp_path / "store-root"
+    key = "recover/publish-fails"
+    parent, base_hash, child_hash, child_expiry = _committed_unpublished_cas(root, key)
+    try:
+        lease = _lock_after_expiry(parent, key, child_expiry)
+
+        def always_busy(src, dst):
+            raise local_module._ReplaceBusy()
+
+        monkeypatch.setattr(parent, "_replace_with_retry", always_busy)
+        busy = gate.persist(parent, key, b"v2-stale", ctx=overwrite_ctx(base_hash, lease), doc_type="system_state")
+        assert isinstance(busy, ERROR) and busy.kind == ErrorKind.BUSY
+        assert parent.read(key).body == b"v0-base"  # nothing decided, nothing published
+        assert [b for k, b, _f in parent._iter_journal_records() if k == key][-1] == b"v1-child"
+
+        monkeypatch.undo()
+        stale = gate.persist(parent, key, b"v2-stale", ctx=overwrite_ctx(base_hash, lease), doc_type="system_state")
+        assert isinstance(stale, STALE) and stale.current_hash == child_hash
+        assert parent.read(key).body == b"v1-child"
+    finally:
+        parent.close()
+
+
+def test_write_fails_closed_when_journal_scan_stops_before_eof(tmp_path):
+    """Unparsable bytes before EOF may hide later durable records, so the
+    latest committed value is unknown: refuse rather than decide."""
+    root = tmp_path / "store-root"
+    backend = LocalBackend(root)
+    try:
+        r0 = gate.persist(backend, "torn/k", b"v0", ctx=create_ctx(), doc_type="system_state")
+        assert isinstance(r0, OK)
+        backend._journal_fh.write(b"\x00\x00\x00\x05ab")  # torn record header
+        backend._journal_fh.flush()
+        size = _journal_size(root)
+        r1 = gate.persist(backend, "torn/other", b"x", ctx=create_ctx(), doc_type="system_state")
+        assert isinstance(r1, ERROR) and r1.kind == ErrorKind.CORRUPTION
+        assert _journal_size(root) == size
+        assert backend.read("torn/other") is None
+    finally:
+        backend.close()

@@ -36,6 +36,7 @@ env:
     tests/test_concurrency.py
     tests/test_eval.py
     tests/test_audit.py
+    tests/test_health_readonly.py
     tests/test_skill_mcp_shared_store.py
 
 jobs:

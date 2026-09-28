@@ -54,9 +54,13 @@ Static review also noted: project `system_state` symlink reads, broken root-syml
 | `python3 tests/test_health_readonly.py` | 0 (46/46) |
 | `python3 tests/test_eval.py` | 0 (10/10) |
 
+## Round 4 (4379892 follow-up)
+
+Fixed `_scorecard_from_events_raw` malformed error-`ts` path returning a four-tuple; added health CLI regression for invalid/numeric error timestamps.
+
 ## Commit
 
-`17a124a` on `fix/cursor-health-readonly-a1` (round 3; prior: `e5747df`, `50a8b34`).
+`c64fc794416ba50c2292b3ebdaac1ef95e8563fa` on `fix/cursor-health-readonly-a1` (round 4; prior rounds unchanged in history).
 
 ## Residual limits
 

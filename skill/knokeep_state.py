@@ -954,7 +954,7 @@ def _scorecard_from_events_raw(raw: bytes, cutoff=None):
                     if ts >= cutoff:
                         recent += 1
                 except Exception:
-                    return None, ["telemetry_unreadable"], 0, 0
+                    return None, ["telemetry_unreadable"], 0
             return sc, [], recent
         return sc, [], 0
     except (TypeError, AttributeError, ValueError):

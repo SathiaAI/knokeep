@@ -475,6 +475,28 @@ check(
     any("audit_unavailable" in n for n in h_audit.get("notes", [])),
 )
 
+bad_ts_root = tempfile.mkdtemp(prefix="kk_health_bad_ts_")
+b_ts = LocalBackend(bad_ts_root)
+gate.persist(
+    b_ts,
+    "ts/system_state",
+    b"---\nrevision: 1\n---\nts\n",
+    ctx=create_ctx(),
+    doc_type="system_state",
+)
+b_ts.close()
+os.makedirs(os.path.join(bad_ts_root, ".knokeep-eval"), exist_ok=True)
+with open(os.path.join(bad_ts_root, ".knokeep-eval", "events.jsonl"), "w", encoding="utf-8") as f:
+    f.write('{"decision":"error","ts":"not-a-timestamp"}\n')
+    f.write('{"decision":"error","ts":12345}\n')
+rc, hj, combined = run_health(bad_ts_root)
+check("bad error timestamp: attention", hj.get("verdict") == "attention")
+check(
+    "bad error timestamp: telemetry unreadable",
+    "telemetry:telemetry_unreadable" in hj.get("problems", []),
+)
+check("bad error timestamp: no traceback", "Traceback" not in combined)
+
 if hasattr(os, "symlink"):
     try:
         audit_out = tempfile.mkdtemp(prefix="kk_health_audit_out_")
@@ -549,6 +571,7 @@ for d in (
     malformed_root,
     dangle_ev_root,
     empty_journal_root,
+    bad_ts_root,
 ) + tuple(symlink_roots):
     if os.path.exists(d):
         import shutil

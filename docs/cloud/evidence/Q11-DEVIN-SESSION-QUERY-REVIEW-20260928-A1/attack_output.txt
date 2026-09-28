@@ -1,0 +1,76 @@
+PASS valid_id('p\n')==False
+PASS valid_id('p\r')==False
+PASS valid_id('a b')==False
+PASS valid_id('p\xa0')==False
+PASS valid_id('١')==False
+PASS valid_id('con.txt')==False
+PASS valid_id('CON')==False
+PASS valid_id('.x')==False
+PASS valid_id('x.')==False
+PASS valid_id('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')==True
+PASS valid_id('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')==False
+PASS valid_id('ok-1_2.3')==True
+PASS valid_id(None)==False
+PASS valid_id(b'x')==False
+PASS valid_id('')==False
+PASS prevalidate ('session-list',) invalid_project_id :: exit=2 out={"blocked": true, "reason": "invalid_project_id", "value": "bad/x"} created=False
+PASS prevalidate ('session-list',) invalid_limit :: exit=2 out={"blocked": true, "reason": "invalid_limit", "limit": 0, "max_limit": 200} created=False
+PASS prevalidate ('session-list',) invalid_limit :: exit=2 out={"blocked": true, "reason": "invalid_limit", "limit": 201, "max_limit": 200} created=False
+PASS prevalidate ('session-list',) invalid_limit :: exit=2 out={"blocked": true, "reason": "invalid_limit", "limit": "-1", "max_limit": 200} created=False
+PASS prevalidate ('session-list',) invalid_limit :: exit=2 out={"blocked": true, "reason": "invalid_limit", "limit": "1e2", "max_limit": 200} created=False
+PASS prevalidate ('session-list',) invalid_limit :: exit=2 out={"blocked": true, "reason": "invalid_limit", "limit": "\u0665", "max_limit": 200} created=False
+PASS prevalidate ('session-list',) invalid_after :: exit=2 out={"blocked": true, "reason": "invalid_after", "value": "../x"} created=False
+PASS prevalidate ('session-list',) invalid_argument :: exit=2 out={"blocked": true, "reason": "invalid_argument", "message": "--session-id requires session-read"} created=False
+PASS prevalidate ('session-read',) missing_session_id :: exit=2 out={"blocked": true, "reason": "missing_session_id"} created=False
+PASS prevalidate ('session-read',) invalid_session_id :: exit=2 out={"blocked": true, "reason": "invalid_session_id", "value": "s\n"} created=False
+PASS prevalidate ('session-read',) invalid_argument :: exit=2 out={"blocked": true, "reason": "invalid_argument", "message": "list options require session-list"} created=False
+PASS prevalidate ('session-read',) invalid_argument :: exit=2 out={"blocked": true, "reason": "invalid_argument", "message": "write options are not supported by queries"} created=False
+PASS prevalidate ('session-read',) invalid_argument :: exit=2 out={"blocked": true, "reason": "invalid_argument", "message": "unrecognized arguments: --bogus"} created=False
+PASS prevalidate ('session-read',) missing_project :: exit=2 out={"blocked": true, "reason": "missing_project"} created=False
+PASS prevalidate ('session-list',) missing_project :: exit=2 out={"blocked": true, "reason": "missing_project"} created=False
+PASS list demo isolated from demo-extra/demo.x :: {"ok": true, "addressing": "project selects store namespace only; not authorization or tenancy", "session_ids": ["a", "b", "c"], "truncated": false}
+PASS paging limit=2 truncated/next_after :: {"ok": true, "addressing": "project selects store namespace only; not authorization or tenancy", "session_ids": ["a", "b"], "truncated": true, "next_after": "b"}
+PASS paging after=b :: {"ok": true, "addressing": "project selects store namespace only; not authorization or tenancy", "session_ids": ["c"], "truncated": false}
+PASS after beyond end -> empty ok :: {"ok": true, "addressing": "project selects store namespace only; not authorization or tenancy", "session_ids": [], "truncated": false}
+PASS unknown project -> empty ok exit0 :: {"ok": true, "addressing": "project selects store namespace only; not authorization or tenancy", "session_ids": [], "truncated": false}
+PASS read exact bytes == backend bytes; hash sha256 :: len=149
+PASS read missing -> found false exit0 :: {"ok": true, "addressing": "project selects store namespace only; not authorization or tenancy", "found": false, "session_id": "missing"}
+PASS read cross-namespace -> found false :: {"ok": true, "addressing": "project selects store namespace only; not authorization or tenancy", "found": false, "session_id": "a"}
+PASS queries do not append telemetry
+PASS non-utf8: base64 exact, body_utf8 None
+PASS CRLF preserved
+PASS BOM preserved in utf8+b64
+PASS hash_mismatch raises (not notfound)
+PASS scan bound n=5000 :: ('ok', 200, True)
+PASS scan bound n=5001 :: ('err', 'scan_limit_exceeded')
+PASS mid-iter exception propagates (no partial page)
+PASS malformed key 'p/sessions/a/b' errors
+PASS malformed key 'p/sessions/' errors
+PASS malformed key 'p/sessions/.x' errors
+PASS malformed key 'p/sessions/con' errors
+PASS malformed key 'p/sessions/a\n' errors
+PASS duplicate keys dedup + truncated
+PASS limit True rejected
+PASS limit 1.0 rejected
+PASS limit '5' rejected
+PASS limit 0 rejected
+PASS limit 201 rejected
+PASS limit None rejected
+PASS app validates before backend
+PASS app validates before backend
+PASS app validates before backend
+PASS orphan published blob -> exit1 error JSON :: exit=1 out={"blocked": true, "reason": "internal_error", "error": "BackendCorruptionError"} err=
+PASS read orphan -> exit1 error (not found:false) :: exit=1 out={"blocked": true, "reason": "internal_error", "error": "BackendCorruptionError"}
+PASS healthy key still readable beside orphan :: exit=0 out={"ok": true, "addressing": "project selects store namespace only; not authorization or tenancy", "found": true, "session
+PASS legacy init exit0 :: {"ok": true, "base": "<tmp>
+PASS legacy session-append exit0 :: {"ok": true, "log": "leg/sessions/s"}
+PASS legacy health runs (pretty JSON) :: exit=0
+PASS legacy argparse error stays prose (exit2, stderr) :: out=
+PASS value 'session-list' after --project not misdetected :: out=
+FAIL abbrev --proj value not misdetected as query :: exit=2 out={"blocked": true, "reason": "invalid_argument", "message": "unrecognized arguments: --bogus"}
+PASS --store=session-read value not misdetected :: exit=2 out=
+PASS write path now rejects trailing-LF id :: exit=1 out=
+PASS legacy commands still emit telemetry
+PASS argparse abbrev --list accepted (info) :: exit=0 out={"ok": true, "addressing": "project selects store namespace only; not authorization or tenancy", "se
+INFO base init --proj session-list --bogus: exit=2 stdout='' stderr_has_usage=True
+TOTAL=74 PASS=73 FAIL=1

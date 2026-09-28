@@ -93,12 +93,17 @@ def test_c1_two_concurrent_writers_exactly_one_ok_other_stale(tmp_path):
 
     results = [None, None]
     barrier = threading.Barrier(2)
+    setup_lock = threading.Lock()
+    errors = [None, None]
 
     def worker(i, body):
-        barrier.wait()
-        results[i] = gate.persist(
-            backend, "k1", body, ctx=fenced_ctx(backend, "k1", base_hash), doc_type="system_state"
-        )
+        try:
+            barrier.wait()
+            with setup_lock:
+                ctx = fenced_ctx(backend, "k1", base_hash)
+            results[i] = gate.persist(backend, "k1", body, ctx=ctx, doc_type="system_state")
+        except Exception as exc:
+            errors[i] = f"{type(exc).__name__}: {exc}"
 
     t0 = threading.Thread(target=worker, args=(0, b"writer-0"))
     t1 = threading.Thread(target=worker, args=(1, b"writer-1"))
@@ -107,6 +112,7 @@ def test_c1_two_concurrent_writers_exactly_one_ok_other_stale(tmp_path):
     t0.join()
     t1.join()
 
+    assert not any(errors), errors
     oks = [r for r in results if isinstance(r, OK)]
     stales = [r for r in results if isinstance(r, STALE)]
     assert len(oks) == 1, results
@@ -139,12 +145,17 @@ def test_c1_eight_way_race_exactly_one_ok(tmp_path):
     n = 8
     barrier = threading.Barrier(n)
     results = [None] * n
+    setup_lock = threading.Lock()
+    errors = [None] * n
 
     def worker(i):
-        barrier.wait()
-        results[i] = gate.persist(
-            backend, "race", f"writer-{i}".encode(), ctx=fenced_ctx(backend, "race", base_hash), doc_type="system_state"
-        )
+        try:
+            barrier.wait()
+            with setup_lock:
+                ctx = fenced_ctx(backend, "race", base_hash)
+            results[i] = gate.persist(backend, "race", f"writer-{i}".encode(), ctx=ctx, doc_type="system_state")
+        except Exception as exc:
+            errors[i] = f"{type(exc).__name__}: {exc}"
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
     for t in threads:
@@ -152,6 +163,7 @@ def test_c1_eight_way_race_exactly_one_ok(tmp_path):
     for t in threads:
         t.join()
 
+    assert not any(errors), errors
     oks = [r for r in results if isinstance(r, OK)]
     stales = [r for r in results if isinstance(r, STALE)]
     assert len(oks) == 1, results

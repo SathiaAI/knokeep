@@ -470,6 +470,41 @@ def test_c5_pointer_stays_pointer(backend):
 # ---------------------------------------------------------------------------
 
 
+def test_c7_concurrent_acquire_one_owner_others_busy(backend):
+    """Keep real simultaneous lock-acquisition coverage separate from CAS.
+
+    Winner retains its lease until ALL contenders have returned, so the
+    outcome cannot depend on an arbitrary acquire/release scheduling gap.
+    """
+    n = 8
+    barrier = threading.Barrier(n)
+    results = [None] * n
+    errors = [None] * n
+
+    def contender(i):
+        try:
+            barrier.wait()
+            results[i] = backend.lock("simultaneous-lock", ttl_s=60)
+        except BackendBusyError:
+            results[i] = "BUSY"
+        except Exception as exc:
+            errors[i] = f"{type(exc).__name__}: {exc}"
+
+    threads = [threading.Thread(target=contender, args=(i,)) for i in range(n)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    owners = [r for r in results if r is not None and r != "BUSY"]
+    try:
+        assert not any(errors), errors
+        assert len(owners) == 1, results
+        assert results.count("BUSY") == n - 1, results
+    finally:
+        for owner in owners:
+            backend.unlock(owner)
+
+
 def test_c7_lock_ttl_and_token(backend):
     # Held-lock mutual-exclusion check uses a generous TTL so the lock is
     # GUARANTEED still held when the second acquire runs. A tight TTL (e.g. 50ms)

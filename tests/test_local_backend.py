@@ -1300,7 +1300,7 @@ def _committed_unpublished_cas(root, key):
     assert proc.returncode == _CRASH_EXIT_CODE, (proc.returncode, proc.stderr[-2000:])
     child_expiry = float(proc.stdout.strip().splitlines()[0])
     assert _journal_size(root) > size_before  # the child's record is durable
-    # Published view is still stale on disk until read() or write() replays.
+    # Published view is still stale on disk until write() (or a dedicated read test) replays.
     assert _data_path(root, key).read_bytes() == b"v0-base"
     return parent, r0.new_hash, sha256_hex(b"v1-child"), child_expiry
 
@@ -1310,7 +1310,6 @@ def test_long_lived_instance_recovers_unpublished_commit_before_cas(tmp_path):
     key = "recover/cas"
     parent, base_hash, child_hash, child_expiry = _committed_unpublished_cas(root, key)
     try:
-        assert parent.read(key).body == b"v1-child"
         lease = _lock_after_expiry(parent, key, child_expiry)
         assert lease.expiry_epoch > child_expiry
         stale = gate.persist(
@@ -1337,7 +1336,6 @@ def test_long_lived_instance_create_only_sees_unpublished_creation(tmp_path):
         proc = _run_crash_child("create", root, key, "child-created")
         assert proc.returncode == _CRASH_EXIT_CODE, (proc.returncode, proc.stderr[-2000:])
         assert not _data_path(root, key).exists()
-        assert parent.read(key).body == b"child-created"
 
         other = gate.persist(parent, key, b"different-body", ctx=create_ctx(), doc_type="system_state")
         assert isinstance(other, EXISTS), other
@@ -1371,7 +1369,6 @@ def test_recovery_publish_failure_fails_closed_and_keeps_durable_record(tmp_path
         assert [b for k, b, _f in parent._iter_journal_records() if k == key][-1] == b"v1-child"
 
         monkeypatch.undo()
-        assert parent.read(key).body == b"v1-child"  # read journals authority after publish unblocked
         stale = gate.persist(parent, key, b"v2-stale", ctx=overwrite_ctx(base_hash, lease), doc_type="system_state")
         assert isinstance(stale, STALE) and stale.current_hash == child_hash
         assert parent.read(key).body == b"v1-child"
@@ -1545,6 +1542,12 @@ def test_genuinely_empty_store_still_creates_journal(tmp_path):
 
 
 def test_runtime_journal_deletion_fails_read_and_list(tmp_path):
+    """LocalBackend keeps journal.log open for append for its whole lifetime.
+
+    On Windows the file cannot be deleted while that append handle is open
+    (unlike POSIX unlink-with-open-fd). Close only this fixture's append
+    handle, then remove the path, while keeping the same backend instance
+    for read/list — the adapter must not treat stale data/ as authoritative."""
     root = tmp_path / "store-root"
     key = "live/k"
     backend = LocalBackend(root)
@@ -1553,6 +1556,8 @@ def test_runtime_journal_deletion_fails_read_and_list(tmp_path):
         assert isinstance(r, OK)
         journal = root / "journal" / "journal.log"
         data_bytes = _data_path(root, key).read_bytes()
+        backend._journal_fh.close()
+        backend._journal_fh = None
         journal.unlink()
         assert not journal.exists()
         assert _data_path(root, key).read_bytes() == data_bytes

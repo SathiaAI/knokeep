@@ -59,4 +59,6 @@ Receipt hashes attest stored bytes after writes; they do not by themselves prove
 
 ## Publishing
 
-Evidence branch `q4/cursor-receiver-evidence-a1`, draft PR into `q4/cursor-receiver-input-a1` (see git history on evidence branch for blob verification notes).
+- Branch `q4/cursor-receiver-evidence-a1` pushed to `origin` (commit `a4beb93`).
+- Staged git index blobs verified against `manifest.json` (20 paths) before commit.
+- Draft PR into `q4/cursor-receiver-input-a1` **not created**: `gh pr create` failed with `GraphQL: Resource not accessible by integration (createPullRequest)`; ManagePullRequest also requires manual user approval. Open manually from the pushed evidence branch if needed.

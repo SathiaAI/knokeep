@@ -69,11 +69,20 @@ from application.knowledge_revisions import (
     save_knowledge_revision,
     validate_save_arguments,
 )
+from application.knowledge_handoff import (
+    MAX_OUTPUT_JSON_BYTES as MAX_HANDOFF_JSON_BYTES,
+    KnowledgeHandoffError,
+    export_knowledge_handoff,
+    handoff_exit_code,
+    parse_required_document_hash,
+    validate_handoff_arguments,
+)
 
 _QUERY_CMDS = frozenset({"session-list", "session-read"})
 _RAW_SESSION_CMDS = frozenset({"raw-session-append", "raw-session-read"})
 _VALIDATE_CMDS = frozenset({"knowledge-validate"})
 _KNOWLEDGE_REVISION_CMDS = frozenset({"knowledge-save", "knowledge-read"})
+_KNOWLEDGE_HANDOFF_CMDS = frozenset({"knowledge-handoff"})
 
 SCHEMA_VERSION = 1
 
@@ -1066,6 +1075,37 @@ def knowledge_read(store, project, knowledge_id, operation_id):
     return out
 
 
+def _knowledge_handoff_fail(exc: KnowledgeHandoffError) -> None:
+    print(json.dumps(exc.to_payload()))
+    sys.exit(handoff_exit_code(exc))
+
+
+def knowledge_handoff(store, project, knowledge_id, operation_id, expect_hash):
+    if not project:
+        raise KnowledgeHandoffError("missing_project")
+    if not knowledge_id:
+        raise KnowledgeHandoffError("missing_knowledge_id")
+    if not operation_id:
+        raise KnowledgeHandoffError("missing_operation_id")
+    if expect_hash is None:
+        raise KnowledgeHandoffError("invalid_argument", message="missing expect-hash")
+    validate_handoff_arguments(project, knowledge_id, operation_id, expect_hash)
+    backend = _backend(store)
+    try:
+        result = export_knowledge_handoff(
+            backend, project, knowledge_id, operation_id, expect_hash
+        )
+    finally:
+        backend.close()
+    out = dict(result)
+    out["local_backend_constructor_note"] = (
+        "CLI opens LocalBackend per invocation; constructor recovery side effects apply as for other commands."
+    )
+    if len(json.dumps(out, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")) > MAX_HANDOFF_JSON_BYTES:
+        raise KnowledgeHandoffError("bundle_too_large")
+    return out
+
+
 def raw_session_read(store, project, session_id, operation_id):
     _validate_project(project)
     if not valid_id(session_id):
@@ -1452,6 +1492,8 @@ def main():
                     _raw_session_fail(RawSessionError("invalid_argument", message=message))
                 elif arg in _KNOWLEDGE_REVISION_CMDS:
                     _knowledge_revision_fail(KnowledgeRevisionError("invalid_argument"))
+                elif arg in _KNOWLEDGE_HANDOFF_CMDS:
+                    _knowledge_handoff_fail(KnowledgeHandoffError("invalid_argument"))
                 elif arg in _QUERY_CMDS:
                     _query_json_fail("invalid_argument", message=message)
                 elif arg in _VALIDATE_CMDS:
@@ -1461,7 +1503,7 @@ def main():
     ap.add_argument("cmd", choices=["init", "flush-state", "flush-log", "session-append",
                                     "session-list", "session-read", "raw-session-append",
                                     "raw-session-read", "knowledge-validate", "knowledge-save",
-                                    "knowledge-read", "bootstrap",
+                                    "knowledge-read", "knowledge-handoff", "bootstrap",
                                     "rollup", "resolve", "eval", "health"])
     ap.add_argument("--store"); ap.add_argument("--project")   # --store optional: defaults to the shared cross-tool root
     ap.add_argument("--session-id"); ap.add_argument("--knowledge-id")
@@ -1473,14 +1515,14 @@ def main():
     ap.add_argument("--proposal-file")
     ap.add_argument("--body-file"); ap.add_argument("--entry"); ap.add_argument("--entry-file"); ap.add_argument("--expect-hash"); ap.add_argument("--section"); ap.add_argument("--conflict-key")
     a = ap.parse_args()
-    if a.knowledge_id is not None and a.cmd not in _KNOWLEDGE_REVISION_CMDS:
+    if a.knowledge_id is not None and a.cmd not in (_KNOWLEDGE_REVISION_CMDS | _KNOWLEDGE_HANDOFF_CMDS):
         if a.cmd in _QUERY_CMDS:
             _query_json_fail("invalid_argument", message="--knowledge-id is not supported by queries")
         if a.cmd in _RAW_SESSION_CMDS:
             _raw_session_fail(RawSessionError("invalid_argument", message="--knowledge-id is not supported"))
         if a.cmd == "knowledge-validate":
             _knowledge_validate_fail(KnowledgeValidationError("invalid_argument"))
-        ap.error("--knowledge-id is only supported by knowledge-save and knowledge-read")
+        ap.error("--knowledge-id is only supported by knowledge-save, knowledge-read, and knowledge-handoff")
     if a.proposal_file is not None and a.cmd not in ("knowledge-validate", "knowledge-save"):
         if a.cmd in _QUERY_CMDS:
             _query_json_fail("invalid_argument", message="--proposal-file is not supported by queries")
@@ -1493,6 +1535,8 @@ def main():
         if a.cmd == "knowledge-validate":
             _knowledge_validate_fail(KnowledgeValidationError("invalid_argument"))
         _knowledge_revision_fail(KnowledgeRevisionError("invalid_argument", message="--expect-hash is not supported"))
+    if a.cmd == "knowledge-handoff" and a.expect_hash is None:
+        _knowledge_handoff_fail(KnowledgeHandoffError("invalid_argument", message="missing expect-hash"))
     if a.cmd == "knowledge-validate":
         if a.proposal_file is None:
             _knowledge_validate_fail(KnowledgeValidationError("missing_proposal_file"))
@@ -1624,6 +1668,52 @@ def main():
         )
         print(json.dumps(out))
         return
+    if a.cmd == "knowledge-handoff":
+        if any(arg == "--client" or arg.startswith("--client=") for arg in sys.argv[1:]):
+            _knowledge_handoff_fail(KnowledgeHandoffError("invalid_argument", message="unsupported client option"))
+        if not a.store:
+            a.store = default_store_root()
+        if not a.project:
+            _knowledge_handoff_fail(KnowledgeHandoffError("missing_project"))
+        if not a.knowledge_id:
+            _knowledge_handoff_fail(KnowledgeHandoffError("missing_knowledge_id"))
+        if not a.operation_id:
+            _knowledge_handoff_fail(KnowledgeHandoffError("missing_operation_id"))
+        if any(
+            getattr(a, name) is not None
+            for name in (
+                "proposal_file",
+                "session_id",
+                "source_file",
+                "body_file",
+                "entry",
+                "entry_file",
+                "section",
+                "conflict_key",
+                "list_limit",
+                "after",
+            )
+        ):
+            _knowledge_handoff_fail(KnowledgeHandoffError("invalid_argument", message="unsupported options"))
+        try:
+            parse_required_document_hash(a.expect_hash)
+        except KnowledgeHandoffError as exc:
+            _knowledge_handoff_fail(exc)
+        try:
+            result = knowledge_handoff(
+                a.store,
+                a.project,
+                a.knowledge_id,
+                a.operation_id,
+                a.expect_hash,
+            )
+        except KnowledgeHandoffError as exc:
+            _knowledge_handoff_fail(exc)
+        except Exception:
+            print(json.dumps({"blocked": True, "reason": "internal_error"}))
+            sys.exit(1)
+        print(json.dumps(result, sort_keys=True, separators=(",", ":"), ensure_ascii=True))
+        return
     if a.cmd == "raw-session-read":
         if not a.store:
             a.store = default_store_root()
@@ -1656,10 +1746,11 @@ def main():
             "raw-session-read",
             "knowledge-save",
             "knowledge-read",
+            "knowledge-handoff",
         ):
             ap.error(
                 "--operation-id is only supported by session-append, raw-session-append, "
-                "raw-session-read, knowledge-save, or knowledge-read"
+                "raw-session-read, knowledge-save, knowledge-read, or knowledge-handoff"
             )
         if not a.session_id:
             ap.error("--operation-id requires an explicit --session-id reused across retries")

@@ -46,8 +46,16 @@ from application.session_queries import (
     session_store_key,
     validate_list_arguments,
 )
+from application.raw_sessions import (
+    RawSessionError,
+    append_raw_session as app_append_raw_session,
+    read_raw_session as app_read_raw_session,
+    read_source_bytes,
+    validate_append_arguments,
+)
 
 _QUERY_CMDS = frozenset({"session-list", "session-read"})
+_RAW_SESSION_CMDS = frozenset({"raw-session-append", "raw-session-read"})
 
 SCHEMA_VERSION = 1
 
@@ -866,6 +874,91 @@ def session_list(store, project, limit=DEFAULT_LIST_LIMIT, after=None):
     finally:
         backend.close()
 
+def raw_session_append(store, project, session_id, client, operation_id, source: bytes):
+    validate_append_arguments(project, session_id, client, operation_id, source)
+    backend = _backend(store)
+    try:
+        try:
+            receipt = app_append_raw_session(
+                backend, project, session_id, client, operation_id, source
+            )
+        except RawSessionError as e:
+            if e.reason == "secret_blocked":
+                die(reasons=list(e.detail.get("labels", ())))
+            if e.reason == "operation_id_conflict":
+                die(reason="operation id reused with different content")
+            if e.reason == "outcome_uncertain":
+                die(reason="outcome_uncertain", kind=e.detail.get("kind"))
+            if e.reason in ("invalid_project_id", "invalid_session_id", "invalid_client", "invalid_operation_id"):
+                die(reason=e.reason.replace("_", " "), **{k: v for k, v in e.detail.items()})
+            if e.reason == "source_too_large":
+                die(reason="source too large")
+            if e.reason == "source_file_error":
+                die(reason="source_file_error", error=e.detail.get("error"))
+            if e.reason in ("source_rejected", "envelope_rejected"):
+                die(reason="invalid source", kind=e.detail.get("kind"))
+            if e.reason == "append_retry_exhausted":
+                die(reason="append_retry_exhausted")
+            die(reason=e.reason, **e.detail)
+        return {
+            "ok": True,
+            "operation_id": receipt.operation_id,
+            "source_sha256": receipt.source_sha256,
+            "source_length": receipt.source_length,
+            "captured": receipt.captured,
+            "record_id": receipt.record_id,
+            "current_version_hash": receipt.current_version_hash,
+            "duplicate": receipt.duplicate,
+        }
+    finally:
+        backend.close()
+
+
+def raw_session_read(store, project, session_id, operation_id):
+    _validate_project(project)
+    if not valid_id(session_id):
+        die(reason="invalid session id", value=session_id)
+    if not valid_id(operation_id):
+        die(reason="invalid operation id")
+    backend = _backend(store)
+    try:
+        try:
+            got = app_read_raw_session(backend, project, session_id, operation_id)
+        except RawSessionError as e:
+            if e.reason == "secret_blocked":
+                die(reasons=list(e.detail.get("labels", ())))
+            _raw_session_fail(e)
+        out = {
+            "ok": True,
+            "found": got.found,
+            "operation_id": got.operation_id,
+        }
+        if got.found:
+            out["source_sha256"] = got.source_sha256
+            out["source_length"] = got.source_length
+            out["captured"] = got.captured
+            out["record_id"] = got.record_id
+            out["current_version_hash"] = got.current_version_hash
+            out["source_base64"] = got.source_base64
+        return out
+    finally:
+        backend.close()
+
+
+def _raw_session_fail(exc: RawSessionError) -> None:
+    payload = {"blocked": True, "reason": exc.reason}
+    payload.update(exc.detail)
+    print(json.dumps(payload))
+    validation = exc.reason.startswith("invalid") or exc.reason in (
+        "source_too_large",
+        "missing_session_id",
+        "missing_operation_id",
+        "missing_source_file",
+        "source_file_error",
+    )
+    sys.exit(2 if validation else 1)
+
+
 def session_read(store, project, session_id):
     """CLI adapter: read one session journal blob (bytes + hash; no summarization).
 
@@ -1190,7 +1283,7 @@ def main():
             takes_value = {"--store", "--project", "--session-id", "--client",
                            "--list-limit", "--after", "--operation-id", "--body-file",
                            "--entry", "--entry-file", "--expect-hash", "--section",
-                           "--conflict-key"}
+                           "--conflict-key", "--source-file"}
             args = iter(sys.argv[1:])
             for arg in args:
                 if arg.startswith("--"):
@@ -1200,31 +1293,96 @@ def main():
                     if len(matches) == 1:
                         next(args, None)
                 elif arg in {"init", "flush-state", "flush-log", "session-append",
+                             "raw-session-append", "raw-session-read",
                              "bootstrap", "rollup", "resolve", "eval", "health"}:
                     break
+                elif arg in _RAW_SESSION_CMDS:
+                    _raw_session_fail(RawSessionError("invalid_argument", message=message))
                 elif arg in _QUERY_CMDS:
                     _query_json_fail("invalid_argument", message=message)
             super().error(message)
     ap = CommandParser()
-    ap.add_argument("cmd", choices=["init", "flush-state", "flush-log", "session-append", "session-list", "session-read", "bootstrap", "rollup", "resolve", "eval", "health"])
+    ap.add_argument("cmd", choices=["init", "flush-state", "flush-log", "session-append",
+                                    "session-list", "session-read", "raw-session-append",
+                                    "raw-session-read", "bootstrap", "rollup", "resolve",
+                                    "eval", "health"])
     ap.add_argument("--store"); ap.add_argument("--project")   # --store optional: defaults to the shared cross-tool root
     ap.add_argument("--session-id"); ap.add_argument("--client", default="cowork")
     ap.add_argument("--list-limit")
     ap.add_argument("--after")
     ap.add_argument("--operation-id")
+    ap.add_argument("--source-file")
     ap.add_argument("--body-file"); ap.add_argument("--entry"); ap.add_argument("--entry-file"); ap.add_argument("--expect-hash"); ap.add_argument("--section"); ap.add_argument("--conflict-key")
     a = ap.parse_args()
+    if a.cmd == "raw-session-read":
+        if not a.store:
+            a.store = default_store_root()
+        if not a.project:
+            _raw_session_fail(RawSessionError("missing_project"))
+        if not a.session_id:
+            _raw_session_fail(RawSessionError("missing_session_id"))
+        if not a.operation_id:
+            _raw_session_fail(RawSessionError("missing_operation_id"))
+        if any(getattr(a, name) is not None for name in
+               ("body_file", "entry", "entry_file", "expect_hash", "section",
+                "conflict_key", "source_file", "list_limit", "after")):
+            _raw_session_fail(RawSessionError("invalid_argument", message="write options are not supported"))
+        print(json.dumps(raw_session_read(a.store, a.project, a.session_id, a.operation_id)))
+        return
     if a.cmd in _QUERY_CMDS:
+        if a.source_file is not None:
+            _query_json_fail("invalid_argument", message="--source-file is not supported by queries")
         if any(getattr(a, name) is not None for name in
                ("operation_id", "body_file", "entry", "entry_file", "expect_hash", "section", "conflict_key")):
             _query_json_fail("invalid_argument", message="write options are not supported by queries")
         _run_query_command(a)
         return
+    if a.cmd not in _RAW_SESSION_CMDS and a.source_file is not None:
+        ap.error("--source-file is only supported by raw-session-append")
     if a.operation_id is not None:
-        if a.cmd != "session-append":
-            ap.error("--operation-id is only supported by session-append")
+        if a.cmd not in ("session-append", "raw-session-append"):
+            ap.error("--operation-id is only supported by session-append, raw-session-append, or raw-session-read")
         if not a.session_id:
             ap.error("--operation-id requires an explicit --session-id reused across retries")
+    if a.cmd == "raw-session-append":
+        if a.source_file is None:
+            _raw_session_fail(RawSessionError("missing_source_file"))
+        if not a.operation_id:
+            _raw_session_fail(RawSessionError("missing_operation_id"))
+        if not a.project:
+            _raw_session_fail(RawSessionError("missing_project"))
+        if not a.session_id:
+            _raw_session_fail(RawSessionError("missing_session_id"))
+        _validate_project(a.project)
+        _validate_client(a.client)
+        if not valid_id(a.session_id):
+            die(reason="invalid session id", value=a.session_id)
+        if not valid_id(a.operation_id):
+            die(reason="invalid operation id")
+        if any(getattr(a, name) is not None for name in
+               ("body_file", "entry", "entry_file", "expect_hash", "section", "conflict_key",
+                "list_limit", "after")):
+            _raw_session_fail(RawSessionError("invalid_argument", message="unsupported options for raw-session-append"))
+        if not a.store:
+            a.store = default_store_root()
+        try:
+            src = read_source_bytes(a.source_file, sys.stdin.buffer)
+        except RawSessionError as e:
+            _raw_session_fail(e)
+        try:
+            validate_append_arguments(a.project, a.session_id, a.client, a.operation_id, src)
+        except RawSessionError as e:
+            _raw_session_fail(e)
+        try:
+            result = raw_session_append(a.store, a.project, a.session_id, a.client, a.operation_id, src)
+        except SystemExit:
+            raise
+        except Exception as e:
+            print(json.dumps({"blocked": True, "reason": "internal error", "error": type(e).__name__}))
+            sys.exit(1)
+        _event(a.store, a.project, a.cmd, "allow", {"ok": result.get("ok")})
+        print(json.dumps(result))
+        return
     if a.cmd == "session-append":
         if a.body_file is not None:
             ap.error("session-append does not accept --body-file; use --entry-file (or --entry-file - for stdin)")

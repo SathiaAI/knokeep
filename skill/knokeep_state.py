@@ -61,10 +61,19 @@ from application.knowledge_validation import (
     parse_proposal_bytes,
     validation_exit_code,
 )
+from application.knowledge_revisions import (
+    KnowledgeRevisionError,
+    read_disclaimers,
+    read_knowledge_revision,
+    revision_exit_code,
+    save_knowledge_revision,
+    validate_save_arguments,
+)
 
 _QUERY_CMDS = frozenset({"session-list", "session-read"})
 _RAW_SESSION_CMDS = frozenset({"raw-session-append", "raw-session-read"})
 _VALIDATE_CMDS = frozenset({"knowledge-validate"})
+_KNOWLEDGE_REVISION_CMDS = frozenset({"knowledge-save", "knowledge-read"})
 
 SCHEMA_VERSION = 1
 
@@ -944,6 +953,119 @@ def _knowledge_validate_fail(exc: KnowledgeValidationError) -> None:
     sys.exit(validation_exit_code(exc))
 
 
+def _bounded_revision_detail(detail: dict) -> dict:
+    out: dict = {}
+    for key, value in detail.items():
+        if key == "labels" and isinstance(value, list):
+            out[key] = value
+        elif key in ("kind", "detail", "q17_reason", "message") and isinstance(value, str):
+            out[key] = value
+        elif key in ("claim_index", "citation_index") and type(value) is int and not isinstance(value, bool):
+            out[key] = value
+    return out
+
+
+def _knowledge_revision_fail(exc: KnowledgeRevisionError) -> None:
+    payload = {"blocked": True, "reason": exc.reason}
+    payload.update(_bounded_revision_detail(exc.detail))
+    print(json.dumps(payload))
+    sys.exit(revision_exit_code(exc))
+
+
+def knowledge_save(store, project, knowledge_id, client, operation_id, proposal_path, expect_hash):
+    if not project:
+        raise KnowledgeRevisionError("missing_project")
+    if not knowledge_id:
+        raise KnowledgeRevisionError("missing_knowledge_id")
+    if not operation_id:
+        raise KnowledgeRevisionError("missing_operation_id")
+    if expect_hash is None:
+        raise KnowledgeRevisionError("invalid_argument", message="missing expect-hash")
+    raw = read_proposal_file(proposal_path)
+    validate_save_arguments(project, knowledge_id, client, operation_id, raw, expect_hash)
+    backend = _backend(store)
+    try:
+        try:
+            receipt = save_knowledge_revision(
+                backend,
+                project,
+                knowledge_id,
+                client,
+                operation_id,
+                raw,
+                expect_hash=expect_hash,
+            )
+        except KnowledgeRevisionError as exc:
+            if exc.reason == "secret_blocked":
+                die(reasons=list(exc.detail.get("labels", ())))
+            raise
+    finally:
+        backend.close()
+    out = {
+        "ok": True,
+        "operation_id": receipt.operation_id,
+        "record_id": receipt.record_id,
+        "revision": receipt.revision,
+        "proposal_sha256": receipt.proposal_sha256,
+        "proposal_length": receipt.proposal_length,
+        "saved_at": receipt.saved_at,
+        "base_document_sha256": receipt.base_document_sha256,
+        "current_document_hash": receipt.current_document_hash,
+        "duplicate": receipt.duplicate,
+        "source_checks_executed_this_call": receipt.source_checks_executed_this_call,
+        "note": (
+            "Duplicate acknowledgment does not re-validate current source availability; "
+            "source reads are non-atomic."
+        ),
+    }
+    out.update(read_disclaimers())
+    out["local_backend_constructor_note"] = (
+        "CLI opens LocalBackend per invocation; constructor recovery side effects apply as for other commands."
+    )
+    return out
+
+
+def knowledge_read(store, project, knowledge_id, operation_id):
+    if not project:
+        raise KnowledgeRevisionError("missing_project")
+    if not knowledge_id:
+        raise KnowledgeRevisionError("missing_knowledge_id")
+    if not operation_id:
+        raise KnowledgeRevisionError("missing_operation_id")
+    if not valid_id(project):
+        raise KnowledgeRevisionError("invalid_project_id")
+    if not valid_id(knowledge_id):
+        raise KnowledgeRevisionError("invalid_knowledge_id")
+    if not valid_id(operation_id):
+        raise KnowledgeRevisionError("invalid_operation_id")
+    backend = _backend(store)
+    try:
+        got = read_knowledge_revision(backend, project, knowledge_id, operation_id)
+    except KnowledgeRevisionError as exc:
+        if exc.reason == "secret_blocked":
+            die(reasons=list(exc.detail.get("labels", ())))
+        raise
+    finally:
+        backend.close()
+    out = {
+        "ok": True,
+        "found": got.found,
+        "operation_id": got.operation_id,
+    }
+    out.update(read_disclaimers())
+    if got.found:
+        out["proposal_sha256"] = got.proposal_sha256
+        out["proposal_length"] = got.proposal_length
+        out["record_id"] = got.record_id
+        out["revision"] = got.revision
+        out["previous_record_id"] = got.previous_record_id
+        out["base_document_sha256"] = got.base_document_sha256
+        out["saved_at"] = got.saved_at
+        out["current_document_hash"] = got.current_document_hash
+        out["proposal_base64"] = got.proposal_base64
+    return out
+
+
 def raw_session_read(store, project, session_id, operation_id):
     _validate_project(project)
     if not valid_id(session_id):
@@ -1310,7 +1432,7 @@ def main():
         def error(self, message):
             # On malformed query invocations no namespace is available yet.
             # Detect the requested command while skipping known option values.
-            takes_value = {"--store", "--project", "--session-id", "--client",
+            takes_value = {"--store", "--project", "--session-id", "--knowledge-id", "--client",
                            "--list-limit", "--after", "--operation-id", "--body-file",
                            "--entry", "--entry-file", "--expect-hash", "--section",
                            "--conflict-key", "--source-file", "--proposal-file"}
@@ -1328,18 +1450,22 @@ def main():
                     break
                 elif arg in _RAW_SESSION_CMDS:
                     _raw_session_fail(RawSessionError("invalid_argument", message=message))
+                elif arg in _KNOWLEDGE_REVISION_CMDS:
+                    _knowledge_revision_fail(KnowledgeRevisionError("invalid_argument"))
                 elif arg in _QUERY_CMDS:
                     _query_json_fail("invalid_argument", message=message)
                 elif arg in _VALIDATE_CMDS:
                     _knowledge_validate_fail(KnowledgeValidationError("invalid_argument"))
             super().error(message)
-    ap = CommandParser()
+    ap = CommandParser(allow_abbrev=False)
     ap.add_argument("cmd", choices=["init", "flush-state", "flush-log", "session-append",
                                     "session-list", "session-read", "raw-session-append",
-                                    "raw-session-read", "knowledge-validate", "bootstrap",
+                                    "raw-session-read", "knowledge-validate", "knowledge-save",
+                                    "knowledge-read", "bootstrap",
                                     "rollup", "resolve", "eval", "health"])
     ap.add_argument("--store"); ap.add_argument("--project")   # --store optional: defaults to the shared cross-tool root
-    ap.add_argument("--session-id"); ap.add_argument("--client", default="cowork")
+    ap.add_argument("--session-id"); ap.add_argument("--knowledge-id")
+    ap.add_argument("--client", default="cowork")
     ap.add_argument("--list-limit")
     ap.add_argument("--after")
     ap.add_argument("--operation-id")
@@ -1347,12 +1473,26 @@ def main():
     ap.add_argument("--proposal-file")
     ap.add_argument("--body-file"); ap.add_argument("--entry"); ap.add_argument("--entry-file"); ap.add_argument("--expect-hash"); ap.add_argument("--section"); ap.add_argument("--conflict-key")
     a = ap.parse_args()
-    if a.proposal_file is not None and a.cmd != "knowledge-validate":
+    if a.knowledge_id is not None and a.cmd not in _KNOWLEDGE_REVISION_CMDS:
+        if a.cmd in _QUERY_CMDS:
+            _query_json_fail("invalid_argument", message="--knowledge-id is not supported by queries")
+        if a.cmd in _RAW_SESSION_CMDS:
+            _raw_session_fail(RawSessionError("invalid_argument", message="--knowledge-id is not supported"))
+        if a.cmd == "knowledge-validate":
+            _knowledge_validate_fail(KnowledgeValidationError("invalid_argument"))
+        ap.error("--knowledge-id is only supported by knowledge-save and knowledge-read")
+    if a.proposal_file is not None and a.cmd not in ("knowledge-validate", "knowledge-save"):
         if a.cmd in _QUERY_CMDS:
             _query_json_fail("invalid_argument", message="--proposal-file is not supported by queries")
         if a.cmd in _RAW_SESSION_CMDS:
             _raw_session_fail(RawSessionError("invalid_argument", message="write options are not supported"))
-        ap.error("--proposal-file is only supported by knowledge-validate")
+        if a.cmd in _KNOWLEDGE_REVISION_CMDS and a.cmd != "knowledge-save":
+            _knowledge_revision_fail(KnowledgeRevisionError("invalid_argument", message="--proposal-file is not supported"))
+        ap.error("--proposal-file is only supported by knowledge-validate and knowledge-save")
+    if a.expect_hash is not None and a.cmd in ("knowledge-read", "knowledge-validate"):
+        if a.cmd == "knowledge-validate":
+            _knowledge_validate_fail(KnowledgeValidationError("invalid_argument"))
+        _knowledge_revision_fail(KnowledgeRevisionError("invalid_argument", message="--expect-hash is not supported"))
     if a.cmd == "knowledge-validate":
         if a.proposal_file is None:
             _knowledge_validate_fail(KnowledgeValidationError("missing_proposal_file"))
@@ -1390,6 +1530,100 @@ def main():
             sys.exit(1)
         print(json.dumps(result))
         return
+    if a.cmd == "knowledge-save":
+        if a.proposal_file is None:
+            _knowledge_revision_fail(KnowledgeRevisionError("missing_proposal_file"))
+        if not any(arg == "--client" or arg.startswith("--client=") for arg in sys.argv[1:]):
+            _knowledge_revision_fail(KnowledgeRevisionError("invalid_argument", message="missing client"))
+        if a.expect_hash is None:
+            _knowledge_revision_fail(KnowledgeRevisionError("invalid_argument", message="missing expect-hash"))
+        if not a.project:
+            _knowledge_revision_fail(KnowledgeRevisionError("missing_project"))
+        if not a.knowledge_id:
+            _knowledge_revision_fail(KnowledgeRevisionError("missing_knowledge_id"))
+        if not a.operation_id:
+            _knowledge_revision_fail(KnowledgeRevisionError("missing_operation_id"))
+        _validate_project(a.project)
+        _validate_client(a.client)
+        if not valid_id(a.knowledge_id):
+            _knowledge_revision_fail(KnowledgeRevisionError("invalid_knowledge_id"))
+        if not valid_id(a.operation_id):
+            _knowledge_revision_fail(KnowledgeRevisionError("invalid_operation_id"))
+        if any(
+            getattr(a, name) is not None
+            for name in (
+                "session_id",
+                "source_file",
+                "body_file",
+                "entry",
+                "entry_file",
+                "section",
+                "conflict_key",
+                "list_limit",
+                "after",
+            )
+        ):
+            _knowledge_revision_fail(KnowledgeRevisionError("invalid_argument", message="unsupported options"))
+        if not a.store:
+            a.store = default_store_root()
+        try:
+            result = knowledge_save(
+                a.store,
+                a.project,
+                a.knowledge_id,
+                a.client,
+                a.operation_id,
+                a.proposal_file,
+                a.expect_hash,
+            )
+        except KnowledgeRevisionError as exc:
+            _knowledge_revision_fail(exc)
+        except Exception:
+            print(json.dumps({"blocked": True, "reason": "internal_error"}))
+            sys.exit(1)
+        print(json.dumps(result))
+        return
+    if a.cmd == "knowledge-read":
+        if any(arg == "--client" or arg.startswith("--client=") for arg in sys.argv[1:]):
+            _knowledge_revision_fail(KnowledgeRevisionError("invalid_argument", message="unsupported client option"))
+        if not a.store:
+            a.store = default_store_root()
+        if not a.project:
+            _knowledge_revision_fail(KnowledgeRevisionError("missing_project"))
+        if not a.knowledge_id:
+            _knowledge_revision_fail(KnowledgeRevisionError("missing_knowledge_id"))
+        if not a.operation_id:
+            _knowledge_revision_fail(KnowledgeRevisionError("missing_operation_id"))
+        if any(
+            getattr(a, name) is not None
+            for name in (
+                "proposal_file",
+                "expect_hash",
+                "session_id",
+                "source_file",
+                "body_file",
+                "entry",
+                "entry_file",
+                "section",
+                "conflict_key",
+                "list_limit",
+                "after",
+            )
+        ):
+            _knowledge_revision_fail(KnowledgeRevisionError("invalid_argument", message="unsupported options"))
+        try:
+            result = knowledge_read(a.store, a.project, a.knowledge_id, a.operation_id)
+        except KnowledgeRevisionError as exc:
+            _knowledge_revision_fail(exc)
+        except Exception:
+            print(json.dumps({"blocked": True, "reason": "internal_error"}))
+            sys.exit(1)
+        out = dict(result)
+        out["local_backend_constructor_note"] = (
+            "CLI opens LocalBackend per invocation; constructor recovery side effects apply as for other commands."
+        )
+        print(json.dumps(out))
+        return
     if a.cmd == "raw-session-read":
         if not a.store:
             a.store = default_store_root()
@@ -1416,8 +1650,17 @@ def main():
     if a.cmd not in _RAW_SESSION_CMDS and a.source_file is not None:
         ap.error("--source-file is only supported by raw-session-append")
     if a.operation_id is not None:
-        if a.cmd not in ("session-append", "raw-session-append"):
-            ap.error("--operation-id is only supported by session-append, raw-session-append, or raw-session-read")
+        if a.cmd not in (
+            "session-append",
+            "raw-session-append",
+            "raw-session-read",
+            "knowledge-save",
+            "knowledge-read",
+        ):
+            ap.error(
+                "--operation-id is only supported by session-append, raw-session-append, "
+                "raw-session-read, knowledge-save, or knowledge-read"
+            )
         if not a.session_id:
             ap.error("--operation-id requires an explicit --session-id reused across retries")
     if a.cmd == "raw-session-append":

@@ -27,9 +27,33 @@ Provider artifacts remain private; no private planning memory is included here.
   passed. This environmental failure is retained; it is not counted as a product
   pass or silently removed from the qualification history.
 
-The tests are included in Linux, Windows and macOS CI. Exact published-head CI and
-independent Devin review must be checked separately; local results do not imply
-either has completed.
+The original published candidate `e26db99c6f0abab9ad0da783487d8e531b689a5d`
+passed all eight push/PR checks across Linux, Windows and macOS.
+
+## Independent Devin review and correction
+
+Actual Devin ran 74 standard-library checks on the original published candidate:
+73 passed and one found a low-severity compatibility regression. With
+`init --proj session-list --bogus`, the query error router mistook an abbreviated
+option's value for a query command and emitted JSON instead of legacy usage text.
+The correction handles unambiguous long-option abbreviations and stops routing
+when a legacy command is encountered. Three independent regression cases cover
+option placement and attached values.
+
+[Original review and reproducers](https://github.com/SathiaAI/knokeep/tree/e79d94ba0210332f096c79eeed133b2e46b507b7/docs/cloud/evidence/Q11-DEVIN-SESSION-QUERY-REVIEW-20260928-A1)
+are preserved on a separate evidence branch. Devin did not have pytest available,
+did not install dependencies, and did not test busy/permission or concurrency
+failures. Its model identity was not verified.
+
+Codex reproduced all **74/74** assertions on Windows after the correction, with
+**96 focused pytest cases** and **33/33 legacy checks** passing. The original
+Linux-specific base-comparison tail was replaced by a separate base subprocess;
+the 74 assertions were unchanged. An initial reproduction hit Windows console
+encoding on a Unicode test label; its failure was retained and process-local
+UTF-8 I/O allowed the rerun. No global encoding settings changed.
+
+The corrected published head requires its own CI result. Check the PR's exact
+head status; the earlier candidate's eight passes do not cover a later commit.
 
 ## Boundaries
 

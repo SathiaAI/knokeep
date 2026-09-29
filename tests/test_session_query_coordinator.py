@@ -121,3 +121,16 @@ def test_out_of_range_list_rejects_before_store(tmp_path):
     assert result.returncode == 2
     assert json.loads(result.stdout)['reason'] == 'invalid_limit'
     assert not store.exists()
+
+
+@pytest.mark.parametrize('arguments', [
+    ['init', '--proj', 'session-list', '--bogus'],
+    ['--proj', 'session-read', 'init', '--bogus'],
+    ['--project=session-list', 'init', '--bogus'],
+])
+def test_legacy_option_value_is_not_a_query_command(arguments):
+    result = subprocess.run([sys.executable, str(ROOT/'skill/knokeep_state.py'),
+                             *arguments], capture_output=True, timeout=15)
+    assert result.returncode == 2
+    assert result.stdout == b''
+    assert b'usage:' in result.stderr

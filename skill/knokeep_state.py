@@ -1193,8 +1193,15 @@ def main():
                            "--conflict-key"}
             args = iter(sys.argv[1:])
             for arg in args:
-                if arg in takes_value:
-                    next(args, None)
+                if arg.startswith("--"):
+                    # argparse accepts unambiguous long-option abbreviations.
+                    # Their following values are not command names either.
+                    matches = [option for option in takes_value if option.startswith(arg)]
+                    if len(matches) == 1:
+                        next(args, None)
+                elif arg in {"init", "flush-state", "flush-log", "session-append",
+                             "bootstrap", "rollup", "resolve", "eval", "health"}:
+                    break
                 elif arg in _QUERY_CMDS:
                     _query_json_fail("invalid_argument", message=message)
             super().error(message)

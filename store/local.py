@@ -375,39 +375,36 @@ class LocalBackend:
                 "LocalBackend: staging/ and data/ must be on the same volume"
             )
 
-        if not self._journal_path.is_file() and self._data_dir_has_published_files():
-            raise BackendCorruptionError(
-                "journal.log is missing but data/ contains published blobs; "
-                "the journal is the durability source of truth and is not recreated"
-            )
-
         self._journal_fh = None
+        resume_lock = _FileLock(self._cas_lock_path)
         try:
-            # Journal kept open for the life of the adapter ("already open" per
-            # contract §4.1's write-order description) and appended-to under
-            # cas.lock in write(). "ab" creates journal.log only for a genuinely
-            # new empty store (no published blobs under data/).
-            self._journal_fh = open(self._journal_path, "ab")
-
-            self._case_insensitive = False
-
-            # Resume: replay the journal to re-materialize any key whose
-            # published blob is missing or torn (contract §3). This MUST hold
-            # the same cas.lock write() uses: two LocalBackend instances (e.g.
-            # in different processes) can be constructed concurrently, and
-            # without the lock one process's resume-rebuild of a key can race
-            # another process's in-flight write() to that same key (both doing
-            # an O_EXCL create for the same path at once) — a real race found
-            # by tests/test_local_backend.py's two-process tests, not a
-            # theoretical concern. The case-insensitivity probe also runs here
-            # so a transient probe file under data/ cannot be mistaken for user
-            # data by a concurrent list() on another instance.
-            resume_lock = _FileLock(self._cas_lock_path)
+            # Serialize the first journal/published-data observation, journal
+            # open/create, and resume/scavenge on the same cross-process
+            # cas.lock write() uses — without nesting a second acquire.
             if not resume_lock.acquire(self._lock_timeout_s):
                 raise RuntimeError(
                     "LocalBackend: could not acquire cas.lock to resume/scavenge on startup"
                 )
             try:
+                if not self._journal_path.is_file() and self._data_dir_has_published_files():
+                    raise BackendCorruptionError(
+                        "journal.log is missing but data/ contains published blobs; "
+                        "the journal is the durability source of truth and is not recreated"
+                    )
+
+                # Journal kept open for the life of the adapter ("already open" per
+                # contract §4.1's write-order description) and appended-to under
+                # cas.lock in write(). "ab" creates journal.log only for a genuinely
+                # new empty store (no published blobs under data/).
+                self._journal_fh = open(self._journal_path, "ab")
+
+                self._case_insensitive = False
+
+                # Resume: replay the journal to re-materialize any key whose
+                # published blob is missing or torn (contract §3). The
+                # case-insensitivity probe also runs here so a transient probe
+                # file under data/ cannot be mistaken for user data by a
+                # concurrent list() on another instance.
                 self._case_insensitive = self._detect_case_insensitive()
                 self._resume()
                 # Startup scavenger: remove staging temps older than TTL, left

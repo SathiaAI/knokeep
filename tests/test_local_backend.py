@@ -1648,3 +1648,141 @@ def test_case_insensitivity_probe_leaves_no_data_files(tmp_path):
                 assert not path.name.startswith("case-probe-")
     finally:
         backend.close()
+
+
+# ---------------------------------------------------------------------------
+# Q20 — startup journal observation/open serialized on cas.lock
+# ---------------------------------------------------------------------------
+
+
+def _hold_cas_lock(path: Path):
+    from store.local import _FileLock
+    holder = _FileLock(path)
+    assert holder.acquire(0.15)
+    return holder
+
+
+def test_startup_lock_timeout_does_not_create_journal(tmp_path):
+    root = tmp_path / "store-root"
+    root.mkdir()
+    (root / "data").mkdir(parents=True)
+    (root / "journal").mkdir(parents=True)
+    (root / "locks").mkdir(parents=True)
+    journal = root / "journal" / "journal.log"
+    assert not journal.exists()
+
+    holder = _hold_cas_lock(root / "locks" / "cas.lock")
+    try:
+        with pytest.raises(RuntimeError, match="could not acquire cas.lock"):
+            LocalBackend(root, lock_timeout_s=0.15)
+    finally:
+        holder.release()
+
+    assert not journal.exists()
+
+
+def test_startup_interleaving_does_not_false_refuse_missing_journal(tmp_path):
+    """While startup holds cas.lock over journal observation, a concurrent
+    initializer cannot publish; after release both views stay consistent."""
+    import threading
+
+    root = tmp_path / "store-root"
+    root.mkdir()
+    (root / "data").mkdir(parents=True)
+    (root / "journal").mkdir(parents=True)
+    (root / "locks").mkdir(parents=True)
+    journal = root / "journal" / "journal.log"
+    peer_blocked = threading.Event()
+    original_has = LocalBackend._data_dir_has_published_files
+
+    def slow_has_published(self):
+        def peer_try():
+            with pytest.raises(RuntimeError, match="could not acquire cas.lock"):
+                LocalBackend(root, lock_timeout_s=0.25)
+            peer_blocked.set()
+
+        threading.Thread(target=peer_try, daemon=True).start()
+        deadline = time.monotonic() + 2.0
+        while not peer_blocked.is_set():
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        return original_has(self)
+
+    backend = None
+    LocalBackend._data_dir_has_published_files = slow_has_published
+    try:
+        backend = LocalBackend(root)
+        assert journal.is_file()
+        gate.persist(backend, "solo/k", b"only-parent", ctx=create_ctx(), doc_type="system_state")
+        assert backend.read("solo/k").body == b"only-parent"
+    finally:
+        LocalBackend._data_dir_has_published_files = original_has
+        if backend is not None:
+            backend.close()
+
+
+def test_startup_cas_lock_excludes_nested_constructor_while_held(tmp_path, monkeypatch):
+    """While startup holds cas.lock, a second LocalBackend on the same root
+    must block until release — never deadlock via nested construction."""
+    root = tmp_path / "store-root"
+    root.mkdir()
+    (root / "data").mkdir(parents=True)
+    (root / "journal").mkdir(parents=True)
+    (root / "locks").mkdir(parents=True)
+
+    entered = {"outer": False}
+    real_resume = LocalBackend._resume
+
+    def resume_then_nested(self):
+        if entered["outer"]:
+            return real_resume(self)
+        entered["outer"] = True
+        with pytest.raises(RuntimeError, match="could not acquire cas.lock"):
+            LocalBackend(root, lock_timeout_s=0.25)
+        return real_resume(self)
+
+    monkeypatch.setattr(LocalBackend, "_resume", resume_then_nested)
+    backend = LocalBackend(root)
+    assert entered["outer"]
+    backend.close()
+    reopened = LocalBackend(root)
+    reopened.close()
+
+
+def _mp_session_append_worker(root_str: str, queue) -> None:
+    import sys
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parent.parent
+    sys.path[:0] = [str(repo_root), str(repo_root / "skill")]
+    import knokeep_state as ks
+
+    queue.put(ks.session_append(root_str, "p", "s", "test", "alpha", operation_id="job-1"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses POSIX fork start method")
+def test_two_fresh_processes_idempotent_same_append(tmp_path):
+    """Two brand-new processes over the same root may both append the same
+    logical operation; one record is stored and the other is a duplicate."""
+    root = tmp_path / "store-root"
+    ctx = multiprocessing.get_context("fork")
+    queue = ctx.Queue()
+    procs = [
+        ctx.Process(target=_mp_session_append_worker, args=(str(root), queue))
+        for _ in range(2)
+    ]
+    for p in procs:
+        p.start()
+    try:
+        for p in procs:
+            p.join(timeout=30)
+            assert p.exitcode == 0
+        outputs = [queue.get(timeout=1) for _ in procs]
+        assert sorted(x["duplicate"] for x in outputs) == [False, True]
+        assert (root / "data/p/sessions/s").read_bytes().count(b"] alpha\n") == 1
+    finally:
+        for p in procs:
+            if p.is_alive():
+                p.terminate()
+                p.join(timeout=3)
+        queue.close()

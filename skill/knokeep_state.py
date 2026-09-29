@@ -53,9 +53,18 @@ from application.raw_sessions import (
     read_source_bytes,
     validate_append_arguments,
 )
+from application.knowledge_validation import (
+    KnowledgeValidationError,
+    read_proposal_file,
+    validate_proposal,
+    validate_proposal_structure,
+    parse_proposal_bytes,
+    validation_exit_code,
+)
 
 _QUERY_CMDS = frozenset({"session-list", "session-read"})
 _RAW_SESSION_CMDS = frozenset({"raw-session-append", "raw-session-read"})
+_VALIDATE_CMDS = frozenset({"knowledge-validate"})
 
 SCHEMA_VERSION = 1
 
@@ -914,6 +923,27 @@ def raw_session_append(store, project, session_id, client, operation_id, source:
         backend.close()
 
 
+def knowledge_validate(store, project, proposal_path):
+    """CLI adapter: validate a source-linked proposal (read-only store access)."""
+    if not project:
+        raise KnowledgeValidationError("missing_project")
+    if not valid_id(project):
+        raise KnowledgeValidationError("invalid_project_id")
+    raw = read_proposal_file(proposal_path)
+    obj = parse_proposal_bytes(raw)
+    validate_proposal_structure(obj)
+    backend = _backend(store)
+    try:
+        return validate_proposal(backend, project, raw)
+    finally:
+        backend.close()
+
+
+def _knowledge_validate_fail(exc: KnowledgeValidationError) -> None:
+    print(json.dumps(exc.to_payload()))
+    sys.exit(validation_exit_code(exc))
+
+
 def raw_session_read(store, project, session_id, operation_id):
     _validate_project(project)
     if not valid_id(session_id):
@@ -1283,7 +1313,7 @@ def main():
             takes_value = {"--store", "--project", "--session-id", "--client",
                            "--list-limit", "--after", "--operation-id", "--body-file",
                            "--entry", "--entry-file", "--expect-hash", "--section",
-                           "--conflict-key", "--source-file"}
+                           "--conflict-key", "--source-file", "--proposal-file"}
             args = iter(sys.argv[1:])
             for arg in args:
                 if arg.startswith("--"):
@@ -1300,20 +1330,66 @@ def main():
                     _raw_session_fail(RawSessionError("invalid_argument", message=message))
                 elif arg in _QUERY_CMDS:
                     _query_json_fail("invalid_argument", message=message)
+                elif arg in _VALIDATE_CMDS:
+                    _knowledge_validate_fail(KnowledgeValidationError("invalid_argument"))
             super().error(message)
     ap = CommandParser()
     ap.add_argument("cmd", choices=["init", "flush-state", "flush-log", "session-append",
                                     "session-list", "session-read", "raw-session-append",
-                                    "raw-session-read", "bootstrap", "rollup", "resolve",
-                                    "eval", "health"])
+                                    "raw-session-read", "knowledge-validate", "bootstrap",
+                                    "rollup", "resolve", "eval", "health"])
     ap.add_argument("--store"); ap.add_argument("--project")   # --store optional: defaults to the shared cross-tool root
     ap.add_argument("--session-id"); ap.add_argument("--client", default="cowork")
     ap.add_argument("--list-limit")
     ap.add_argument("--after")
     ap.add_argument("--operation-id")
     ap.add_argument("--source-file")
+    ap.add_argument("--proposal-file")
     ap.add_argument("--body-file"); ap.add_argument("--entry"); ap.add_argument("--entry-file"); ap.add_argument("--expect-hash"); ap.add_argument("--section"); ap.add_argument("--conflict-key")
     a = ap.parse_args()
+    if a.proposal_file is not None and a.cmd != "knowledge-validate":
+        if a.cmd in _QUERY_CMDS:
+            _query_json_fail("invalid_argument", message="--proposal-file is not supported by queries")
+        if a.cmd in _RAW_SESSION_CMDS:
+            _raw_session_fail(RawSessionError("invalid_argument", message="write options are not supported"))
+        ap.error("--proposal-file is only supported by knowledge-validate")
+    if a.cmd == "knowledge-validate":
+        if a.proposal_file is None:
+            _knowledge_validate_fail(KnowledgeValidationError("missing_proposal_file"))
+        if any(arg == "--client" or arg.startswith("--client=") for arg in sys.argv[1:]):
+            _knowledge_validate_fail(KnowledgeValidationError("invalid_argument"))
+        if any(
+            getattr(a, name) is not None
+            for name in (
+                "session_id",
+                "operation_id",
+                "source_file",
+                "body_file",
+                "entry",
+                "entry_file",
+                "expect_hash",
+                "section",
+                "conflict_key",
+                "list_limit",
+                "after",
+            )
+        ):
+            _knowledge_validate_fail(KnowledgeValidationError("invalid_argument"))
+        if not a.store:
+            a.store = default_store_root()
+        try:
+            result = knowledge_validate(a.store, a.project, a.proposal_file)
+        except KnowledgeValidationError as exc:
+            _knowledge_validate_fail(exc)
+        except Exception:
+            print(
+                json.dumps(
+                    {"blocked": True, "reason": "internal_error"}
+                )
+            )
+            sys.exit(1)
+        print(json.dumps(result))
+        return
     if a.cmd == "raw-session-read":
         if not a.store:
             a.store = default_store_root()

@@ -36,6 +36,7 @@ env:
     tests/test_knowledge_validation.py
     tests/test_knowledge_revisions.py
     tests/test_knowledge_handoff.py
+    tests/test_source_retrieval.py
   # V1/skill acceptance tests are script-style (run directly, not pytest-collected).
   SKILL_TESTS: >-
     tests/test_v1.py
@@ -90,7 +91,7 @@ jobs:
         run: pip install pytest pg8000 boto3 "moto[server]" flask flask-cors
       - name: Local adapter (msvcrt/NTFS native) + conformance + skill/plugin tests
         shell: bash
-        run: python -m pytest tests/test_local_backend.py conformance tests/test_gate_supplement.py tests/test_plugin_store_root.py tests/test_client_attribution.py tests/test_resume_section.py tests/test_session_append_idempotency.py tests/test_session_queries.py tests/test_session_query_coordinator.py tests/test_raw_sessions.py tests/test_knowledge_validation.py tests/test_knowledge_revisions.py tests/test_knowledge_handoff.py -q
+        run: python -m pytest tests/test_local_backend.py conformance tests/test_gate_supplement.py tests/test_plugin_store_root.py tests/test_client_attribution.py tests/test_resume_section.py tests/test_session_append_idempotency.py tests/test_session_queries.py tests/test_session_query_coordinator.py tests/test_raw_sessions.py tests/test_knowledge_validation.py tests/test_knowledge_revisions.py tests/test_knowledge_handoff.py tests/test_source_retrieval.py -q
       - name: V1/skill acceptance scripts (unified engine)
         shell: bash
         run: |
@@ -123,7 +124,7 @@ jobs:
       - name: Install deps
         run: pip install pytest pg8000 boto3 "moto[server]" flask flask-cors
       - name: Core adapter + conformance + skill/plugin tests
-        run: python -m pytest tests/test_local_backend.py conformance tests/test_gate_supplement.py tests/test_plugin_store_root.py tests/test_client_attribution.py tests/test_resume_section.py tests/test_session_append_idempotency.py tests/test_session_queries.py tests/test_session_query_coordinator.py tests/test_raw_sessions.py tests/test_knowledge_validation.py tests/test_knowledge_revisions.py tests/test_knowledge_handoff.py -q
+        run: python -m pytest tests/test_local_backend.py conformance tests/test_gate_supplement.py tests/test_plugin_store_root.py tests/test_client_attribution.py tests/test_resume_section.py tests/test_session_append_idempotency.py tests/test_session_queries.py tests/test_session_query_coordinator.py tests/test_raw_sessions.py tests/test_knowledge_validation.py tests/test_knowledge_revisions.py tests/test_knowledge_handoff.py tests/test_source_retrieval.py -q
       - name: V1/skill acceptance scripts (unified engine)
         run: |
           set -e

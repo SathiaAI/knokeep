@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """FakeBackend — an in-memory, fault-injecting StoreBackend adapter.
 
 Used to drive the backend-agnostic conformance suite without touching any

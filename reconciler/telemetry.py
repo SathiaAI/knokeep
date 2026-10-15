@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """Local-only reconciler telemetry — labels/counts only, no phone-home.
 
 Matches the project's existing telemetry model (claude/knokeep-threat-model.md

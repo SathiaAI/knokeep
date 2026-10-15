@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
+name: License headers
+
+on:
+  pull_request:
+  push:
+    branches: ["**"]
+
+permissions:
+  contents: read
+
+jobs:
+  license-headers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Every source file has an SPDX header matching LICENSING.md
+        run: |
+          python3 - <<'PY'
+          import re, subprocess, sys
+
+          SRC_EXT = {".py": "#", ".sh": "#", ".yml": "#", ".yaml": "#", ".toml": "#", ".ini": "#",
+                     ".js": "//", ".mjs": "//", ".cjs": "//", ".ts": "//"}
+          HOLDER = "Copyright (c) 2026 Viaknox Holding LLC"
+          NOT_HOLDERS = ["SathiaAI", "Paul"]
+          ROW = re.compile(r"^\|\s*`([^`]+)`\s*\|\s*`([^`]+)`\s*\|")
+
+
+          def section(text, name):
+              m = re.search(r"<!-- %s:start -->(.*?)<!-- %s:end -->" % (name, name), text, re.S)
+              if not m:
+                  sys.exit("LICENSING.md: missing %s section" % name)
+              return [ROW.match(l.strip()).groups() for l in m.group(1).splitlines() if ROW.match(l.strip())]
+
+
+          text = open("LICENSING.md", encoding="utf-8").read()
+          table = section(text, "license-table")
+          third = dict(section(text, "third-party")) if "<!-- third-party:start -->" in text else {}
+          exact = {p for p, _ in table if p != "/" and not p.endswith("/")}  # single-file rows are always checked
+
+
+          def expected(path):
+              if path in third:
+                  return third[path]
+              best = None
+              for p, tag in table:
+                  if p == "/" or path == p or (p.endswith("/") and path.startswith(p)):
+                      if best is None or len(p) > len(best[0]):
+                          best = (p, tag)
+              return best[1] if best else None
+
+
+          errors = []
+          files = subprocess.run(["git", "ls-files"], capture_output=True, text=True, check=True).stdout.split("\n")
+          for f in filter(None, files):
+              tag = expected(f)
+              if tag is None:
+                  errors.append("%s: not covered by any row in LICENSING.md" % f)
+                  continue
+              try:
+                  lines = open(f, encoding="utf-8", errors="replace").read().splitlines()
+              except (UnicodeDecodeError, FileNotFoundError, IsADirectoryError):
+                  continue
+              for l in lines:
+                  if re.search(r"copyright", l, re.I) and any(re.search(r"\b%s\b" % n, l, re.I) for n in NOT_HOLDERS):
+                      errors.append("%s: names a forbidden copyright holder: %s" % (f, l.strip()))
+              ext = "." + f.rsplit(".", 1)[-1] if "." in f.rsplit("/", 1)[-1] else ""
+              if ext not in SRC_EXT and f not in exact and f not in third:
+                  continue
+              head = lines[:10]
+              found = [re.search(r"SPDX-License-Identifier:\s*(.+?)\s*$", l) for l in head]
+              found = [re.sub(r"\s*(-->|\*/)$", "", m.group(1)) for m in found if m]
+              if not found:
+                  errors.append("%s: missing SPDX-License-Identifier header" % f)
+              else:
+                  for t in found:
+                      if t != tag:
+                          why = " (AGPL is allowed only for files listed under Third-party lines)" if "AGPL" in t and f not in third else ""
+                          errors.append("%s: tag '%s' does not match LICENSING.md '%s'%s" % (f, t, tag, why))
+              if not any(HOLDER in l for l in head):
+                  errors.append("%s: missing '%s' header line" % (f, HOLDER))
+
+          for p in third:
+              if p not in files:
+                  errors.append("LICENSING.md third-party entry not in repo: %s" % p)
+
+          if errors:
+              print("License header check FAILED (%d):" % len(errors))
+              print("\n".join("  " + e for e in errors))
+              sys.exit(1)
+          print("License header check passed: %d tracked files, all source headers match LICENSING.md." % len([f for f in files if f]))
+          PY

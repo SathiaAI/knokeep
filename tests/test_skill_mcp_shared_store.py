@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """T-1 success criterion: the skill and the MCP server share ONE store.
 
   Direction A (skill -> MCP): a skill `flush-state` is byte-identical, with the

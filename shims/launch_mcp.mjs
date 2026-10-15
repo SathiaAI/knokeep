@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+// Copyright (c) 2026 Viaknox Holding LLC
 // KnoKeep MCP launcher (T-4). Claude Code / Cowork run this via `node` (always
 // present in that runtime); it finds a Python 3 across OSes and execs the server
 // as `python -m mcp.server --backend local` with cwd = plugin root (so `store`,

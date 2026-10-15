@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """KnoKeep MCP server — the access layer, built LAST over the finished
 StoreBackend socket (store/backend.py, store/gate.py) and the read-only
 reconciler (reconciler/).

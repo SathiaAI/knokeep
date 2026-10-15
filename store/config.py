@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """Shared store-root resolution (T-4).
 
 KnoKeep is *cross-tool* memory: Cursor, Codex, Claude Code and Cowork must all

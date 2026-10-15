@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """Concurrency over the V2 store: two concurrent flush-state with the same expect-hash
 -> exactly one wins, one stale (no lost update); and the store is never wedged after
 contention (LocalBackend's OS-level cas.lock releases on process exit + journal replay,

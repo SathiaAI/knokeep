@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """AST-based boundary test (contract §1): ScannedBody/ScannedKey must never be
 constructed, subclassed, or pickled anywhere outside store/gate.py.
 

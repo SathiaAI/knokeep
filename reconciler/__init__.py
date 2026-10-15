@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """KnoKeep reconciler — a READ-ONLY drift observer (contract v1.4 §6, T2).
 
 Runs on the shipped local core. Observes drift between the store, project

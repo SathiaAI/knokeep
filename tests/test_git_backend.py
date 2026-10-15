@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 Viaknox Holding LLC
 """GitBackend-specific conformance (contract v1.4 §4.3, §9).
 
 These exercise behavior the backend-agnostic conformance/suite.py cannot

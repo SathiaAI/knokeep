@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """migrate(source, target) — move a store from one StoreBackend to another,
 safely (design/store_backend_contract.md v1.4, §5 "the one door" and §9's
 mandatory "migration" conformance item).

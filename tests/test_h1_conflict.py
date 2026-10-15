@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """Tests for the H1 Increment 1 skill-side conflict protocol
 (bounded_cas_reread_reapply) in skill/knokeep_state.py.
 

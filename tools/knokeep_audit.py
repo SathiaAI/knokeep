@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """KnoKeep Layer-2 independent audit (soak-time, NOT part of the shipped gate).
 Runs gitleaks - a DIFFERENT scanner than our inline gate - over a memory store to
 catch any secret the gate missed. This is the only metric the self-log cannot

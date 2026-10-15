@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """StoreBackend protocol — the socket every adapter implements (contract §2)."""
 from __future__ import annotations
 

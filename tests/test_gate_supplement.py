@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """Regression tests for the T-6 round-2 hardening of store/gate.secret_scan
 (the unified skill+MCP write door). Each pins a finding from the non-Anthropic
 adversarial panel (astra/grok/gemini) so it cannot silently regress:

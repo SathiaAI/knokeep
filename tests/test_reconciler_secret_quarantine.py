@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """A planted (synthetic, non-functional) secret inside fetched GitHub text
 must be quarantined to a label-only placeholder and must NEVER appear
 verbatim anywhere in the DriftReport, per CRITICAL SAFETY INVARIANT #2.

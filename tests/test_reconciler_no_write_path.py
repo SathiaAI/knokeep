@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """Static proof that no reconciler code path can write to an external
 source (task requirement #3): inspects the source-client Protocols/classes'
 surfaces, and statically scans reconciler/*.py for any write-shaped call.

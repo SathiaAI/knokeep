@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Copyright (c) 2026 Viaknox Holding LLC -->
 # KnoKeep Memory Schema — v1 (FROZEN CONTRACT)
 
 Every client (Cowork, Cursor, Codex, Claude Code, Windsurf, Devin, Hermes) reads and writes THIS layout. Do not change field names without a `schema_version` bump + migration note.

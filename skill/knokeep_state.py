@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """KnoKeep state helper v2.1 (stdlib + V2 store engine) — the skill unified onto ONE engine.
 
 Every write goes through THE single write door: store.gate.persist(backend, key, raw_bytes,

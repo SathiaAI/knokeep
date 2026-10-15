@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """LocalBackend — filesystem StoreBackend adapter (contract v1.4, §3, §4.1).
 
 Windows is the contract's normative host for this adapter; this module is

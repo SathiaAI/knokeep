@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 Viaknox Holding LLC
 """LocalBackend-specific conformance (contract v1.4 §3, §4.1, §9).
 
 These exercise behavior the backend-agnostic conformance/suite.py cannot: the

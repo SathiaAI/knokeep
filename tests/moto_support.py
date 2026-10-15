@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """Shared moto ThreadedMotoServer + boto3-oracle helpers for object-store
 tests (contract §9: "real S3-protocol server").
 

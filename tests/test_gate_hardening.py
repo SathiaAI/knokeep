@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """Regression tests for the independent adversarial review's findings against
 store/gate.py (2026-09-20 hardening pass, see gate.py's module docstring).
 

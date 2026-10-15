@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """Layer-2 audit tests: gitleaks catches a planted secret, passes a clean store,
 and the audit output never re-persists the matched secret value."""
 import subprocess, sys, os, json, tempfile, shutil

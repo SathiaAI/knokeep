@@ -6,7 +6,7 @@
     "name": "ViaKnox",
     "url": "https://github.com/SathiaAI"
   },
-  "license": "AGPL-3.0",
+  "license": "Elastic-2.0",
   "homepage": "https://github.com/SathiaAI/knokeep",
   "repository": "https://github.com/SathiaAI/knokeep",
   "keywords": ["memory", "context", "compaction", "handoff", "cowork", "mcp", "portable", "cross-tool"],

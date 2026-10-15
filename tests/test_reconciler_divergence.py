@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """Seeded-divergence test for the reconciler (T2 acceptance: "produces a
 correct drift report for a seeded divergence").
 

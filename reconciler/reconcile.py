@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """reconcile(sources) -> DriftReport — the reconciler's one entry point.
 
 READ-ONLY drift observer (design/store_backend_contract.md §6; the

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """Tests for migrate/migrate.py (design/store_backend_contract.md §5).
 
 Covers the behaviors specific to `migrate()` itself (freeze, two-pass

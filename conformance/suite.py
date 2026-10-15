@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Viaknox Holding LLC
 """Backend-agnostic conformance suite (contract v1.4, §9).
 
 Parametrized over `backend_factory`: add a new adapter by adding one entry to

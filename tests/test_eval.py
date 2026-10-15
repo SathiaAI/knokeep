@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """Eval-harness tests: telemetry logs decisions, scorecard aggregates, and the
 event log NEVER contains a secret value (labels only)."""
 import subprocess, sys, os, json, tempfile, shutil

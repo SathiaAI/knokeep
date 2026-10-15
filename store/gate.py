@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """The secret gate — the ONE write door (contract v1.4, §1 gate-typed values, §5, §6, §7).
 
 Every byte that reaches a backend's write() goes through persist() here first.

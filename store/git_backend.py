@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 Viaknox Holding LLC
 """GitBackend — git-based StoreBackend adapter (contract v1.4, §3, §4.3).
 
 "git (solo / fallback)" per contract §4.3. Each key is a blob at a path in a

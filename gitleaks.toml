@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 # KnoKeep gitleaks config. Product source (store/, reconciler/, mcp/, migrate/)
 # is scanned with the full default ruleset and MUST be clean. Test fixtures use
 # only synthetic secret look-alikes (verified: no real credentials), so tests/

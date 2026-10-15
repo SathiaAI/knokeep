@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 Viaknox Holding LLC
 """ObjectStoreBackend — S3-protocol StoreBackend adapter (contract v1.4, §3, §4.2).
 
 "object-store (primary remote)" per contract §4.2. Every KnoKeep key maps to

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """T-4: the skill (run from an agent's bash) and the MCP server resolve the SAME
 store root by DEFAULT, so `/plugin install` yields one shared memory with no
 tool-specific env var having to propagate between the two processes.

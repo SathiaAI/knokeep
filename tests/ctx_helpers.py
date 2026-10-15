@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """Shared OperationContext test helpers (H1 Increment 2, Phase 0).
 
 Re-exports create_ctx/overwrite_ctx from store.context, and adds

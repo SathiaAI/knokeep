@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """OperationContext — the required write-context contract (H1 Increment 2,
 Phase 0: contract foundation only).
 

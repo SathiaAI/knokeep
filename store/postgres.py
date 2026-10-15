@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 Viaknox Holding LLC
 """PostgresBackend — PostgreSQL StoreBackend adapter (contract v1.4, §3, §4.4).
 
 **Adapter ONLY** — no service/auth/multi-tenant layer. This module owns

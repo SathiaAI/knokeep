@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """V1 (skill) acceptance tests, updated for V2.1: enforced boundary, concurrency,
 path/metadata safety, store-scan — now over the unified V2 store (LocalBackend).
 The concurrency CAS token is the store's 64-hex sha256; bypass-secret probes are

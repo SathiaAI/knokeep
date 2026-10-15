@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 Viaknox Holding LLC
 """Dedicated tests for ObjectStoreBackend (contract v1.4 §4.2), beyond what
 the backend-agnostic conformance suite (conformance/suite.py, parametrized to
 include "objectstore") already exercises end-to-end against the real,

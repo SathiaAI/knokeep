@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """Small, injectable, READ-ONLY source clients for the reconciler.
 
 None of these types expose any write method. That is enforced by their

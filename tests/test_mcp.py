@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Elastic-2.0 OR LicenseRef-Viaknox-Commercial
+# Copyright (c) 2026 Viaknox Holding LLC
 """Protocol-level tests for the KnoKeep MCP server (mcp/server.py).
 
 These drive the server as a REAL subprocess speaking newline-delimited

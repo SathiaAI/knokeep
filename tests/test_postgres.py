@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 Viaknox Holding LLC
 """PostgresBackend-specific conformance (contract v1.4 §4.4, §8, §9).
 
 These exercise behavior against the REAL local throwaway PostgreSQL 16

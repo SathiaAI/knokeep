@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Viaknox Holding LLC
 // SYNTHETIC FIXTURE — FAKE secrets planted to test KnoKeep's secret gate.
 // Case: secret in a code comment -> apiKey = "sk-ant-EXAMPLE0000000000000000000000000000000000000000"
 const config = {

@@ -2,7 +2,7 @@
 
 Copyright (c) 2026 Viaknox Holding LLC.
 
-**Code up to and including commit `ced2581` is available under AGPL-3.0-only. Later commits are under the terms below.**
+**Code up to and including commit `b05fd87` on `main` is available under AGPL-3.0-only (the commit is only a pointer; the shipped text in `LICENSES/AGPL-3.0-only.txt` is authoritative). Later commits are under the terms below.**
 
 ## Folder → license
 
@@ -46,4 +46,4 @@ files only.
 <!-- third-party:end -->
 
 The seven third-party AGPL files above are governed by [`LICENSES/AGPL-3.0-only.txt`](LICENSES/AGPL-3.0-only.txt)
-(also the `LICENSE` file at commit `ced2581`, or <https://www.gnu.org/licenses/agpl-3.0.txt>).
+(also the `LICENSE` file at commit `b05fd87`, or <https://www.gnu.org/licenses/agpl-3.0.txt>).

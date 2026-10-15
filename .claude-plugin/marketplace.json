@@ -17,7 +17,7 @@
       },
       "homepage": "https://github.com/SathiaAI/knokeep",
       "repository": "https://github.com/SathiaAI/knokeep",
-      "license": "Elastic-2.0",
+      "license": "SEE LICENSE IN LICENSING.md",
       "keywords": ["memory", "context", "compaction", "handoff", "cowork", "mcp", "portable", "cross-tool"],
       "category": "productivity"
     }

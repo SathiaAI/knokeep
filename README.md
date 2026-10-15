@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://github.com/SathiaAI/knokeep/actions/workflows/ci.yml"><img src="https://github.com/SathiaAI/knokeep/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Elastic--2.0-2E3A2F.svg" alt="License: Elastic-2.0"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-mixed%20(ELv2%20%7C%20Apache--2.0%20%7C%20AGPL--3.0)-2E3A2F.svg" alt="License: mixed, see LICENSING.md"></a>
   <a href="https://github.com/SathiaAI/knokeep/releases"><img src="https://img.shields.io/github/v/release/SathiaAI/knokeep?color=6B7F5B" alt="Release"></a>
 </p>
 
@@ -124,7 +124,7 @@ Found a vulnerability? Please open an issue (or email the maintainer) rather tha
 
 ## License
 
-Elastic-2.0 OR commercial; `conformance/`, `fixtures/`, `docs/SCHEMA.md` are Apache-2.0; versions through `ced2581` were AGPL-3.0-only. See [`LICENSING.md`](LICENSING.md) ([Elastic License 2.0](https://www.elastic.co/licensing/elastic-license); see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE)). You may use, copy and modify KnoKeep, but you may not offer it to others as a hosted or managed service, or remove license and copyright notices.
+KnoKeep is under **mixed licenses**: by default Elastic-2.0 OR commercial; `conformance/`, `fixtures/` and `docs/SCHEMA.md` are Apache-2.0; the seven third-party files listed in `LICENSING.md` are AGPL-3.0-only ([`LICENSES/AGPL-3.0-only.txt`](LICENSES/AGPL-3.0-only.txt)). Versions through commit `b05fd87` were AGPL-3.0-only. See [`LICENSING.md`](LICENSING.md) ([Elastic License 2.0](https://www.elastic.co/licensing/elastic-license); see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE)). You may use, copy and modify KnoKeep, but you may not offer it to others as a hosted or managed service, or remove license and copyright notices.
 
 ---
 

@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://github.com/SathiaAI/knokeep/actions/workflows/ci.yml"><img src="https://github.com/SathiaAI/knokeep/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-2E3A2F.svg" alt="License: AGPL-3.0"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-ELv2-2E3A2F.svg" alt="License: Elastic License 2.0"></a>
   <a href="https://github.com/SathiaAI/knokeep/releases"><img src="https://img.shields.io/github/v/release/SathiaAI/knokeep?color=6B7F5B" alt="Release"></a>
 </p>
 
@@ -124,7 +124,7 @@ Found a vulnerability? Please open an issue (or email the maintainer) rather tha
 
 ## License
 
-GNU **AGPL-3.0** (see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE)). AGPL is copyleft **including over a network** — if you run a modified KnoKeep as a service, you must share your source. Use it freely; just keep it open.
+[Elastic License 2.0](https://www.elastic.co/licensing/elastic-license) (ELv2) (see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE)). You may use, copy and modify KnoKeep, but you may not offer it to others as a hosted or managed service, or remove license and copyright notices.
 
 ---
 

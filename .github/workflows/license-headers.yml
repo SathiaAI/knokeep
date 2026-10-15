@@ -65,7 +65,7 @@ jobs:
               except (UnicodeDecodeError, FileNotFoundError, IsADirectoryError):
                   continue
               for l in lines:
-                  if re.search(r"copyright", l, re.I) and any(re.search(r"\b%s\b" % n, l) for n in NOT_HOLDERS):
+                  if re.search(r"copyright", l, re.I) and any(re.search(r"\b%s\b" % n, l, re.I) for n in NOT_HOLDERS):
                       errors.append("%s: names a forbidden copyright holder: %s" % (f, l.strip()))
               ext = "." + f.rsplit(".", 1)[-1] if "." in f.rsplit("/", 1)[-1] else ""
               if ext not in SRC_EXT and f not in exact and f not in third:
@@ -75,9 +75,11 @@ jobs:
               found = [re.sub(r"\s*(-->|\*/)$", "", m.group(1)) for m in found if m]
               if not found:
                   errors.append("%s: missing SPDX-License-Identifier header" % f)
-              elif found[0] != tag:
-                  why = " (AGPL is allowed only for files listed under Third-party lines)" if "AGPL" in found[0] and f not in third else ""
-                  errors.append("%s: tag '%s' does not match LICENSING.md '%s'%s" % (f, found[0], tag, why))
+              else:
+                  for t in found:
+                      if t != tag:
+                          why = " (AGPL is allowed only for files listed under Third-party lines)" if "AGPL" in t and f not in third else ""
+                          errors.append("%s: tag '%s' does not match LICENSING.md '%s'%s" % (f, t, tag, why))
               if not any(HOLDER in l for l in head):
                   errors.append("%s: missing '%s' header line" % (f, HOLDER))
 

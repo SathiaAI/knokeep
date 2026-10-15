@@ -39,6 +39,7 @@ jobs:
           text = open("LICENSING.md", encoding="utf-8").read()
           table = section(text, "license-table")
           third = dict(section(text, "third-party")) if "<!-- third-party:start -->" in text else {}
+          exact = {p for p, _ in table if p != "/" and not p.endswith("/")}  # single-file rows are always checked
 
 
           def expected(path):
@@ -60,18 +61,18 @@ jobs:
                   errors.append("%s: not covered by any row in LICENSING.md" % f)
                   continue
               try:
-                  lines = open(f, encoding="utf-8").read().splitlines()
+                  lines = open(f, encoding="utf-8", errors="replace").read().splitlines()
               except (UnicodeDecodeError, FileNotFoundError, IsADirectoryError):
                   continue
               for l in lines:
                   if re.search(r"copyright", l, re.I) and any(re.search(r"\b%s\b" % n, l) for n in NOT_HOLDERS):
                       errors.append("%s: names a forbidden copyright holder: %s" % (f, l.strip()))
               ext = "." + f.rsplit(".", 1)[-1] if "." in f.rsplit("/", 1)[-1] else ""
-              if ext not in SRC_EXT:
+              if ext not in SRC_EXT and f not in exact and f not in third:
                   continue
               head = lines[:10]
               found = [re.search(r"SPDX-License-Identifier:\s*(.+?)\s*$", l) for l in head]
-              found = [m.group(1) for m in found if m]
+              found = [re.sub(r"\s*(-->|\*/)$", "", m.group(1)) for m in found if m]
               if not found:
                   errors.append("%s: missing SPDX-License-Identifier header" % f)
               elif found[0] != tag:

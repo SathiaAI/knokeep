@@ -2,5 +2,7 @@ KnoKeep — portable, secret-safe AI coding memory.
 Copyright (c) 2026 Viaknox Holding LLC.
 Licensed under Elastic-2.0 OR LicenseRef-Viaknox-Commercial, with some folders
 under Apache-2.0. See LICENSING.md for the folder-by-folder table.
-Releases and commits before this change remain available under AGPL-3.0-only.
+Code up to and including commit ced2581 is available under AGPL-3.0-only.
+The seven third-party AGPL files listed in LICENSING.md are governed by
+LICENSES/AGPL-3.0-only.txt.
 Part of the Kno suite. Recall pairs with Knosky (https://knosky.wiki).

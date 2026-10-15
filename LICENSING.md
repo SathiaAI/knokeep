@@ -2,7 +2,7 @@
 
 Copyright (c) 2026 Viaknox Holding LLC.
 
-**Releases and commits before this PR remain available under AGPL-3.0-only. The new terms apply from this commit on.**
+**Code up to and including commit `ced2581` is available under AGPL-3.0-only. Later commits are under the terms below.**
 
 ## Folder → license
 
@@ -45,5 +45,5 @@ files only.
 | `tests/test_postgres.py` | `AGPL-3.0-only` |
 <!-- third-party:end -->
 
-AGPL-3.0-only text: the `LICENSE` file at any commit before this PR, or
-<https://www.gnu.org/licenses/agpl-3.0.txt>.
+The seven third-party AGPL files above are governed by [`LICENSES/AGPL-3.0-only.txt`](LICENSES/AGPL-3.0-only.txt)
+(also the `LICENSE` file at commit `ced2581`, or <https://www.gnu.org/licenses/agpl-3.0.txt>).

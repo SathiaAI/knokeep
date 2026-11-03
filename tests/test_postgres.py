@@ -27,6 +27,7 @@ equivalent since it does not use that shared fixture).
 """
 from __future__ import annotations
 
+import hashlib
 import threading
 import types
 import uuid
@@ -756,3 +757,276 @@ def test_health_detail_carries_the_connection_identity_never_credentials(backend
     assert "host=127.0.0.1" in h.detail and "port=5433" in h.detail and "database=knokeep_test" in h.detail
     assert backend._qualified_table in h.detail
     assert "password" not in h.detail.lower() and "user=" not in h.detail
+
+
+# ---------------------------------------------------------------------------
+# Version history (contract §10): every committed write is kept as an
+# immutable, readable version; nothing that did not commit is recorded.
+# ---------------------------------------------------------------------------
+
+
+def _put(backend, key, body, expected_hash=None, doc_type="system_state"):
+    ctx = create_ctx() if expected_hash is None else fenced_ctx(backend, key, expected_hash)
+    return gate.persist(backend, key, body, ctx=ctx, doc_type=doc_type)
+
+
+def _version_count(backend, key=None):
+    conn = backend._get_conn()
+    cur = conn.cursor()
+    if key is None:
+        cur.execute(f"SELECT count(*) FROM {backend._qualified_versions_table}")
+    else:
+        cur.execute(
+            f"SELECT count(*) FROM {backend._qualified_versions_table} WHERE key = %s", (key,)
+        )
+    (n,) = cur.fetchone()
+    conn.commit()
+    return n
+
+
+def test_versions_capability_is_reported(backend):
+    assert backend.capabilities().versions is True
+
+
+def test_every_committed_write_is_kept_newest_first_with_verbatim_bodies(backend):
+    r1 = _put(backend, "doc", b"one")
+    r2 = _put(backend, "doc", b"two", r1.new_hash)
+    r3 = _put(backend, "doc", b"three", r2.new_hash)
+    assert all(isinstance(r, OK) for r in (r1, r2, r3))
+
+    history = backend.versions("doc")
+    assert [v.version_hash for v in history] == [r3.new_hash, r2.new_hash, r1.new_hash]
+    assert [v.size for v in history] == [5, 3, 3]
+    assert history[0].seq > history[1].seq > history[2].seq
+    assert history[0].written_at.endswith("Z")
+
+    assert backend.read_version("doc", history[2].seq).body == b"one"
+    assert backend.read_version("doc", history[1].seq).body == b"two"
+    assert backend.read_version("doc", history[0].seq).body == b"three"
+    assert backend.read("doc").body == b"three"
+
+
+def test_same_content_written_again_is_a_distinct_entry(backend):
+    ra = _put(backend, "doc", b"A")
+    rb = _put(backend, "doc", b"B", ra.new_hash)
+    ra2 = _put(backend, "doc", b"A", rb.new_hash)
+    assert isinstance(ra2, OK)
+
+    history = backend.versions("doc")
+    assert len(history) == 3
+    assert history[0].version_hash == history[2].version_hash == ra.new_hash
+    assert len({v.seq for v in history}) == 3
+
+
+def test_rejected_and_replayed_writes_record_nothing(backend):
+    r1 = _put(backend, "doc", b"A")
+    assert _version_count(backend, "doc") == 1
+
+    assert isinstance(_put(backend, "doc", b"A"), OK)  # idempotent create replay
+    assert isinstance(_put(backend, "doc", b"B"), EXISTS)  # create-only collision
+    assert isinstance(_put(backend, "doc", b"C", "0" * 64), STALE)  # wrong hash
+    assert isinstance(_put(backend, "absent", b"C", r1.new_hash), STALE)  # CAS never creates
+
+    assert _version_count(backend, "doc") == 1
+    assert _version_count(backend, "absent") == 0
+
+
+def test_generation_regression_is_rejected_and_records_nothing(backend):
+    key = "lease/holder"
+    r0 = _put(backend, key, _gen(1) + b"alice", doc_type="lease")
+    assert isinstance(_put(backend, key, _gen(1) + b"bob", r0.new_hash, doc_type="lease"), STALE)
+    assert _version_count(backend, key) == 1
+
+    r1 = _put(backend, key, _gen(2) + b"bob", r0.new_hash, doc_type="lease")
+    assert isinstance(r1, OK)
+    history = backend.versions(key)
+    assert [v.generation for v in history] == [2, 1]
+
+
+def test_history_is_append_only_in_the_database(backend):
+    _put(backend, "doc", b"A")
+    table = backend._qualified_versions_table
+    for statement in (
+        f"UPDATE {table} SET body = 'x'::bytea",
+        f"DELETE FROM {table}",
+        f"TRUNCATE {table}",
+    ):
+        conn = backend._get_conn()
+        cur = conn.cursor()
+        with pytest.raises(pg8000.exceptions.DatabaseError) as exc_info:
+            cur.execute(statement)
+        conn.rollback()
+        assert exc_info.value.args[0]["C"] == "55000", statement
+
+    assert _version_count(backend, "doc") == 1
+    assert backend.read_version("doc", backend.versions("doc")[0].seq).body == b"A"
+
+
+def test_capability_probe_leaves_no_versions(backend):
+    assert _version_count(backend) == 0
+
+
+def test_restore_is_an_ordinary_gated_write_that_adds_a_version(backend):
+    r1 = _put(backend, "doc", b"good")
+    r2 = _put(backend, "doc", b"bad", r1.new_hash)
+    first = backend.versions("doc")[-1]
+    old = backend.read_version("doc", first.seq)
+
+    restored = _put(backend, "doc", old.body, r2.new_hash)
+    assert isinstance(restored, OK)
+    assert backend.read("doc").body == b"good"
+    history = backend.versions("doc")
+    assert len(history) == 3 and history[0].version_hash == r1.new_hash
+
+    # Same rules as any write: a stale restore is refused and records nothing.
+    assert isinstance(_put(backend, "doc", old.body, r2.new_hash), STALE)
+    assert _version_count(backend, "doc") == 3
+
+
+def test_concurrent_writers_record_exactly_the_writes_that_won(backend):
+    base = _put(backend, "race", b"base")
+    results = []
+    barrier = threading.Barrier(8)
+
+    def worker(i):
+        barrier.wait()
+        results.append(_put(backend, "race", f"writer-{i}".encode(), base.new_hash))
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    winners = [r for r in results if isinstance(r, OK)]
+    assert len(winners) == 1
+    history = backend.versions("race")
+    assert len(history) == 2
+    assert history[0].version_hash == winners[0].new_hash == backend.read("race").version_hash
+
+
+def test_versions_pages_in_order_and_validates_arguments(backend):
+    prev = _put(backend, "doc", b"v0")
+    for i in range(1, 5):
+        prev = _put(backend, "doc", f"v{i}".encode(), prev.new_hash)
+
+    page1 = backend.versions("doc", limit=2)
+    page2 = backend.versions("doc", limit=2, before_seq=page1[-1].seq)
+    page3 = backend.versions("doc", limit=2, before_seq=page2[-1].seq)
+    bodies = [backend.read_version("doc", v.seq).body for v in page1 + page2 + page3]
+    assert bodies == [b"v4", b"v3", b"v2", b"v1", b"v0"]
+    assert backend.versions("doc", limit=2, before_seq=page3[-1].seq) == []
+
+    for bad in (0, 1001, -1, True, "5"):
+        with pytest.raises(ValueError):
+            backend.versions("doc", limit=bad)
+    with pytest.raises(ValueError):
+        backend.versions("doc", before_seq="x")
+    with pytest.raises(ValueError):
+        backend.read_version("doc", "1")
+
+
+def test_read_version_is_scoped_to_its_key(backend):
+    _put(backend, "a", b"secret-ref-a")
+    _put(backend, "b", b"b")
+    seq_a = backend.versions("a")[0].seq
+    assert backend.read_version("b", seq_a) is None
+    assert backend.read_version("a", seq_a + 10_000) is None
+    assert backend.versions("never-written") == []
+
+
+def test_versions_table_name_never_narrows_the_accepted_table_name_range():
+    from store.postgres import _versions_table_name
+
+    assert _versions_table_name("store") == "store_versions"
+    long_a, long_b = "t" * 63, "t" * 62 + "u"
+    va, vb = _versions_table_name(long_a), _versions_table_name(long_b)
+    assert len(va) <= 63 and len(vb) <= 63
+    assert va.endswith("_versions") and vb.endswith("_versions")
+    assert va != vb and _versions_table_name(long_a) == va
+
+    schema = "knokeep_longver_" + uuid.uuid4().hex[:20]
+    b = PostgresBackend(dict(_PG_CONNECT_KWARGS), schema=schema, table=long_a)
+    try:
+        r = _put(b, "k", b"v")
+        assert isinstance(r, OK)
+        assert len(b.versions("k")) == 1
+    finally:
+        b._conformance_teardown()
+
+
+def test_refuses_to_start_when_versions_table_name_collides_with_another_store():
+    schema = "knokeep_vcollide_" + uuid.uuid4().hex[:20]
+    first = PostgresBackend(dict(_PG_CONNECT_KWARGS), schema=schema, table="foo")
+    try:
+        with pytest.raises(RuntimeError, match="REFUSING TO START"):
+            PostgresBackend(dict(_PG_CONNECT_KWARGS), schema=schema, table="foo_versions")
+        assert isinstance(_put(first, "k", b"v"), OK)
+        assert len(first.versions("k")) == 1
+    finally:
+        first._conformance_teardown()
+
+    schema2 = "knokeep_vcollide2_" + uuid.uuid4().hex[:20]
+    other = PostgresBackend(dict(_PG_CONNECT_KWARGS), schema=schema2, table="foo_versions")
+    try:
+        with pytest.raises(RuntimeError, match="REFUSING TO START"):
+            PostgresBackend(dict(_PG_CONNECT_KWARGS), schema=schema2, table="foo")
+    finally:
+        other._conformance_teardown()
+
+
+def test_restarting_on_an_existing_schema_keeps_history_and_triggers(backend):
+    r1 = _put(backend, "doc", b"A")
+    again = PostgresBackend(dict(_PG_CONNECT_KWARGS), schema=backend._schema)
+    try:
+        assert [v.version_hash for v in again.versions("doc")] == [r1.new_hash]
+        conn = again._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT count(*) FROM pg_trigger WHERE tgrelid = %s::regclass AND NOT tgisinternal",
+            (again._qualified_versions_table,),
+        )
+        (n_triggers,) = cur.fetchone()
+        conn.commit()
+        assert n_triggers == 2
+    finally:
+        again.close_all()
+
+
+def test_existing_data_gets_a_baseline_so_the_first_overwrite_cannot_destroy_it(backend):
+    """A store that held data before history existed: its current values have
+    no history row. Starting the adapter gives each one a baseline entry."""
+    conn = backend._get_conn()
+    cur = conn.cursor()
+    legacy = b"written-before-history-existed"
+    legacy_hash = hashlib.sha256(legacy).hexdigest()
+    cur.execute(
+        f"INSERT INTO {backend._qualified_table} (key, body, version_hash) VALUES (%s, %s, %s)",
+        ("legacy", legacy, legacy_hash),
+    )
+    conn.commit()
+    assert _version_count(backend, "legacy") == 0
+
+    restarted = PostgresBackend(dict(_PG_CONNECT_KWARGS), schema=backend._schema)
+    try:
+        assert [v.version_hash for v in restarted.versions("legacy")] == [legacy_hash]
+        baseline = restarted.versions("legacy")[0]
+        assert restarted.read_version("legacy", baseline.seq).body == legacy
+
+        # Starting again adds nothing (idempotent), and the probe key stays out.
+        again = PostgresBackend(dict(_PG_CONNECT_KWARGS), schema=backend._schema)
+        try:
+            assert len(again.versions("legacy")) == 1
+            assert _version_count(again) == 1
+        finally:
+            again.close_all()
+
+        # The first overwrite now keeps the pre-history value.
+        r = _put(restarted, "legacy", b"new", legacy_hash)
+        assert isinstance(r, OK)
+        assert [restarted.read_version("legacy", v.seq).body for v in restarted.versions("legacy")] == [
+            b"new",
+            legacy,
+        ]
+    finally:
+        restarted.close_all()

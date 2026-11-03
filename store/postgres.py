@@ -174,6 +174,7 @@ from .types import (
     ErrorKind,
     OK,
     STALE,
+    VersionRecord,
     WriteResult,
     sha256_hex,
 )
@@ -236,6 +237,25 @@ def _fence_table_name(table: str) -> str:
     return _validate_identifier(f"{table[:keep]}_{digest}{_FENCE_TABLE_SUFFIX}", "fence table")
 
 
+_VERSIONS_TABLE_SUFFIX = "_versions"
+
+# Keys under this prefix are the load-time capability probe's scratch keys
+# (contract §8). They are created and deleted at every start, so they never
+# enter the append-only version history.
+_PROBE_KEY_PREFIX = ".knokeep/probe/"
+
+
+def _versions_table_name(table: str) -> str:
+    """The companion version-history table's identifier. Same derivation and
+    63-char handling as `_fence_table_name`, with the `_versions` suffix."""
+    candidate = f"{table}{_VERSIONS_TABLE_SUFFIX}"
+    if len(candidate) <= _PG_IDENTIFIER_MAX:
+        return candidate
+    digest = hashlib.sha256(table.encode("utf-8")).hexdigest()[:8]
+    keep = _PG_IDENTIFIER_MAX - len(_VERSIONS_TABLE_SUFFIX) - 1 - len(digest)
+    return _validate_identifier(f"{table[:keep]}_{digest}{_VERSIONS_TABLE_SUFFIX}", "versions table")
+
+
 # Postgres SQLSTATEs that mean "couldn't get the row lock / ran past our own
 # timeout" — definitely-not-committed, never an outcome-unknown kind
 # (JUDGMENT CALL 3).
@@ -285,6 +305,10 @@ class PostgresBackend:
         # satisfy both without weakening that existing test.
         self._fence_table = _fence_table_name(self._table)
         self._qualified_fence_table = f'"{self._schema}"."{self._fence_table}"'
+        # Contract §10: append-only history of every committed write, in a
+        # companion table written in the SAME transaction as the write itself.
+        self._versions_table = _versions_table_name(self._table)
+        self._qualified_versions_table = f'"{self._schema}"."{self._versions_table}"'
 
         self._local = threading.local()
         self._conn_registry_lock = threading.Lock()
@@ -323,6 +347,81 @@ class PostgresBackend:
             )
             """
         )
+        # Contract §10: version history. `seq` is a monotonic identity, so the
+        # same content written twice (A -> B -> A) is three distinct entries.
+        # The columns deliberately differ from the main store table's
+        # (`written_at`, no `updated_at`) so a name collision between the two
+        # relations fails `_verify_columns` instead of silently sharing one.
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {self._qualified_versions_table} (
+                seq bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                key text NOT NULL,
+                version_hash text NOT NULL,
+                body bytea NOT NULL,
+                generation bigint,
+                written_at timestamptz NOT NULL DEFAULT now()
+            )
+            """
+        )
+        # Check the layout BEFORE touching the table any further: if another
+        # store's table already owns this name, indexing it would fail with a
+        # confusing driver error instead of a clear refusal.
+        try:
+            self._verify_columns(
+                cur, self._versions_table,
+                {"seq", "key", "version_hash", "body", "generation", "written_at"}, "versions",
+            )
+        except RuntimeError:
+            conn.rollback()
+            raise
+        cur.execute(
+            f'CREATE INDEX IF NOT EXISTS "{self._versions_table}_key_seq" '
+            f"ON {self._qualified_versions_table} (key, seq DESC)"
+        )
+        # Append-only is enforced by the database, not by adapter discipline:
+        # any UPDATE, DELETE or TRUNCATE of history raises. (DROP SCHEMA, used
+        # by test teardown, is not a row operation and is unaffected.)
+        append_only_fn = f'"{self._schema}"."{self._versions_table}_append_only"'
+        cur.execute(
+            f"""
+            CREATE OR REPLACE FUNCTION {append_only_fn}() RETURNS trigger
+            LANGUAGE plpgsql AS $fn$
+            BEGIN
+                RAISE EXCEPTION 'KnoKeep version history is append-only'
+                    USING ERRCODE = '55000';
+            END;
+            $fn$
+            """
+        )
+        cur.execute(
+            f"""
+            DO $do$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_trigger
+                    WHERE tgname = '{self._versions_table}_no_mutate'
+                      AND tgrelid = '{self._qualified_versions_table}'::regclass
+                ) THEN
+                    CREATE TRIGGER "{self._versions_table}_no_mutate"
+                        BEFORE UPDATE OR DELETE ON {self._qualified_versions_table}
+                        FOR EACH ROW EXECUTE FUNCTION {append_only_fn}();
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_trigger
+                    WHERE tgname = '{self._versions_table}_no_truncate'
+                      AND tgrelid = '{self._qualified_versions_table}'::regclass
+                ) THEN
+                    CREATE TRIGGER "{self._versions_table}_no_truncate"
+                        BEFORE TRUNCATE ON {self._qualified_versions_table}
+                        FOR EACH STATEMENT EXECUTE FUNCTION {append_only_fn}();
+                END IF;
+            EXCEPTION WHEN duplicate_object THEN
+                NULL;
+            END
+            $do$
+            """
+        )
         conn.commit()
         # CREATE TABLE IF NOT EXISTS never checks an EXISTING relation's
         # layout: two stores in one schema configured as e.g. `foo` and
@@ -339,12 +438,49 @@ class PostgresBackend:
             {"key", "owner_token", "owner_expiry", "owner_fence", "last_accepted_fence"}, "fence",
         )
         conn.commit()
+        self._baseline_unversioned_keys(conn)
 
         # Contract §8: load-time capability probe against a reserved prefix,
         # cleaned up afterwards. "Wrong mapping or missing native
         # precondition -> REFUSE TO START. No degraded mode."
         if run_probe:
             self._run_capability_probe()
+
+    def _baseline_unversioned_keys(self, conn) -> None:
+        """Contract §10 upgrade step: a store that already held data before
+        history existed has current values with no history row, so the first
+        overwrite would destroy them. Give every such key one baseline entry
+        holding its current value (stamped with its own `updated_at`).
+        Idempotent: keys that already have history are left alone. Briefly
+        blocks writers (SHARE ROW EXCLUSIVE) so a concurrent write can never
+        land a newer version before its baseline."""
+        cur = conn.cursor()
+        probe_len = len(_PROBE_KEY_PREFIX)
+        pending = (
+            f"""
+            FROM {self._qualified_table} s
+            WHERE left(s.key, {probe_len}) <> %s
+              AND NOT EXISTS (
+                  SELECT 1 FROM {self._qualified_versions_table} v WHERE v.key = s.key
+              )
+            """
+        )
+        cur.execute(f"SELECT 1 {pending} LIMIT 1", (_PROBE_KEY_PREFIX,))
+        if cur.fetchone() is None:
+            conn.commit()
+            return
+        cur.execute(f"LOCK TABLE {self._qualified_table} IN SHARE ROW EXCLUSIVE MODE")
+        cur.execute(
+            f"""
+            INSERT INTO {self._qualified_versions_table}
+                (key, version_hash, body, generation, written_at)
+            SELECT s.key, s.version_hash, s.body, s.generation, s.updated_at
+            {pending}
+            ORDER BY s.updated_at, s.key
+            """,
+            (_PROBE_KEY_PREFIX,),
+        )
+        conn.commit()
 
     def _verify_columns(self, cur, table: str, expected: set, what: str) -> None:
         cur.execute(
@@ -483,7 +619,10 @@ class PostgresBackend:
         # H1 Increment 2, Phase 2: this backend now enforces lock()-issued
         # fence ordering on every Overwrite CAS-update (see write() and the
         # companion self._qualified_fence_table).
-        return Caps(atomic=True, cas=True, lock=True, durable=True, remote=True, fence=True)
+        return Caps(
+            atomic=True, cas=True, lock=True, durable=True, remote=True, fence=True,
+            versions=True,
+        )
 
     def health(self) -> BackendHealth:
         try:
@@ -533,6 +672,72 @@ class PostgresBackend:
         rows = cur.fetchall()
         conn.commit()
         return iter(row[0] for row in rows)
+
+    # -- version history (contract §10, optional capability) -----------------
+
+    def _record_version(self, cur, key: str, raw: bytes, version_hash: str,
+                        generation: Optional[int]) -> None:
+        """Append one history row inside the caller's open write transaction,
+        so a version exists if and only if its write committed. The adapter
+        only ever calls this after the write's own precondition succeeded: a
+        STALE, EXISTS or idempotent-replay outcome records nothing. The
+        load-time probe's scratch keys are skipped (they are deleted again)."""
+        if key.startswith(_PROBE_KEY_PREFIX):
+            return
+        cur.execute(
+            f"""
+            INSERT INTO {self._qualified_versions_table}
+                (key, version_hash, body, generation)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (key, version_hash, raw, generation),
+        )
+
+    def versions(self, key: str, *, limit: int = 100,
+                 before_seq: Optional[int] = None) -> List[VersionRecord]:
+        """A key's history, newest first, without bodies. Page with
+        `before_seq` = the last `seq` seen. Read-only."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise ValueError("versions(): limit must be an int in 1..1000")
+        if before_seq is not None and (isinstance(before_seq, bool) or not isinstance(before_seq, int)):
+            raise ValueError("versions(): before_seq must be an int or None")
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            f"""
+            SELECT seq, version_hash, generation,
+                   to_char(written_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+                   octet_length(body)
+            FROM {self._qualified_versions_table}
+            WHERE key = %s AND (%s::bigint IS NULL OR seq < %s::bigint)
+            ORDER BY seq DESC
+            LIMIT %s
+            """,
+            (key, before_seq, before_seq, limit),
+        )
+        rows = cur.fetchall()
+        conn.commit()
+        return [VersionRecord(seq=r[0], version_hash=r[1], generation=r[2],
+                              written_at=r[3], size=r[4]) for r in rows]
+
+    def read_version(self, key: str, seq: int) -> Optional[Blob]:
+        """The exact bytes of one historical version, or None if there is no
+        such `(key, seq)`. Bytes are verbatim and were gate-scanned when
+        written; callers treat them as data, never as instructions."""
+        if isinstance(seq, bool) or not isinstance(seq, int):
+            raise ValueError("read_version(): seq must be an int")
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT body, version_hash FROM {self._qualified_versions_table} "
+            "WHERE key = %s AND seq = %s",
+            (key, seq),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        if row is None:
+            return None
+        return Blob(body=bytes(row[0]), version_hash=row[1])
 
     def write(
         self,
@@ -599,6 +804,8 @@ class PostgresBackend:
                         """,
                         (k,),
                     )
+                    # Contract §10: the version row commits with the write.
+                    self._record_version(cur, k, raw, new_hash, new_generation)
                     conn.commit()
                     return OK(new_hash)
 
@@ -717,6 +924,8 @@ class PostgresBackend:
                 f"UPDATE {self._qualified_fence_table} SET last_accepted_fence = %s WHERE key = %s",
                 (precondition_lease.fence, k),
             )
+            # Contract §10: the version row commits with the write.
+            self._record_version(cur, k, raw, new_hash, new_generation)
             conn.commit()
             return OK(new_hash)
 

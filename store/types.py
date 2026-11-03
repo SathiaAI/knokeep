@@ -49,6 +49,22 @@ class Caps:
     # backends (git/objectstore/postgres) keep accepting `ctx` unchanged and
     # report False until a later phase adds their enforcement.
     fence: bool = False
+    # Contract §10 (optional): does this backend keep every committed write as
+    # an immutable, readable version? Only the postgres adapter reports True.
+    versions: bool = False
+
+
+@dataclass(frozen=True)
+class VersionRecord:
+    """One immutable entry of a key's history (contract §10). `seq` orders a
+    key's versions and identifies one uniquely, even when the same content
+    (same `version_hash`) was written more than once (A -> B -> A)."""
+
+    seq: int
+    version_hash: str
+    generation: Optional[int]
+    written_at: str  # ISO-8601 UTC
+    size: int
 
 
 @dataclass(frozen=True)
@@ -144,6 +160,7 @@ def commit_class(result: WriteResult) -> str:
 __all__ = [
     "Blob",
     "Caps",
+    "VersionRecord",
     "BackendHealth",
     "ErrorKind",
     "OK",

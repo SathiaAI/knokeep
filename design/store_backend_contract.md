@@ -1,4 +1,4 @@
-# StoreBackend — Contract v1.4 (the socket)
+# StoreBackend — Contract v1.5 (the socket)
 
 The single interface every KnoKeep storage backend implements. Above this line (flush engine, secret gate, reconciler, MCP, shims) nothing changes when the backend changes. Load-bearing property: **a write that would clobber a concurrent writer FAILS rather than overwrites.** Windows is the **primary host** and normative for the local adapter.
 
@@ -86,3 +86,13 @@ On load, against reserved prefix `.knokeep/probe/` (cleaned up): create-only →
 
 ## 9. Conformance suite — mandatory for ALL four adapters before merge
 CAS-reject (incl. races) · atomicity + crash leaves nothing torn/unscanned at the key · **journal-replay durability** · secret scan incl. side paths · no-egress · lock TTL+token · uncertain-outcome reconcile (committed-then-superseded → CONFLICT_UNKNOWN, never false STALE) · **Windows two-process on NTFS** · migration.
+
+## 10. Version history (optional capability; added in v1.5)
+Advertised as `Caps.versions`. Only the postgres adapter implements it today; the other adapters report `versions=False` and are unchanged. It exists so a derived layer (conclusions, fuzzy index) can be added **on top of** exact memory without ever being able to destroy it.
+- **Every committed write is kept.** In postgres, one history row per successful create-only or CAS-update, inserted **in the same transaction** as the write: a version exists if and only if its write committed. STALE, EXISTS, generation-regression rejections and idempotent create replays record nothing. The §8 probe's scratch keys are never recorded.
+- **Immutable, enforced by the database.** `UPDATE`, `DELETE` and `TRUNCATE` on the history table raise (SQLSTATE `55000`). Adapter code does not rely on discipline. Removing history is a deliberate owner operation outside this contract.
+- **Identity.** Each entry has a monotonic `seq`. The same content written twice (A → B → A) is three entries; `version_hash` is not unique.
+- **Reads.** `versions(key, limit<=1000, before_seq)` returns metadata newest-first, no bodies. `read_version(key, seq)` returns the exact bytes, scoped to the key (a `seq` from another key returns `None`). Bodies were gate-scanned when written; callers treat them as data, never instructions.
+- **Restore is not a new door.** To restore, read the old bytes and write them with `gate.persist(..., expected_hash=<current>)`. The gate, CAS and fence rules apply unchanged, and the restore itself becomes a new version.
+- **No pruning in this version.** History grows with writes; retention policy is a later, owner-only decision.
+- **Upgrade baseline.** When the adapter starts on a store that already holds keys without history, it gives each such key one baseline entry holding its current value (stamped with that row's own `updated_at`), so the first overwrite cannot destroy pre-history data. Idempotent; probe keys are skipped; writers are blocked only for that one-time insert.

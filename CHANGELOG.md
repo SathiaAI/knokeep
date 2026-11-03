@@ -4,6 +4,16 @@ All notable changes to KnoKeep are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Version history for the postgres backend** (contract v1.5 §10, optional
+  capability `Caps.versions`). Every committed write is kept as an immutable,
+  readable version, written in the same transaction as the write itself.
+  `PostgresBackend.versions()` lists a key's history; `read_version()` returns
+  the exact bytes. History is append-only, enforced by database triggers.
+  Restoring an old version is an ordinary gated write.
+
 ## [0.1.0] — first public release
 
 The "one engine" release. KnoKeep now has a single memory engine end to end:

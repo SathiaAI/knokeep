@@ -45,6 +45,19 @@ All notable changes to KnoKeep are recorded here. Format loosely follows
   inject it), never logged, never in an error or `repr()`. Calibrated live on
   37 labelled cases (`docs/JEV-JUDGE-EVAL.md`): 0 false accepts, 21 of 21
   unsupported rejected including 3 prompt-injection attempts.
+- **Conclusion generator and end-to-end runner** (`conclusions/generator.py`,
+  `conclusions/runner.py`). The generator proposes candidate conclusions from
+  exact entries through OpenRouter; the model, its family and its price are
+  settings. Every call is reserved against a hard dollar budget BEFORE it is
+  sent (pessimistic worst case, then settled from real usage; an unknown
+  outcome is charged in full). Requests deny data collection and can pin
+  hosting providers; entry text is wrapped in a per-request random boundary;
+  reasoning is off by default (a reasoning model can spend its whole allowance
+  and return nothing). Its output is untrusted. The runner reads exact
+  entries, proposes, verifies and promotes, skips duplicates on re-run, and
+  stops with a reason when the budget is spent or the judge keeps failing.
+  `store.list_records()` added. Model choice and two live end-to-end runs:
+  `docs/GENERATOR-BAKEOFF.md`.
 
 ## [0.1.0] — first public release
 

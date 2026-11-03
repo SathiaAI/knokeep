@@ -172,6 +172,7 @@ from .types import (
     EXISTS,
     ERROR,
     ErrorKind,
+    FuzzyHit,
     OK,
     STALE,
     VersionRecord,
@@ -256,6 +257,33 @@ def _versions_table_name(table: str) -> str:
     return _validate_identifier(f"{table[:keep]}_{digest}{_VERSIONS_TABLE_SUFFIX}", "versions table")
 
 
+_FUZZY_TABLE_SUFFIX = "_fuzzy"
+
+# Contract §11. Text longer than this is indexed only up to this many
+# characters (a tsvector is capped near 1 MB, and an over-long value would
+# otherwise fail). The exact entry is always stored whole; only search sees
+# the cut.
+_FUZZY_MAX_CHARS = 200_000
+_FUZZY_CONFIG = "english"
+
+
+def _fuzzy_table_name(table: str) -> str:
+    """The companion fuzzy-index table's identifier (same derivation and
+    63-char handling as the fence and versions tables)."""
+    candidate = f"{table}{_FUZZY_TABLE_SUFFIX}"
+    if len(candidate) <= _PG_IDENTIFIER_MAX:
+        return candidate
+    digest = hashlib.sha256(table.encode("utf-8")).hexdigest()[:8]
+    keep = _PG_IDENTIFIER_MAX - len(_FUZZY_TABLE_SUFFIX) - 1 - len(digest)
+    return _validate_identifier(f"{table[:keep]}_{digest}{_FUZZY_TABLE_SUFFIX}", "fuzzy table")
+
+
+def _fuzzy_text(raw: bytes) -> str:
+    """The text an entry is indexed under: lossy UTF-8, no NUL (Postgres text
+    cannot hold one), cut to `_FUZZY_MAX_CHARS`."""
+    return raw.decode("utf-8", errors="replace").replace("\x00", " ")[:_FUZZY_MAX_CHARS]
+
+
 # Postgres SQLSTATEs that mean "couldn't get the row lock / ran past our own
 # timeout" — definitely-not-committed, never an outcome-unknown kind
 # (JUDGMENT CALL 3).
@@ -309,6 +337,9 @@ class PostgresBackend:
         # companion table written in the SAME transaction as the write itself.
         self._versions_table = _versions_table_name(self._table)
         self._qualified_versions_table = f'"{self._schema}"."{self._versions_table}"'
+        # Contract §11: a rebuildable full-text index over the CURRENT entries.
+        self._fuzzy_table = _fuzzy_table_name(self._table)
+        self._qualified_fuzzy_table = f'"{self._schema}"."{self._fuzzy_table}"'
 
         self._local = threading.local()
         self._conn_registry_lock = threading.Lock()
@@ -422,6 +453,31 @@ class PostgresBackend:
             $do$
             """
         )
+        # Contract §11: derived full-text index. Columns differ from the
+        # store, fence and versions tables so a name collision fails the
+        # layout check below rather than silently sharing a relation.
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {self._qualified_fuzzy_table} (
+                key text PRIMARY KEY,
+                version_hash text NOT NULL,
+                tsv tsvector NOT NULL,
+                indexed_at timestamptz NOT NULL DEFAULT now()
+            )
+            """
+        )
+        try:
+            self._verify_columns(
+                cur, self._fuzzy_table,
+                {"key", "version_hash", "tsv", "indexed_at"}, "fuzzy",
+            )
+        except RuntimeError:
+            conn.rollback()
+            raise
+        cur.execute(
+            f'CREATE INDEX IF NOT EXISTS "{self._fuzzy_table}_tsv" '
+            f"ON {self._qualified_fuzzy_table} USING GIN (tsv)"
+        )
         conn.commit()
         # CREATE TABLE IF NOT EXISTS never checks an EXISTING relation's
         # layout: two stores in one schema configured as e.g. `foo` and
@@ -439,6 +495,7 @@ class PostgresBackend:
         )
         conn.commit()
         self._baseline_unversioned_keys(conn)
+        self.reindex_fuzzy()
 
         # Contract §8: load-time capability probe against a reserved prefix,
         # cleaned up afterwards. "Wrong mapping or missing native
@@ -621,7 +678,7 @@ class PostgresBackend:
         # companion self._qualified_fence_table).
         return Caps(
             atomic=True, cas=True, lock=True, durable=True, remote=True, fence=True,
-            versions=True,
+            versions=True, fuzzy=True,
         )
 
     def health(self) -> BackendHealth:
@@ -739,6 +796,115 @@ class PostgresBackend:
             return None
         return Blob(body=bytes(row[0]), version_hash=row[1])
 
+    # -- fuzzy search (contract §11, optional capability) ---------------------
+
+    _FUZZY_SAVEPOINT = "knokeep_fuzzy"
+
+    def _index_fuzzy(self, cur, key: str, raw: bytes, version_hash: str) -> bool:
+        """(Re)index one entry inside the caller's open transaction. A derived
+        index must never block or damage exact memory, so a failure here is
+        rolled back to a savepoint and the exact write proceeds; the entry is
+        simply unindexed until `reindex_fuzzy()`. Returns whether it indexed."""
+        if key.startswith(_PROBE_KEY_PREFIX):
+            return True
+        cur.execute(f"SAVEPOINT {self._FUZZY_SAVEPOINT}")
+        try:
+            cur.execute(
+                f"""
+                INSERT INTO {self._qualified_fuzzy_table} (key, version_hash, tsv)
+                VALUES (%s, %s,
+                        setweight(to_tsvector('{_FUZZY_CONFIG}', %s), 'A')
+                        || to_tsvector('{_FUZZY_CONFIG}', %s))
+                ON CONFLICT (key) DO UPDATE
+                    SET version_hash = EXCLUDED.version_hash,
+                        tsv = EXCLUDED.tsv,
+                        indexed_at = now()
+                """,
+                (key, version_hash, key, _fuzzy_text(raw)),
+            )
+        except pg8000.exceptions.DatabaseError:
+            cur.execute(f"ROLLBACK TO SAVEPOINT {self._FUZZY_SAVEPOINT}")
+            return False
+        cur.execute(f"RELEASE SAVEPOINT {self._FUZZY_SAVEPOINT}")
+        return True
+
+    def reindex_fuzzy(self) -> int:
+        """Bring the index in line with the exact entries: index every entry
+        that is missing from it or was indexed at a different version. Safe to
+        run any time; it only ever writes the derived table, and each entry is
+        indexed while its exact row is share-locked so a concurrent write can
+        never be followed by an older index row. Returns how many it indexed."""
+        conn = self._get_conn()
+        cur = conn.cursor()
+        indexed = 0
+        last_key = ""
+        while True:
+            cur.execute(
+                f"""
+                SELECT s.key, s.version_hash
+                FROM {self._qualified_table} s
+                LEFT JOIN {self._qualified_fuzzy_table} f ON f.key = s.key
+                WHERE s.key > %s
+                  AND left(s.key, {len(_PROBE_KEY_PREFIX)}) <> %s
+                  AND (f.key IS NULL OR f.version_hash <> s.version_hash)
+                ORDER BY s.key
+                LIMIT 200
+                """,
+                (last_key, _PROBE_KEY_PREFIX),
+            )
+            batch = cur.fetchall()
+            conn.commit()
+            if not batch:
+                return indexed
+            for key, version_hash in batch:
+                last_key = key
+                cur.execute(
+                    f"SELECT body FROM {self._qualified_table} "
+                    "WHERE key = %s AND version_hash = %s FOR SHARE",
+                    (key, version_hash),
+                )
+                row = cur.fetchone()
+                if row is not None and self._index_fuzzy(cur, key, bytes(row[0]), version_hash):
+                    indexed += 1
+                conn.commit()
+
+    def search(self, space: str, query: str, *, limit: int = 20) -> List[FuzzyHit]:
+        """Full-text search over the CURRENT entries of ONE space, best match
+        first. Returns pointers (key + the exact version matched), never text:
+        read the entry with `read(key)`.
+
+        `space` is a key prefix and must end with "/" (for example
+        "my-project/"), so a search can never cross spaces. `query` is plain
+        words in web-search syntax (quotes, `-word`, `or`); it is parsed by
+        Postgres's `websearch_to_tsquery`, which never raises on user input.
+        Hits whose index entry is stale are left out, never returned wrong."""
+        if not isinstance(space, str) or not space.endswith("/") or space == "/" or "\x00" in space:
+            raise ValueError('search(): space must be a non-empty key prefix ending in "/"')
+        if not isinstance(query, str) or len(query) > 1000 or "\x00" in query:
+            raise ValueError("search(): query must be a string of at most 1000 characters")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError("search(): limit must be an int in 1..100")
+        if not query.strip():
+            return []
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            f"""
+            SELECT s.key, s.version_hash, ts_rank_cd(f.tsv, q.query) AS rank
+            FROM {self._qualified_fuzzy_table} f
+            JOIN {self._qualified_table} s
+              ON s.key = f.key AND s.version_hash = f.version_hash
+            CROSS JOIN (SELECT websearch_to_tsquery('{_FUZZY_CONFIG}', %s) AS query) q
+            WHERE left(f.key, %s) = %s AND f.tsv @@ q.query
+            ORDER BY rank DESC, f.key ASC
+            LIMIT %s
+            """,
+            (query, len(space), space, limit),
+        )
+        rows = cur.fetchall()
+        conn.commit()
+        return [FuzzyHit(key=r[0], version_hash=r[1], rank=float(r[2])) for r in rows]
+
     def write(
         self,
         key: ScannedKey,
@@ -806,6 +972,7 @@ class PostgresBackend:
                     )
                     # Contract §10: the version row commits with the write.
                     self._record_version(cur, k, raw, new_hash, new_generation)
+                    self._index_fuzzy(cur, k, raw, new_hash)  # §11, never fails the write
                     conn.commit()
                     return OK(new_hash)
 
@@ -926,6 +1093,7 @@ class PostgresBackend:
             )
             # Contract §10: the version row commits with the write.
             self._record_version(cur, k, raw, new_hash, new_generation)
+            self._index_fuzzy(cur, k, raw, new_hash)  # §11, never fails the write
             conn.commit()
             return OK(new_hash)
 

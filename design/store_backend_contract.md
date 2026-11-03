@@ -1,4 +1,4 @@
-# StoreBackend — Contract v1.5 (the socket)
+# StoreBackend — Contract v1.6 (the socket)
 
 The single interface every KnoKeep storage backend implements. Above this line (flush engine, secret gate, reconciler, MCP, shims) nothing changes when the backend changes. Load-bearing property: **a write that would clobber a concurrent writer FAILS rather than overwrites.** Windows is the **primary host** and normative for the local adapter.
 
@@ -96,3 +96,14 @@ Advertised as `Caps.versions`. Only the postgres adapter implements it today; th
 - **Restore is not a new door.** To restore, read the old bytes and write them with `gate.persist(..., expected_hash=<current>)`. The gate, CAS and fence rules apply unchanged, and the restore itself becomes a new version.
 - **No pruning in this version.** History grows with writes; retention policy is a later, owner-only decision.
 - **Upgrade baseline.** When the adapter starts on a store that already holds keys without history, it gives each such key one baseline entry holding its current value (stamped with that row's own `updated_at`), so the first overwrite cannot destroy pre-history data. Idempotent; probe keys are skipped; writers are blocked only for that one-time insert.
+
+## 11. Fuzzy search (optional capability; added in v1.6)
+Advertised as `Caps.fuzzy`. Only the postgres adapter implements it today. It is a **derived, additive layer**: it can find exact entries, it can never replace, edit or delete one.
+- **Pointers, not copies.** `search(space, query, limit)` returns `FuzzyHit(key, version_hash, rank)`. The caller reads the entry with `read(key)`. No text is returned, so nothing new is stored as truth.
+- **One space per search.** `space` is a key prefix that must end in `/` (for example `my-project/`); anything else raises `ValueError`. A search can never cross spaces.
+- **Rebuildable.** The index is a companion table (`tsvector`, GIN) holding no data that the exact entries do not. `reindex_fuzzy()` rebuilds any missing or out-of-date entry and is safe to run at any time; it also runs at start for entries that predate the index.
+- **Same-transaction upkeep, never blocking.** Each successful write also updates the index inside the write's transaction, behind a savepoint: if indexing fails, the exact write still commits and the entry is simply unindexed until `reindex_fuzzy()`.
+- **Never wrong.** Each hit is joined to the exact row at the indexed `version_hash`. A stale index entry is left out of results, never returned as a match for text that is no longer there.
+- **Safe queries.** Plain words in web-search syntax, parsed by `websearch_to_tsquery`, which does not raise on hostile input. Query length is capped at 1000 characters; `limit` is 1..100.
+- **Indexing limit.** Entries longer than 200,000 characters are stored whole but indexed only up to that point.
+- **No embeddings in v1.** English stemming and ranking only.

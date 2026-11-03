@@ -1030,3 +1030,202 @@ def test_existing_data_gets_a_baseline_so_the_first_overwrite_cannot_destroy_it(
         ]
     finally:
         restarted.close_all()
+
+
+# ---------------------------------------------------------------------------
+# Fuzzy search (contract §11): a rebuildable full-text index over the CURRENT
+# exact entries. It returns pointers, stays inside one space, and can never
+# block or damage an exact write.
+# ---------------------------------------------------------------------------
+
+
+def _fuzzy_count(backend):
+    conn = backend._get_conn()
+    cur = conn.cursor()
+    cur.execute(f"SELECT count(*) FROM {backend._qualified_fuzzy_table}")
+    (n,) = cur.fetchone()
+    conn.commit()
+    return n
+
+
+def test_fuzzy_capability_is_reported(backend):
+    assert backend.capabilities().fuzzy is True
+
+
+def test_search_returns_pointers_to_the_current_exact_version(backend):
+    r = _put(backend, "proj/notes.md", b"We chose Postgres for the login service")
+    _put(backend, "proj/other.md", b"Deploys run on Fridays")
+
+    hits = backend.search("proj/", "postgres login")
+    assert [h.key for h in hits] == ["proj/notes.md"]
+    assert hits[0].version_hash == r.new_hash
+    assert hits[0].rank > 0
+    assert backend.read(hits[0].key).version_hash == hits[0].version_hash
+
+
+def test_search_ranks_the_better_match_first_and_is_deterministic(backend):
+    _put(backend, "proj/a.md", b"database " + b"filler " * 50)
+    _put(backend, "proj/b.md", b"database database database migration plan")
+    first = backend.search("proj/", "database migration")
+    assert [h.key for h in first] == ["proj/b.md", "proj/a.md"][: len(first)]
+    assert first[0].key == "proj/b.md"
+    assert backend.search("proj/", "database migration") == first
+
+
+def test_an_update_replaces_what_the_index_knows_in_the_same_transaction(backend):
+    r1 = _put(backend, "proj/doc.md", b"original zebra content")
+    assert [h.key for h in backend.search("proj/", "zebra")] == ["proj/doc.md"]
+
+    r2 = _put(backend, "proj/doc.md", b"rewritten giraffe content", r1.new_hash)
+    assert backend.search("proj/", "zebra") == []
+    hits = backend.search("proj/", "giraffe")
+    assert [h.version_hash for h in hits] == [r2.new_hash]
+
+
+def test_search_never_crosses_spaces(backend):
+    _put(backend, "alpha/x.md", b"shared-term unique-alpha")
+    _put(backend, "beta/x.md", b"shared-term unique-beta")
+    assert [h.key for h in backend.search("alpha/", "shared-term")] == ["alpha/x.md"]
+    assert [h.key for h in backend.search("beta/", "shared-term")] == ["beta/x.md"]
+    assert backend.search("alpha/", "unique-beta") == []
+
+    for bad_space in ("", "/", "alpha", "alp", None, 5, "alpha/\x00"):
+        with pytest.raises(ValueError):
+            backend.search(bad_space, "shared-term")
+
+
+def test_search_arguments_are_validated_and_hostile_queries_are_safe(backend):
+    _put(backend, "proj/x.md", b"plain text about invoices")
+    for bad_limit in (0, 101, -1, True, "5"):
+        with pytest.raises(ValueError):
+            backend.search("proj/", "invoices", limit=bad_limit)
+    with pytest.raises(ValueError):
+        backend.search("proj/", "x" * 1001)
+    with pytest.raises(ValueError):
+        backend.search("proj/", 7)
+
+    assert backend.search("proj/", "") == []
+    assert backend.search("proj/", "   ") == []
+    for hostile in ("'; DROP TABLE store; --", "a & | ! ( ) <-> :*", '"unterminated', "-", "OR OR"):
+        backend.search("proj/", hostile)  # must not raise
+    assert backend.read("proj/x.md").body == b"plain text about invoices"
+
+
+def test_a_stale_index_entry_is_never_returned_and_reindex_repairs_it(backend):
+    r = _put(backend, "proj/doc.md", b"old walrus text")
+    new_body = b"new penguin text"
+    new_hash = hashlib.sha256(new_body).hexdigest()
+    conn = backend._get_conn()
+    cur = conn.cursor()
+    # Change the exact row behind the index's back (simulates a missed update).
+    cur.execute(
+        f"UPDATE {backend._qualified_table} SET body = %s, version_hash = %s WHERE key = %s",
+        (new_body, new_hash, "proj/doc.md"),
+    )
+    conn.commit()
+
+    assert backend.search("proj/", "walrus") == []  # stale entry is excluded, not wrong
+    assert backend.search("proj/", "penguin") == []  # not indexed yet
+    assert backend.reindex_fuzzy() == 1
+    assert [h.version_hash for h in backend.search("proj/", "penguin")] == [new_hash]
+    assert backend.search("proj/", "walrus") == []
+    assert backend.reindex_fuzzy() == 0  # nothing left to do
+    assert r.new_hash != new_hash
+
+
+def test_an_index_failure_never_blocks_or_damages_the_exact_write(backend):
+    good = backend._qualified_fuzzy_table
+    backend._qualified_fuzzy_table = f'"{backend._schema}"."no_such_table"'
+    try:
+        r1 = _put(backend, "proj/doc.md", b"exact memory survives index failure")
+        assert isinstance(r1, OK)
+        # The connection is still healthy and later exact writes still work.
+        r2 = _put(backend, "proj/doc.md", b"second exact write", r1.new_hash)
+        assert isinstance(r2, OK)
+    finally:
+        backend._qualified_fuzzy_table = good
+
+    assert backend.read("proj/doc.md").body == b"second exact write"
+    assert len(backend.versions("proj/doc.md")) == 2  # history unaffected
+    assert backend.search("proj/", "exact") == []  # simply unindexed for now
+    assert backend.reindex_fuzzy() == 1
+    assert [h.key for h in backend.search("proj/", "second")] == ["proj/doc.md"]
+
+
+def test_probe_keys_and_rejected_writes_are_not_indexed(backend):
+    assert _fuzzy_count(backend) == 0  # the load-time probe left nothing
+    _put(backend, "proj/doc.md", b"kept text")
+    assert _fuzzy_count(backend) == 1
+    assert isinstance(_put(backend, "proj/doc.md", b"other text"), EXISTS)
+    assert isinstance(_put(backend, "proj/doc.md", b"x", "0" * 64), STALE)
+    assert _fuzzy_count(backend) == 1
+    assert backend.search("proj/", "other") == []
+
+
+def test_very_long_entries_are_stored_whole_but_indexed_only_to_the_cap(backend):
+    from store.postgres import _FUZZY_MAX_CHARS
+
+    body = b"startmarker " + b"alpha " * 40_000 + b" endmarker"
+    assert len(body) > _FUZZY_MAX_CHARS
+    r = _put(backend, "proj/big.md", body)
+    assert isinstance(r, OK)
+    assert backend.read("proj/big.md").body == body  # exact entry is whole
+    assert [h.key for h in backend.search("proj/", "startmarker")] == ["proj/big.md"]
+    assert backend.search("proj/", "endmarker") == []  # beyond the indexed cut
+
+
+def test_entries_that_predate_the_index_are_indexed_on_start(backend):
+    conn = backend._get_conn()
+    cur = conn.cursor()
+    legacy = b"written before the fuzzy index existed"
+    cur.execute(
+        f"INSERT INTO {backend._qualified_table} (key, body, version_hash) VALUES (%s, %s, %s)",
+        ("proj/legacy.md", legacy, hashlib.sha256(legacy).hexdigest()),
+    )
+    conn.commit()
+    assert backend.search("proj/", "fuzzy") == []
+
+    restarted = PostgresBackend(dict(_PG_CONNECT_KWARGS), schema=backend._schema)
+    try:
+        assert [h.key for h in restarted.search("proj/", "fuzzy")] == ["proj/legacy.md"]
+    finally:
+        restarted.close_all()
+
+
+def test_fuzzy_table_name_never_narrows_the_accepted_table_name_range():
+    from store.postgres import _fuzzy_table_name
+
+    assert _fuzzy_table_name("store") == "store_fuzzy"
+    long_a, long_b = "t" * 63, "t" * 62 + "u"
+    fa, fb = _fuzzy_table_name(long_a), _fuzzy_table_name(long_b)
+    assert len(fa) <= 63 and len(fb) <= 63
+    assert fa.endswith("_fuzzy") and fb.endswith("_fuzzy")
+    assert fa != fb and _fuzzy_table_name(long_a) == fa
+
+    schema = "knokeep_longfz_" + uuid.uuid4().hex[:20]
+    b = PostgresBackend(dict(_PG_CONNECT_KWARGS), schema=schema, table=long_a)
+    try:
+        assert isinstance(_put(b, "p/k", b"findable"), OK)
+        assert [h.key for h in b.search("p/", "findable")] == ["p/k"]
+    finally:
+        b._conformance_teardown()
+
+
+def test_refuses_to_start_when_fuzzy_table_name_collides_with_another_store():
+    schema = "knokeep_fcollide_" + uuid.uuid4().hex[:20]
+    first = PostgresBackend(dict(_PG_CONNECT_KWARGS), schema=schema, table="foo")
+    try:
+        with pytest.raises(RuntimeError, match="REFUSING TO START"):
+            PostgresBackend(dict(_PG_CONNECT_KWARGS), schema=schema, table="foo_fuzzy")
+        assert isinstance(_put(first, "p/k", b"still works"), OK)
+        assert [h.key for h in first.search("p/", "works")] == ["p/k"]
+    finally:
+        first._conformance_teardown()
+
+    schema2 = "knokeep_fcollide2_" + uuid.uuid4().hex[:20]
+    other = PostgresBackend(dict(_PG_CONNECT_KWARGS), schema=schema2, table="foo_fuzzy")
+    try:
+        with pytest.raises(RuntimeError, match="REFUSING TO START"):
+            PostgresBackend(dict(_PG_CONNECT_KWARGS), schema=schema2, table="foo")
+    finally:
+        other._conformance_teardown()

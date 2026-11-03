@@ -52,6 +52,20 @@ class Caps:
     # Contract §10 (optional): does this backend keep every committed write as
     # an immutable, readable version? Only the postgres adapter reports True.
     versions: bool = False
+    # Contract §11 (optional): can this backend search the text of its current
+    # entries? Pointers only; the answer is never a source of truth.
+    fuzzy: bool = False
+
+
+@dataclass(frozen=True)
+class FuzzyHit:
+    """One fuzzy-search result (contract §11): a POINTER to an exact entry,
+    never a copy of its text. Read the entry itself with `read(key)`;
+    `version_hash` is the exact version the match was computed against."""
+
+    key: str
+    version_hash: str
+    rank: float
 
 
 @dataclass(frozen=True)
@@ -161,6 +175,7 @@ __all__ = [
     "Blob",
     "Caps",
     "VersionRecord",
+    "FuzzyHit",
     "BackendHealth",
     "ErrorKind",
     "OK",

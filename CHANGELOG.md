@@ -13,6 +13,12 @@ All notable changes to KnoKeep are recorded here. Format loosely follows
   `PostgresBackend.versions()` lists a key's history; `read_version()` returns
   the exact bytes. History is append-only, enforced by database triggers.
   Restoring an old version is an ordinary gated write.
+- **Fuzzy search for the postgres backend** (contract v1.6 §11, optional
+  capability `Caps.fuzzy`). `PostgresBackend.search(space, query)` finds
+  entries by full-text match inside one space and returns pointers (key plus
+  the exact version), never text. The index is derived and rebuildable
+  (`reindex_fuzzy()`), updated in the same transaction as each write without
+  ever blocking it, and a stale entry is never returned. No embeddings.
 
 ## [0.1.0] — first public release
 

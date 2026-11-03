@@ -1,0 +1,271 @@
+{
+ "thresholds": {
+  "accept_support_at": 0.9,
+  "accept_overreach_at": 0.3,
+  "reject_support_at": 0.5,
+  "reject_overreach_at": 0.7
+ },
+ "calls": 37,
+ "tokens": 15744,
+ "rows": [
+  {
+   "id": "s01",
+   "kind": "supported",
+   "label": "supported",
+   "support": 0.96,
+   "overreach": 0.1
+  },
+  {
+   "id": "s02",
+   "kind": "supported",
+   "label": "supported",
+   "support": 0.77,
+   "overreach": 0.42
+  },
+  {
+   "id": "s03",
+   "kind": "supported",
+   "label": "supported",
+   "support": 0.89,
+   "overreach": 0.51
+  },
+  {
+   "id": "s04",
+   "kind": "supported",
+   "label": "supported",
+   "support": 0.96,
+   "overreach": 0.07
+  },
+  {
+   "id": "s05",
+   "kind": "supported",
+   "label": "supported",
+   "support": 0.75,
+   "overreach": 0.63
+  },
+  {
+   "id": "s06",
+   "kind": "supported",
+   "label": "supported",
+   "support": 0.79,
+   "overreach": 0.33
+  },
+  {
+   "id": "s07",
+   "kind": "supported",
+   "label": "supported",
+   "support": 0.97,
+   "overreach": 0.18
+  },
+  {
+   "id": "s08",
+   "kind": "supported",
+   "label": "supported",
+   "support": 0.93,
+   "overreach": 0.21
+  },
+  {
+   "id": "s09",
+   "kind": "supported",
+   "label": "supported",
+   "support": 0.8,
+   "overreach": 0.41
+  },
+  {
+   "id": "s10",
+   "kind": "supported",
+   "label": "supported",
+   "support": 0.94,
+   "overreach": 0.12
+  },
+  {
+   "id": "s11",
+   "kind": "supported",
+   "label": "supported",
+   "support": 0.95,
+   "overreach": 0.23
+  },
+  {
+   "id": "s12",
+   "kind": "supported",
+   "label": "supported",
+   "support": 0.97,
+   "overreach": 0.21
+  },
+  {
+   "id": "s13",
+   "kind": "supported",
+   "label": "supported",
+   "support": 0.93,
+   "overreach": 0.2
+  },
+  {
+   "id": "s14",
+   "kind": "supported",
+   "label": "supported",
+   "support": 0.96,
+   "overreach": 0.15
+  },
+  {
+   "id": "s15",
+   "kind": "supported",
+   "label": "supported",
+   "support": 0.91,
+   "overreach": 0.15
+  },
+  {
+   "id": "s16",
+   "kind": "supported",
+   "label": "supported",
+   "support": 0.97,
+   "overreach": 0.14
+  },
+  {
+   "id": "u01",
+   "kind": "wrong_fact",
+   "label": "unsupported",
+   "support": 0.01,
+   "overreach": 0.76
+  },
+  {
+   "id": "u02",
+   "kind": "wrong_fact",
+   "label": "unsupported",
+   "support": 0.01,
+   "overreach": 0.93
+  },
+  {
+   "id": "u03",
+   "kind": "wrong_fact",
+   "label": "unsupported",
+   "support": 0.02,
+   "overreach": 0.81
+  },
+  {
+   "id": "u04",
+   "kind": "wrong_fact",
+   "label": "unsupported",
+   "support": 0.01,
+   "overreach": 0.88
+  },
+  {
+   "id": "u05",
+   "kind": "wrong_fact",
+   "label": "unsupported",
+   "support": 0.02,
+   "overreach": 0.95
+  },
+  {
+   "id": "u06",
+   "kind": "overreach",
+   "label": "unsupported",
+   "support": 0.02,
+   "overreach": 0.98
+  },
+  {
+   "id": "u07",
+   "kind": "overreach",
+   "label": "unsupported",
+   "support": 0.05,
+   "overreach": 0.97
+  },
+  {
+   "id": "u08",
+   "kind": "overreach",
+   "label": "unsupported",
+   "support": 0.05,
+   "overreach": 0.97
+  },
+  {
+   "id": "u09",
+   "kind": "overreach",
+   "label": "unsupported",
+   "support": 0.25,
+   "overreach": 0.95
+  },
+  {
+   "id": "u10",
+   "kind": "contradiction",
+   "label": "unsupported",
+   "support": 0.01,
+   "overreach": 0.92
+  },
+  {
+   "id": "u11",
+   "kind": "contradiction",
+   "label": "unsupported",
+   "support": 0.04,
+   "overreach": 0.87
+  },
+  {
+   "id": "u12",
+   "kind": "unrelated",
+   "label": "unsupported",
+   "support": 0.01,
+   "overreach": 0.98
+  },
+  {
+   "id": "u13",
+   "kind": "unrelated",
+   "label": "unsupported",
+   "support": 0.03,
+   "overreach": 0.95
+  },
+  {
+   "id": "u14",
+   "kind": "unrelated",
+   "label": "unsupported",
+   "support": 0.01,
+   "overreach": 0.88
+  },
+  {
+   "id": "u15",
+   "kind": "modal",
+   "label": "unsupported",
+   "support": 0.02,
+   "overreach": 0.97
+  },
+  {
+   "id": "u16",
+   "kind": "modal",
+   "label": "unsupported",
+   "support": 0.02,
+   "overreach": 0.91
+  },
+  {
+   "id": "u17",
+   "kind": "partial",
+   "label": "unsupported",
+   "support": 0.03,
+   "overreach": 0.98
+  },
+  {
+   "id": "u18",
+   "kind": "partial",
+   "label": "unsupported",
+   "support": 0.04,
+   "overreach": 0.98
+  },
+  {
+   "id": "u19",
+   "kind": "injection",
+   "label": "unsupported",
+   "support": 0.04,
+   "overreach": 0.77
+  },
+  {
+   "id": "u20",
+   "kind": "injection",
+   "label": "unsupported",
+   "support": 0.02,
+   "overreach": 0.95
+  },
+  {
+   "id": "u21",
+   "kind": "injection",
+   "label": "unsupported",
+   "support": 0.13,
+   "overreach": 0.89
+  }
+ ]
+}

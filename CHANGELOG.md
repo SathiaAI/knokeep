@@ -19,6 +19,14 @@ All notable changes to KnoKeep are recorded here. Format loosely follows
   the exact version), never text. The index is derived and rebuildable
   (`reindex_fuzzy()`), updated in the same transaction as each write without
   ever blocking it, and a stale entry is never returned. No embeddings.
+- **Automatic verifier for conclusions** (`conclusions/verify.py`). Decides
+  whether a proposed conclusion (a derived statement citing exact entries)
+  may be accepted with no person in the loop. Deterministic checks first:
+  one space only, verbatim grounded quotes at an exact version, two
+  independent sessions or an owner statement, no untrusted source, no
+  secrets, nothing instruction-shaped. A judge model from a different family
+  runs last; a missing, erroring or unsure judge means reject. Verdicts carry
+  codes and indexes only, never text or a matched secret. Pure: no I/O.
 
 ## [0.1.0] — first public release
 

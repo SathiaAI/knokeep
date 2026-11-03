@@ -320,13 +320,13 @@ def recheck(backend, space: str, cid: str) -> str:
     return _update(backend, space, cid, mutate)["status"]
 
 
-def recall(backend, space: str) -> List[Dict]:
-    """The accepted conclusions of ONE space, oldest first, each labelled as
-    derived and carrying its sources. Corrupt or unreadable derived records are
-    skipped: a derived layer must never break reading memory."""
+def list_records(backend, space: str) -> List[Dict]:
+    """Every conclusion record of ONE space, any status, oldest first. Corrupt
+    or unreadable derived records are skipped: a derived layer must never break
+    reading memory."""
     if not isinstance(space, str) or not space.endswith("/") or space == "/":
         raise ConclusionRefused(v.SHAPE)
-    found = []
+    records = []
     for key in backend.list(_prefix(space)):
         name = key[len(_prefix(space)):]
         if not name.endswith(".json"):
@@ -335,27 +335,33 @@ def recall(backend, space: str) -> List[Dict]:
             loaded = _load(backend, space, name[: -len(".json")])
         except ConclusionRefused:
             continue
-        if loaded is None or loaded[0]["status"] != ACCEPTED:
-            continue
-        rec = loaded[0]
-        found.append(
-            {
-                "id": rec["id"],
-                "label": LABEL,
-                "created": rec["created"],
-                "claims": [
-                    {
-                        "text": c["text"],
-                        "sources": [
-                            {"key": ci["key"], "version_hash": ci["version_hash"], "quote": ci["quote"]}
-                            for ci in c["citations"]
-                        ],
-                    }
-                    for c in rec["claims"]
-                ],
-            }
-        )
-    return sorted(found, key=lambda r: (r["created"], r["id"]))
+        if loaded is not None:
+            records.append(loaded[0])
+    return sorted(records, key=lambda r: (r["created"], r["id"]))
+
+
+def recall(backend, space: str) -> List[Dict]:
+    """The accepted conclusions of ONE space, oldest first, each labelled as
+    derived and carrying its sources."""
+    return [
+        {
+            "id": rec["id"],
+            "label": LABEL,
+            "created": rec["created"],
+            "claims": [
+                {
+                    "text": c["text"],
+                    "sources": [
+                        {"key": ci["key"], "version_hash": ci["version_hash"], "quote": ci["quote"]}
+                        for ci in c["citations"]
+                    ],
+                }
+                for c in rec["claims"]
+            ],
+        }
+        for rec in list_records(backend, space)
+        if rec["status"] == ACCEPTED
+    ]
 
 
 def backend_resolver(backend) -> v.Resolve:
@@ -387,6 +393,6 @@ def backend_resolver(backend) -> v.Resolve:
 
 
 __all__ = [
-    "ConclusionRefused", "propose", "promote", "recheck", "recall", "backend_resolver",
+    "ConclusionRefused", "propose", "promote", "recheck", "recall", "list_records", "backend_resolver",
     "PROPOSED", "ACCEPTED", "STALE_STATUS", "SUPERSEDED", "LABEL",
 ]

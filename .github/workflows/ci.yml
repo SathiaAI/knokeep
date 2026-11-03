@@ -32,6 +32,8 @@ env:
     tests/test_conclusions_verify.py
     tests/test_conclusion_store.py
     tests/test_jev_judge.py
+    tests/test_generator.py
+    tests/test_runner.py
   # V1/skill acceptance tests are script-style (run directly, not pytest-collected).
   SKILL_TESTS: >-
     tests/test_v1.py

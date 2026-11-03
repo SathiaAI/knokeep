@@ -37,6 +37,14 @@ All notable changes to KnoKeep are recorded here. Format loosely follows
   another conclusion. `recall()` returns only accepted ones, labelled derived,
   with their sources. `backend_resolver()` finds cited versions through
   version history when the backend keeps it. No gate change needed.
+- **Jev judge** (`conclusions/jev.py`). TypeSafe's Jev as the verifier's
+  judge: two yes/no questions (support, overreach) become true, false or
+  unsure; any error, timeout, malformed answer or spent budget fails closed.
+  Every call, including retries, is counted against a hard call and token
+  `Budget` before it is made. https only; the key is optional (a proxy may
+  inject it), never logged, never in an error or `repr()`. Calibrated live on
+  37 labelled cases (`docs/JEV-JUDGE-EVAL.md`): 0 false accepts, 21 of 21
+  unsupported rejected including 3 prompt-injection attempts.
 
 ## [0.1.0] — first public release
 

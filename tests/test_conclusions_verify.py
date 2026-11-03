@@ -315,3 +315,20 @@ def test_a_scanner_failure_fails_closed_instead_of_raising(monkeypatch):
     verdict = _run(_good())  # must not raise, must not accept
     assert not verdict.accepted and v.SECRET in _codes(verdict)
     assert verdict.secret_labels == ("unscannable",)
+
+
+def test_evidence_must_be_exact_memory_never_another_conclusion():
+    derived_key = "proj/.conclusions/" + "a" * 32 + ".json"
+    DOCS[derived_key] = b'{"status":"accepted","claims":"Postgres is the database for login"}'
+    SESSIONS[derived_key] = "s7"
+    try:
+        c = Conclusion(
+            SPACE,
+            (Claim("Login uses Postgres.", (Citation(derived_key, hashlib.sha256(DOCS[derived_key]).hexdigest(), QUOTE_B), _cit("proj/b.md", QUOTE_B))),),
+            "anthropic",
+        )
+        verdict = _run(c)
+        assert not verdict.accepted and v.CITES_DERIVED in _codes(verdict)
+    finally:
+        DOCS.pop(derived_key)
+        SESSIONS.pop(derived_key)

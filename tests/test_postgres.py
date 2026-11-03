@@ -1229,3 +1229,37 @@ def test_refuses_to_start_when_fuzzy_table_name_collides_with_another_store():
             PostgresBackend(dict(_PG_CONNECT_KWARGS), schema=schema2, table="foo")
     finally:
         other._conformance_teardown()
+
+
+def test_a_conclusion_can_cite_an_older_version_through_history_then_goes_stale(backend):
+    """End to end with version history (contract §10): evidence is an exact
+    version, found through history even after the entry has moved on; once the
+    quoted text is gone from the CURRENT entry the conclusion goes stale."""
+    from conclusions import store as cs
+    from conclusions.verify import Citation, Claim, SourceInfo
+
+    qa, qb = "chose Postgres for the login service", "Postgres is the database for login"
+    ha = _put(backend, "proj/a.md", f"We {qa} because of row level security.".encode()).new_hash
+    hb = _put(backend, "proj/b.md", f"Decision recorded: {qb}, per the design review.".encode()).new_hash
+    claims = (Claim("The login service uses Postgres.", (Citation("proj/a.md", ha, qa), Citation("proj/b.md", hb, qb))),)
+
+    # a.md moves on BEFORE the conclusion is verified: the cited version is old.
+    _put(backend, "proj/a.md", b"Rewritten completely.", ha)
+    assert backend.read("proj/a.md").version_hash != ha
+
+    sessions = {"proj/a.md": "s1", "proj/b.md": "s2"}
+    cid = cs.propose(backend, "proj/", claims, "anthropic")
+    verdict = cs.promote(
+        backend, "proj/", cid,
+        resolve=cs.backend_resolver(backend),
+        source_info=lambda k: SourceInfo(session_id=sessions[k]),
+        judge=lambda text, quotes: True, judge_family="openai",
+    )
+    assert verdict.accepted  # grounded at the exact old version, via history
+    assert [r["id"] for r in cs.recall(backend, "proj/")] == [cid]
+
+    # The CURRENT a.md no longer contains the quote, so it is stale.
+    assert cs.recheck(backend, "proj/", cid) == cs.STALE_STATUS
+    assert cs.recall(backend, "proj/") == []
+    # Exact memory was never touched by any of this.
+    assert backend.read("proj/b.md").version_hash == hb

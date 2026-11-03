@@ -27,6 +27,16 @@ All notable changes to KnoKeep are recorded here. Format loosely follows
   secrets, nothing instruction-shaped. A judge model from a different family
   runs last; a missing, erroring or unsure judge means reject. Verdicts carry
   codes and indexes only, never text or a matched secret. Pure: no I/O.
+- **Conclusion store** (`conclusions/store.py`). Where conclusions live and
+  how they move: `proposed` -> `accepted` (only when the verifier passes) ->
+  `stale` (evidence gone) or `superseded` (a newer one accepted). One record
+  per conclusion under a reserved `.conclusions/` segment of its own space,
+  written through the one gate (so a secret is refused, not stored) as an
+  ordinary hash-CAS document, with compare-and-swap status updates. Nothing is
+  deleted and exact entries are never touched. A conclusion cannot cite
+  another conclusion. `recall()` returns only accepted ones, labelled derived,
+  with their sources. `backend_resolver()` finds cited versions through
+  version history when the backend keeps it. No gate change needed.
 
 ## [0.1.0] — first public release
 

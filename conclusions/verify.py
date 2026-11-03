@@ -21,7 +21,8 @@ Safety properties, each covered by tests:
   * A conclusion is informational. Text shaped like an instruction to an agent
     (or a request for access) is refused (heuristic, deliberately cheap).
   * It stays inside ONE space: every cited key sits under the conclusion's
-    space prefix.
+    space prefix, and none sits under the derived `.conclusions/` segment
+    (evidence is exact memory only).
   * It is grounded: each citation names an exact version and quotes it
     verbatim; a tiny or missing quote does not count.
   * It is corroborated: supported by two independent sessions, or by an owner
@@ -49,9 +50,15 @@ MAX_CITATIONS_PER_CLAIM = 10
 MIN_QUOTE_CHARS = 12
 MAX_QUOTE_CHARS = 1000
 
+# Derived conclusions live under this segment of a space. Evidence must be
+# EXACT memory, so a citation into it is refused: otherwise derived text could
+# launder itself into "evidence" for further derived text.
+DERIVED_SEGMENT = ".conclusions/"
+
 # --- failure codes (closed vocabulary) --------------------------------------
 SHAPE = "SHAPE"
 CROSS_SPACE = "CROSS_SPACE"
+CITES_DERIVED = "CITES_DERIVED"
 UNGROUNDED = "UNGROUNDED"
 SECRET = "SECRET"
 INSTRUCTION_SHAPED = "INSTRUCTION_SHAPED"
@@ -215,6 +222,10 @@ def verify(
             if not cit.key.startswith(conclusion.space):
                 failures.append(Failure(CROSS_SPACE, i))
                 continue
+            # -- evidence must be exact memory, never another conclusion ------
+            if cit.key.startswith(conclusion.space + DERIVED_SEGMENT):
+                failures.append(Failure(CITES_DERIVED, i))
+                continue
             # -- grounded: exact version exists and contains the quote verbatim
             raw = resolve(cit.key, cit.version_hash)
             if raw is None:
@@ -278,8 +289,8 @@ def verify(
 
 __all__ = [
     "Citation", "Claim", "Conclusion", "SourceInfo", "Failure", "Verdict",
-    "verify",
-    "SHAPE", "CROSS_SPACE", "UNGROUNDED", "SECRET", "INSTRUCTION_SHAPED",
+    "verify", "DERIVED_SEGMENT",
+    "SHAPE", "CROSS_SPACE", "CITES_DERIVED", "UNGROUNDED", "SECRET", "INSTRUCTION_SHAPED",
     "NOT_CORROBORATED", "TAINTED", "NO_JUDGE", "JUDGE_NOT_INDEPENDENT",
     "JUDGE_ERROR", "NOT_ENTAILED",
 ]

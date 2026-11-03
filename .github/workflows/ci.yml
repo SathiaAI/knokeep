@@ -30,6 +30,7 @@ env:
     tests/test_reconciler_no_write_path.py
     tests/test_reconciler_secret_quarantine.py
     tests/test_conclusions_verify.py
+    tests/test_conclusion_store.py
   # V1/skill acceptance tests are script-style (run directly, not pytest-collected).
   SKILL_TESTS: >-
     tests/test_v1.py
